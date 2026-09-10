@@ -89,7 +89,7 @@
 - Consumes: なし
 - Produces: 後続の全タスクが依存する。
   - `src/shared/types.ts`: `ClipRange` `VideoMeta` `DegradedReason` `FailureReason` `ClipState` `ClipEvent`
-  - `src/shared/messages.ts`: `Message`
+  - `src/shared/messages.ts`: `Message` (拡張のメッセージは JSON 化されるため `ArrayBuffer` を載せない)
   - `src/shared/time.ts`: `MAX_CLIP_SEC` `MIN_CLIP_SEC` `formatTime(totalSec: number): string` `toUrlSeconds(sec: number): number` `validateRange(startSec: number, endSec: number): RangeValidation`
 
 - [ ] **Step 1: 依存関係とビルド設定を作る**
@@ -328,7 +328,12 @@ export type ClipEvent =
 `src/shared/messages.ts`:
 
 ```typescript
-import type { ClipEvent, ClipState } from "@/shared/types";
+import type {
+  ClipEvent,
+  ClipRange,
+  ClipState,
+  VideoMeta,
+} from "@/shared/types";
 
 /** chrome.runtime を流れるメッセージ。両端がこの型だけを知る */
 export type Message =
@@ -338,22 +343,39 @@ export type Message =
   | { type: "state/changed"; state: ClipState }
   /** content / popup → sw: 状態機械へのイベント投入 */
   | { type: "clip/event"; event: ClipEvent }
-  /** sw → offscreen: 録画開始。使用する形式は offscreen 側が判定する */
-  | { type: "recorder/start"; streamId: string }
+  /**
+   * sw → offscreen: 録画開始。使用する形式は offscreen 側が判定する。
+   *
+   * 保存に必要な情報を一緒に渡すのは、録画データを offscreen から直接
+   * IndexedDB へ書くため。拡張のメッセージは JSON 化されるので ArrayBuffer を
+   * そのまま載せると中身が失われる (`{}` になる)。
+   */
+  | {
+      type: "recorder/start";
+      streamId: string;
+      clipId: string;
+      range: ClipRange;
+      meta: VideoMeta;
+    }
   /** sw → offscreen: 録画停止 */
   | { type: "recorder/stop" }
   /** offscreen → sw: 録画が実際に始まった。これを待ってから再生を再開させる */
   | { type: "recorder/started" }
-  /** offscreen → sw: 録画結果 */
-  | { type: "recorder/done"; buffer: ArrayBuffer; mimeType: string }
+  /** offscreen → sw: 録画を保存し終えた。データ本体は IndexedDB にある */
+  | { type: "recorder/done"; clipId: string; mimeType: string }
   /** offscreen → sw: 録画中の失敗 */
   | { type: "recorder/failed"; reason: string }
   /** content(x) → sw: 投稿画面の準備完了 */
   | { type: "x/ready" }
-  /** sw → content(x): 添付する動画と本文 */
+  /**
+   * sw → content(x): 添付する動画と本文。
+   *
+   * 動画は base64 で運ぶ。content script は拡張の IndexedDB を読めず、
+   * かつ拡張のメッセージは JSON 化されるため ArrayBuffer を載せられない。
+   */
   | {
       type: "x/payload";
-      buffer: ArrayBuffer;
+      base64: string;
       mimeType: string;
       fileName: string;
       text: string;
@@ -363,8 +385,12 @@ export type Message =
   /** content(x) → sw: 添付失敗 (DOM 変更など) */
   | { type: "x/failed"; reason: string };
 
-/** sw が返す応答。state/get のみ状態を返し、他は受領確認のみ */
-export type MessageResponse = { state: ClipState } | { ok: true };
+/**
+ * sw が返す応答。**常に最新の状態を返す。**
+ * 受け付けられなかった操作では状態が変わらず `state/changed` も飛ばないため、
+ * 送り手が結果を知る手段がこれしかない。
+ */
+export type MessageResponse = { state: ClipState };
 ```
 
 実行: `npx tsc --noEmit`
@@ -1315,6 +1341,7 @@ git -C . commit -m "feat: クリップの IndexedDB 保管を追加
 
 **Files:**
 - Create: `src/offscreen/codec.ts`, `src/offscreen/recorder.ts`, `src/offscreen/offscreen.html`, `src/offscreen/main.ts`
+- 参照のみ: `src/background/storage.ts` (Task 4。offscreen も拡張ページなので同じ IndexedDB に書ける)
 - Test: `tests/offscreen/codec.test.ts`
 
 **Interfaces:**
@@ -1563,14 +1590,19 @@ export async function startRecording(
 `src/offscreen/main.ts`:
 
 ```typescript
+import { saveClip } from "@/background/storage";
 import { pickMimeType } from "@/offscreen/codec";
 import { startRecording, type RecorderHandle } from "@/offscreen/recorder";
 import type { Message } from "@/shared/messages";
+import type { ClipRange, VideoMeta } from "@/shared/types";
 
 let handle: RecorderHandle | null = null;
+/** 録画中のクリップの保存先。recorder/start で受け取る */
+let pending: { clipId: string; range: ClipRange; meta: VideoMeta } | null = null;
 
 function fail(reason: string): void {
   handle = null;
+  pending = null;
   void chrome.runtime.sendMessage({
     type: "recorder/failed",
     reason,
@@ -1587,6 +1619,11 @@ chrome.runtime.onMessage.addListener((message: Message) => {
       fail(String(error));
       return;
     }
+    pending = {
+      clipId: message.clipId,
+      range: message.range,
+      meta: message.meta,
+    };
     startRecording(message.streamId, mimeType, {
       // 録画が途中で死んだ場合、stop() を待たずに sw へ知らせる
       onUnexpectedStop: (error) => fail(error.message),
@@ -1608,14 +1645,31 @@ chrome.runtime.onMessage.addListener((message: Message) => {
       return;
     }
     const stopping = handle;
+    const target = pending;
     handle = null;
+    pending = null;
+
+    if (target === null) {
+      fail("保存先が分かりません");
+      return;
+    }
+
     stopping
       .stop()
       .then(async (blob) => {
-        const buffer = await blob.arrayBuffer();
+        // ここで直接 IndexedDB に書く。拡張のメッセージは JSON 化されるため、
+        // 録画データを service worker へ渡すことはできない
+        await saveClip({
+          id: target.clipId,
+          blob,
+          mimeType: blob.type,
+          range: target.range,
+          meta: target.meta,
+          createdAt: Date.now(),
+        });
         void chrome.runtime.sendMessage({
           type: "recorder/done",
-          buffer,
+          clipId: target.clipId,
           mimeType: blob.type,
         } satisfies Message);
       })
@@ -2533,6 +2587,16 @@ export function insertText(editor: HTMLElement, text: string): void {
   }
 }
 
+/** service worker から base64 で届いた動画を復元する */
+export function decodeBase64(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
 function notify(message: Message): void {
   void chrome.runtime.sendMessage(message);
 }
@@ -2545,7 +2609,7 @@ chrome.runtime.onMessage.addListener((message: Message) => {
       const input = await waitForElement<HTMLInputElement>(
         X_SELECTORS.fileInput,
       );
-      const file = new File([message.buffer], message.fileName, {
+      const file = new File([decodeBase64(message.base64)], message.fileName, {
         type: message.mimeType,
       });
       attachFile(input, file);
@@ -2839,6 +2903,8 @@ type Harness = {
   sentToTab: Array<{ tabId: number; message: Message }>;
   saved: StoredClip[];
   deps: RouterDeps;
+  /** 登録済みのタイマーをまとめて発火させる */
+  fireTimers: () => void;
 };
 
 function makeHarness(
@@ -2848,6 +2914,8 @@ function makeHarness(
   const sentToRuntime: Message[] = [];
   const sentToTab: Array<{ tabId: number; message: Message }> = [];
   const saved: StoredClip[] = [];
+  /** startTimer で登録された処理。テストから任意に発火させる */
+  const timers: Array<() => void> = [];
 
   const deps: RouterDeps = {
     ensureOffscreen: vi.fn(async () => undefined),
@@ -2869,10 +2937,28 @@ function makeHarness(
     loadTemplate: async () => "{title}\n\n{url}",
     now: () => Date.UTC(2026, 8, 10, 3, 0, 0),
     persist: async () => undefined,
+    startTimer: (_ms, onFire) => {
+      timers.push(onFire);
+      return () => {
+        const index = timers.indexOf(onFire);
+        if (index >= 0) timers.splice(index, 1);
+      };
+    },
     ...overrides,
   };
 
-  return { router: createRouter(deps), sentToRuntime, sentToTab, saved, deps };
+  return {
+    router: createRouter(deps),
+    sentToRuntime,
+    sentToTab,
+    saved,
+    deps,
+    fireTimers: () => {
+      const pending = [...timers];
+      timers.length = 0;
+      for (const onFire of pending) onFire();
+    },
+  };
 }
 
 /** IN/OUT を打って録画直前まで進める */
@@ -2958,6 +3044,65 @@ describe("録画の開始", () => {
   });
 });
 
+describe("投稿画面が用意できないとき", () => {
+  const clip: StoredClip = {
+    id: "clip-1",
+    blob: new Blob(["動画データ"], { type: "video/mp4" }),
+    mimeType: "video/mp4",
+    range,
+    meta,
+    createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
+  };
+
+  async function reachComposing(h: Harness): Promise<void> {
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+  }
+
+  test("準備完了が来ないまま時間切れになったらダウンロードへ退避する", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+
+    // X に未ログインだと投稿画面ではなくログイン画面が開き、
+    // 準備完了は永久に来ない。待ち続けると composing から抜けられなくなる
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState()).toMatchObject({
+      kind: "downloadable",
+      reason: "x-attach-failed",
+      clipId: "clip-1",
+    });
+  });
+
+  test("準備完了が届いたら時間切れにしない", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    // 送信済みならタイマーは取り消されている
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState().kind).toBe("composing");
+  });
+});
+
 describe("受け付けられないメッセージで状態を壊さない", () => {
   const clip: StoredClip = {
     id: "clip-1",
@@ -2983,7 +3128,7 @@ describe("受け付けられないメッセージで状態を壊さない", () =
     });
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/mp4",
     });
     await h.router.handle({ type: "clip/event", event: { type: "POST" } });
@@ -3050,6 +3195,39 @@ describe("受け付けられないメッセージで状態を壊さない", () =
     // 録画対象タブを奪われると offscreen の録画が解放されないまま取り残される
     expect(h.router.getState().kind).toBe("recording");
     expect(h.sentToTab.every((sent) => sent.tabId === 7)).toBe(true);
+  });
+});
+
+describe("想定できない失敗を握り潰さない", () => {
+  test("副作用が例外を投げたら失敗として提示する", async () => {
+    const h = makeHarness({
+      openComposeTab: async () => {
+        throw new Error("タブを開けません");
+      },
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+
+    // 黙って止まると、状態が途中のままユーザーには何も伝わらない
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "internal-error",
+    });
   });
 });
 
@@ -3122,39 +3300,59 @@ describe("録画の終了と保存", () => {
     expect(h.sentToRuntime).toContainEqual({ type: "recorder/stop" });
   });
 
-  test("MP4 を受け取ったら保存して preview へ進む", async () => {
+  test("録画の完了を受けたら preview へ進む", async () => {
     const h = makeHarness();
     await recordUntilEncoding(h);
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/mp4",
     });
 
-    expect(h.saved).toHaveLength(1);
-    expect(h.saved[0]).toMatchObject({
+    expect(h.router.getState()).toMatchObject({
+      kind: "preview",
+      clipId: "clip-1",
       mimeType: "video/mp4",
-      range,
-      meta,
-      createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
     });
-    expect(h.router.getState()).toMatchObject({ kind: "preview" });
   });
 
-  test("WebM を受け取ったら保存した上で downloadable へ退避する", async () => {
+  test("保存先を先に決めて offscreen へ渡す", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+
+    // 録画データは拡張のメッセージに載せられないので、offscreen が直接
+    // IndexedDB へ書く。そのために必要な情報を開始時に渡しておく
+    const start = h.sentToRuntime.find(
+      (message) => message.type === "recorder/start",
+    );
+    expect(start).toMatchObject({
+      type: "recorder/start",
+      streamId: "stream-abc",
+      range,
+      meta,
+    });
+    expect(start && "clipId" in start && start.clipId).toBeTruthy();
+  });
+
+  test("WebM を受け取ったら downloadable へ退避する", async () => {
     const h = makeHarness();
     await recordUntilEncoding(h);
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/webm",
     });
 
     // 録画は成功しているので成果物は捨てない
-    expect(h.saved).toHaveLength(1);
     expect(h.router.getState()).toMatchObject({
       kind: "downloadable",
       reason: "mp4-unsupported",
+      clipId: "clip-1",
     });
   });
 
@@ -3197,7 +3395,7 @@ describe("X への受け渡し", () => {
     });
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/mp4",
     });
     await h.router.handle({ type: "clip/event", event: { type: "POST" } });
@@ -3276,7 +3474,16 @@ export type RouterDeps = {
   /** UTC epoch ミリ秒 */
   now(): number;
   persist(snapshot: RouterSnapshot): Promise<void>;
+  /** 指定時間後に呼び出す。戻り値を呼ぶと取り消す */
+  startTimer(ms: number, onFire: () => void): () => void;
 };
+
+/**
+ * 投稿画面の準備を待つ上限。
+ * X に未ログインだと投稿画面ではなくログイン画面が開き、content script が
+ * 準備完了を送ってこない。待ち続けると composing から抜けられなくなる。
+ */
+const COMPOSE_READY_TIMEOUT_MS = 30_000;
 
 /** service worker が停止しても復元できるよう保存する内容 */
 export type RouterSnapshot = {
@@ -3305,6 +3512,8 @@ export function createRouter(
   let captureTabId: number | null = initial?.captureTabId ?? null;
   let composeTabId: number | null = initial?.composeTabId ?? null;
   let streamId: string | null = null;
+  /** 投稿画面の準備待ちを打ち切るためのハンドル */
+  let cancelComposeTimeout: (() => void) | null = null;
 
   /** 新しい状態を確定させ、関係者へ通知する */
   async function publish(next: ClipState): Promise<void> {
@@ -3392,28 +3601,27 @@ export function createRouter(
       await fail("capture-permission-denied");
       return;
     }
-    deps.sendToRuntime({ type: "recorder/start", streamId });
+
+    // 保存先を先に決めて offscreen へ渡す。録画データは offscreen が直接
+    // IndexedDB へ書く (拡張のメッセージには載せられないため)
+    deps.sendToRuntime({
+      type: "recorder/start",
+      streamId,
+      clipId: `clip-${deps.now()}`,
+      range: state.range,
+      meta: state.meta,
+    });
     streamId = null;
   }
 
+  /**
+   * 録画の完了を受け取る。データは offscreen が既に保存済みで、ここでは
+   * 状態を進めるだけ。保存済みのものを状態の都合で捨ててはいけない。
+   */
   async function storeRecording(
-    buffer: ArrayBuffer,
+    clipId: string,
     mimeType: string,
   ): Promise<void> {
-    if (state.kind !== "encoding") {
-      await fail("recording-aborted");
-      return;
-    }
-
-    const clipId = `clip-${deps.now()}`;
-    await deps.saveClip({
-      id: clipId,
-      blob: new Blob([buffer], { type: mimeType }),
-      mimeType,
-      range: state.range,
-      meta: state.meta,
-      createdAt: deps.now(),
-    });
     await apply({ type: "BLOB_READY", clipId, mimeType });
 
     // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない
@@ -3422,14 +3630,27 @@ export function createRouter(
     }
   }
 
+  /** content script へ渡せるよう base64 にする。大きすぎる文字列連結を避けて分割する */
+  function toBase64(bytes: Uint8Array): string {
+    const CHUNK = 0x8000;
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+    }
+    return btoa(binary);
+  }
+
   async function sendPayload(): Promise<void> {
     if (state.kind !== "composing" || composeTabId === null) return;
+
+    cancelComposeTimeout?.();
+    cancelComposeTimeout = null;
 
     const clip = await deps.getClip(state.clipId);
     const template = await deps.loadTemplate();
     deps.sendToTab(composeTabId, {
       type: "x/payload",
-      buffer: await clip.blob.arrayBuffer(),
+      base64: toBase64(new Uint8Array(await clip.blob.arrayBuffer())),
       mimeType: clip.mimeType,
       fileName: buildClipFileName(
         clip.meta.videoId,
@@ -3482,39 +3703,78 @@ export function createRouter(
     }
     if (state.kind === "composing") {
       composeTabId = await deps.openComposeTab();
+
+      // 投稿画面が用意できないまま待ち続けると composing から抜けられなくなる。
+      // X に未ログインだとログイン画面が開き、準備完了は永久に来ない
+      cancelComposeTimeout?.();
+      cancelComposeTimeout = deps.startTimer(COMPOSE_READY_TIMEOUT_MS, () => {
+        cancelComposeTimeout = null;
+        void apply({ type: "DEGRADE", reason: "x-attach-failed" });
+      });
     }
   }
+
+  async function route(
+    message: Message,
+    senderTabId?: number,
+  ): Promise<void> {
+    switch (message.type) {
+      case "clip/event":
+        await handleEvent(message.event, senderTabId);
+        return;
+      case "recorder/started":
+        await apply({ type: "SEEK_DONE" });
+        return;
+      case "recorder/done":
+        await storeRecording(message.clipId, message.mimeType);
+        return;
+      case "recorder/failed":
+        // 理由を捨てると、どの段階で録画が壊れたのかが後から追えない
+        console.error("録画に失敗しました", message.reason);
+        await fail("recording-aborted");
+        return;
+      case "x/ready":
+        await sendPayload();
+        return;
+      case "x/attached":
+        cancelComposeTimeout?.();
+        cancelComposeTimeout = null;
+        await apply({ type: "ATTACHED" });
+        return;
+      case "x/failed":
+        cancelComposeTimeout?.();
+        cancelComposeTimeout = null;
+        console.error("X への添付に失敗しました", message.reason);
+        await apply({ type: "DEGRADE", reason: "x-attach-failed" });
+        return;
+      default:
+        // state/get と state/changed は router の処理対象外
+        return;
+    }
+  }
+
+  /**
+   * 処理中の連鎖。メッセージは 1 つずつ順に処理する。
+   * 保存など時間のかかる副作用の最中に別のメッセージが状態を進めると、
+   * 戻ってきたときの遷移が拒まれて録画済みクリップへの参照を失う。
+   */
+  let queue: Promise<void> = Promise.resolve();
 
   return {
     getState: () => state,
 
-    async handle(message: Message, senderTabId?: number): Promise<void> {
-      switch (message.type) {
-        case "clip/event":
-          await handleEvent(message.event, senderTabId);
-          return;
-        case "recorder/started":
-          await apply({ type: "SEEK_DONE" });
-          return;
-        case "recorder/done":
-          await storeRecording(message.buffer, message.mimeType);
-          return;
-        case "recorder/failed":
-          await fail("recording-aborted");
-          return;
-        case "x/ready":
-          await sendPayload();
-          return;
-        case "x/attached":
-          await apply({ type: "ATTACHED" });
-          return;
-        case "x/failed":
-          await apply({ type: "DEGRADE", reason: "x-attach-failed" });
-          return;
-        default:
-          // state/get と state/changed は router の処理対象外
-          return;
-      }
+    handle(message: Message, senderTabId?: number): Promise<void> {
+      queue = queue.then(async () => {
+        try {
+          await route(message, senderTabId);
+        } catch (error) {
+          // 想定できていない失敗。黙って止まると、状態が途中のまま
+          // ユーザーには何も伝わらない
+          console.error("メッセージの処理に失敗しました", message.type, error);
+          await fail("internal-error").catch(() => undefined);
+        }
+      });
+      return queue;
     },
   };
 }
@@ -3577,6 +3837,10 @@ const ready = loadSnapshot().then((snapshot) =>
       persist: async (snapshot) => {
         await chrome.storage.session.set({ [SESSION_KEY]: snapshot });
       },
+      startTimer: (ms, onFire) => {
+        const id = setTimeout(onFire, ms);
+        return () => clearTimeout(id);
+      },
     },
     snapshot,
   ),
@@ -3584,12 +3848,12 @@ const ready = loadSnapshot().then((snapshot) =>
 
 chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
   void ready.then(async (router) => {
-    if (message.type === "state/get") {
-      sendResponse({ state: router.getState() });
-      return;
+    if (message.type !== "state/get") {
+      await router.handle(message, sender.tab?.id);
     }
-    await router.handle(message, sender.tab?.id);
-    sendResponse({ ok: true });
+    // 常に最新の状態を返す。受け付けられなかった操作では状態が変わらず
+    // state/changed も飛ばないため、送り手が結果を知る手段がこれしかない
+    sendResponse({ state: router.getState() });
   });
   // 応答が非同期であることを Chrome に伝える
   return true;
@@ -4058,6 +4322,9 @@ function setActionsDisabled(disabled: boolean): void {
 function send(event: ClipEvent): void {
   chrome.runtime
     .sendMessage({ type: "clip/event", event } satisfies Message)
+    // 応答には必ず最新の状態が入っている。受け付けられなかった操作でも
+    // これで画面が戻るので、ボタンが無効のまま取り残されない
+    .then((response: MessageResponse) => render(response.state))
     .catch(showError);
 }
 
@@ -4228,11 +4495,7 @@ chrome.runtime.onMessage.addListener((message: Message) => {
 
 chrome.runtime
   .sendMessage({ type: "state/get" } satisfies Message)
-  .then((response: MessageResponse) => {
-    if ("state" in response) {
-      render(response.state);
-    }
-  })
+  .then((response: MessageResponse) => render(response.state))
   .catch(showError);
 ```
 
