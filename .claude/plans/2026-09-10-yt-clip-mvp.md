@@ -3411,11 +3411,11 @@ export function createRouter(
       meta: state.meta,
       createdAt: deps.now(),
     });
-    await commit({ type: "BLOB_READY", clipId, mimeType });
+    await apply({ type: "BLOB_READY", clipId, mimeType });
 
     // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない
     if (!mimeType.includes("mp4")) {
-      await commit({ type: "DEGRADE", reason: "mp4-unsupported" });
+      await apply({ type: "DEGRADE", reason: "mp4-unsupported" });
     }
   }
 
