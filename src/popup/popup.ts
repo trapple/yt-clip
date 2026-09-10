@@ -24,22 +24,92 @@ const ACTION_EVENTS: Record<Exclude<PopupAction, "download">, ClipEvent> = {
 const messageElement = document.getElementById("message") as HTMLElement;
 const previewElement = document.getElementById("preview") as HTMLVideoElement;
 const actionsElement = document.getElementById("actions") as HTMLElement;
+const progressArea = document.getElementById("progress-area") as HTMLElement;
+const progressElement = document.getElementById(
+  "progress",
+) as HTMLProgressElement;
+const remainElement = document.getElementById("remain") as HTMLElement;
 
 /** プレビュー用に発行した blob URL。差し替え・非表示時に解放する */
 let previewUrl: string | null = null;
+/** 残り時間を数えるタイマー。render の呼び出しごとに stopCountdown で必ず止めてから張り直す */
+let countdownTimer: number | null = null;
 
-function send(event: ClipEvent): void {
-  void chrome.runtime.sendMessage({
-    type: "clip/event",
-    event,
-  } satisfies Message);
+/** 失敗を画面に出し、操作をやり直せる状態に戻す */
+function showError(error: unknown): void {
+  messageElement.textContent = `操作できませんでした: ${String(error)}`;
+  setActionsDisabled(false);
 }
 
-function releasePreviewUrl(): void {
-  if (previewUrl !== null) {
-    URL.revokeObjectURL(previewUrl);
-    previewUrl = null;
+function setActionsDisabled(disabled: boolean): void {
+  for (const button of actionsElement.querySelectorAll("button")) {
+    button.disabled = disabled;
   }
+}
+
+function send(event: ClipEvent): void {
+  chrome.runtime
+    .sendMessage({ type: "clip/event", event } satisfies Message)
+    .catch(showError);
+}
+
+function stopCountdown(): void {
+  if (countdownTimer !== null) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+  progressArea.hidden = true;
+}
+
+/**
+ * 録画の残り時間を数える。
+ * 状態機械は録画の開始時刻を持たないため、popup がこの画面を開いてからの
+ * 経過で数える。閉じて開き直すと数え直しになるが、録画は最長 60 秒なので
+ * 「進んでいることが分かる」という目的には足りる。
+ *
+ * render のたびに呼ばれるが、先頭で stopCountdown() しているため
+ * setInterval が多重に走ることはない。popup がページごと破棄されれば
+ * タイマーも自動的に消える。
+ */
+function startCountdown(totalSec: number): void {
+  stopCountdown();
+
+  const endsAt = Date.now() + totalSec * 1000;
+  progressElement.max = totalSec;
+  progressArea.hidden = false;
+
+  const tick = (): void => {
+    const remainSec = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+    progressElement.value = totalSec - remainSec;
+    remainElement.textContent = `残り ${remainSec} 秒`;
+    if (remainSec === 0) {
+      stopCountdown();
+    }
+  };
+
+  tick();
+  countdownTimer = window.setInterval(tick, 1000);
+}
+
+/** ダウンロードの完了を待つ。保存ダイアログを開いたまま放置されても固まらないよう打ち切る */
+function waitForDownload(id: number, timeoutMs = 300_000): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      resolve();
+    };
+    const onChanged = (delta: chrome.downloads.DownloadDelta): void => {
+      if (delta.id !== id) return;
+      const next = delta.state?.current;
+      if (next === "complete" || next === "interrupted") {
+        finish();
+      }
+    };
+    const timer = setTimeout(finish, timeoutMs);
+
+    chrome.downloads.onChanged.addListener(onChanged);
+  });
 }
 
 async function download(state: ClipState): Promise<void> {
@@ -48,7 +118,7 @@ async function download(state: ClipState): Promise<void> {
   const clip = await getClip(state.clipId);
   const url = URL.createObjectURL(clip.blob);
   try {
-    await chrome.downloads.download({
+    const downloadId = await chrome.downloads.download({
       url,
       filename: buildClipFileName(
         clip.meta.videoId,
@@ -57,9 +127,20 @@ async function download(state: ClipState): Promise<void> {
       ),
       saveAs: true,
     });
+    // 保存ダイアログを開いている間はまだ実データが読まれていないため、
+    // ここで解放するとダウンロードが壊れる。完了を待ってから解放する
+    await waitForDownload(downloadId);
   } finally {
-    // ダウンロード用 URL はプレビューとは別物なので、使い終えたら即解放する
     URL.revokeObjectURL(url);
+  }
+}
+
+function hidePreview(): void {
+  previewElement.hidden = true;
+  previewElement.removeAttribute("src");
+  if (previewUrl !== null) {
+    URL.revokeObjectURL(previewUrl);
+    previewUrl = null;
   }
 }
 
@@ -72,12 +153,14 @@ async function showPreview(state: ClipState): Promise<void> {
       : null;
 
   if (clipId === null) {
-    previewElement.hidden = true;
+    hidePreview();
     return;
   }
 
   const clip = await getClip(clipId);
-  releasePreviewUrl();
+  if (previewUrl !== null) {
+    URL.revokeObjectURL(previewUrl);
+  }
   previewUrl = URL.createObjectURL(clip.blob);
   previewElement.src = previewUrl;
   previewElement.hidden = false;
@@ -93,26 +176,33 @@ function render(state: ClipState): void {
       button.textContent = ACTION_LABELS[action];
       button.disabled = view.busy;
       button.addEventListener("click", () => {
-        // 二重送信防止: クリックした瞬間にこの render 内のボタンを全て無効化する。
-        // 実際の状態遷移は service worker からの state/changed 通知で反映される
-        for (const el of actionsElement.querySelectorAll("button")) {
-          el.disabled = true;
-        }
+        setActionsDisabled(true);
+
+        // download は ClipEvent を送らないため state/changed が届かない。
+        // 自分で操作可能へ戻さないとボタンが押せないままになる
         if (action === "download") {
-          void download(state);
+          void download(state)
+            .then(() => setActionsDisabled(false))
+            .catch(showError);
           return;
         }
+
         send(ACTION_EVENTS[action]);
       });
       return button;
     }),
   );
 
-  if (view.showPreview) {
-    void showPreview(state);
+  if (view.recordingSec !== null) {
+    startCountdown(view.recordingSec);
   } else {
-    releasePreviewUrl();
-    previewElement.hidden = true;
+    stopCountdown();
+  }
+
+  if (view.showPreview) {
+    void showPreview(state).catch(showError);
+  } else {
+    hidePreview();
   }
 }
 
@@ -122,10 +212,11 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   }
 });
 
-void chrome.runtime
+chrome.runtime
   .sendMessage({ type: "state/get" } satisfies Message)
   .then((response: MessageResponse) => {
     if ("state" in response) {
       render(response.state);
     }
-  });
+  })
+  .catch(showError);

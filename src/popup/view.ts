@@ -16,6 +16,12 @@ export type PopupView = {
   busy: boolean;
   /** 録画済みクリップの再生欄を出すか */
   showPreview: boolean;
+  /**
+   * 録画中のみ、クリップの長さ (秒)。
+   * 残り時間の表示は popup が自分で数える。状態機械は録画の開始時刻を
+   * 持たないため、ここで返せるのは長さだけ。
+   */
+  recordingSec: number | null;
 };
 
 const FAILURE_MESSAGES: Record<FailureReason, string> = {
@@ -47,6 +53,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "marking":
@@ -55,6 +62,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "ready":
@@ -63,6 +71,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["record", "reset"],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "seeking":
@@ -71,15 +80,17 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: true,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "recording":
-      // 録画は実時間かかるため、待ち時間を明示する
+      // 録画は実時間かかるため、残り時間を popup 側で数えて見せる
       return {
-        message: `録画中… 残り ${durationOf(state.range.startSec, state.range.endSec)} 秒`,
+        message: "録画中…",
         actions: [],
         busy: true,
         showPreview: false,
+        recordingSec: durationOf(state.range.startSec, state.range.endSec),
       };
 
     case "encoding":
@@ -88,6 +99,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: true,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "preview":
@@ -96,6 +108,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["post", "retake"],
         busy: false,
         showPreview: true,
+        recordingSec: null,
       };
 
     case "composing":
@@ -104,6 +117,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: false,
         showPreview: true,
+        recordingSec: null,
       };
 
     case "downloadable":
@@ -112,6 +126,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["download", "retake"],
         busy: false,
         showPreview: true,
+        recordingSec: null,
       };
 
     case "failed":
@@ -120,6 +135,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["retry"],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
   }
 }

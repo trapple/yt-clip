@@ -33,10 +33,21 @@ describe("録画中", () => {
     expect(view.actions).toEqual([]);
   });
 
-  test("recording は実時間かかることを伝える", () => {
+  test("recording はクリップの長さを返し popup が残りを数える", () => {
     const view = describeState({ kind: "recording", range, meta });
-    expect(view.message).toBe("録画中… 残り 30 秒");
+    expect(view.message).toBe("録画中…");
     expect(view.busy).toBe(true);
+    expect(view.recordingSec).toBe(30);
+  });
+
+  test("録画中以外は残り時間を数えない", () => {
+    expect(describeState({ kind: "idle" }).recordingSec).toBeNull();
+    expect(
+      describeState({ kind: "seeking", range, meta }).recordingSec,
+    ).toBeNull();
+    expect(
+      describeState({ kind: "encoding", range, meta }).recordingSec,
+    ).toBeNull();
   });
 
   test("encoding は書き出し中として扱う", () => {

@@ -15,6 +15,15 @@
         margin-bottom: 10px;
         line-height: 1.5;
       }
+      #progress-area {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      #progress {
+        flex: 1;
+      }
       #preview {
         width: 100%;
         margin-bottom: 10px;
@@ -37,6 +46,10 @@
   </head>
   <body>
     <p id="message"></p>
+    <div id="progress-area" hidden>
+      <progress id="progress" value="0" max="1"></progress>
+      <span id="remain"></span>
+    </div>
     <video id="preview" controls hidden></video>
     <div id="actions"></div>
     <script type="module" src="./popup.ts"></script>
