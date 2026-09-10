@@ -2588,7 +2588,7 @@ export function insertText(editor: HTMLElement, text: string): void {
 }
 
 /** service worker から base64 で届いた動画を復元する */
-export function decodeBase64(base64: string): Uint8Array {
+export function decodeBase64(base64: string): Uint8Array<ArrayBuffer> {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
@@ -3330,12 +3330,15 @@ describe("録画の終了と保存", () => {
     const start = h.sentToRuntime.find(
       (message) => message.type === "recorder/start",
     );
-    expect(start).toMatchObject({
-      type: "recorder/start",
-      streamId: "stream-abc",
-      range,
-      meta,
-    });
+    // clipId は実行のたびに変わるので、それ以外が揃っていることを見る
+    expect(start).toEqual(
+      expect.objectContaining({
+        type: "recorder/start",
+        streamId: "stream-abc",
+        range,
+        meta,
+      }),
+    );
     expect(start && "clipId" in start && start.clipId).toBeTruthy();
   });
 
@@ -3555,7 +3558,11 @@ export function createRouter(
    */
   async function apply(event: ClipEvent): Promise<ClipState | null> {
     const next = reduce(state, event);
-    if (isRejectedTransition(state, next)) {
+    // FAIL は明示的な失敗通知であり、`reduce` の invalid() フォールバックとは
+    // 区別する。区別しないと「FAIL はどの状態からでも受理される」という
+    // fail() 側の前提が崩れ、想定外の例外を internal-error として提示する
+    // ための fail("internal-error") 呼び出しがここで握り潰されてしまう。
+    if (event.type !== "FAIL" && isRejectedTransition(state, next)) {
       console.warn(
         `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
       );
