@@ -21,6 +21,14 @@ const BAR_ID = "yt-clip-bar";
 let markedIn: { sec: number; videoId: string } | null = null;
 let cancelWatch: (() => void) | null = null;
 
+/** 録画が進行中で、範囲の変更を受け付けない状態 */
+const BUSY_KINDS: ReadonlySet<string> = new Set([
+  "seeking",
+  "recording",
+  "encoding",
+]);
+let busy = false;
+
 function send(event: ClipEvent): void {
   void chrome.runtime.sendMessage({
     type: "clip/event",
@@ -51,6 +59,13 @@ function guard(action: () => void): () => void {
 }
 
 function onMarkIn(): void {
+  // 録画中に打ち直されると状態機械だけが marking に戻り、offscreen の録画は
+  // 走り続けて MediaRecorder と AudioContext が解放されないまま取り残される
+  if (busy) {
+    setStatus("録画中は範囲を変更できません");
+    return;
+  }
+
   const video = getVideo();
   const meta = getVideoMeta();
   markedIn = { sec: video.currentTime, videoId: meta.videoId };
@@ -59,6 +74,10 @@ function onMarkIn(): void {
 }
 
 function onMarkOut(): void {
+  if (busy) {
+    setStatus("録画中は範囲を変更できません");
+    return;
+  }
   if (markedIn === null) {
     setStatus("先に IN を指定してください");
     return;
@@ -178,6 +197,8 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   if (message.type !== "state/changed") return;
 
   const state = message.state;
+  busy = BUSY_KINDS.has(state.kind);
+
   if (state.kind === "seeking") {
     void prepareRecording(state.range.startSec);
     return;

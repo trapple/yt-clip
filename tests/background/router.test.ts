@@ -136,6 +136,52 @@ describe("録画の開始", () => {
   });
 });
 
+describe("状態が進まなかったときは副作用を出さない", () => {
+  test("二度目の録画要求では録画準備をやり直さない", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    // 二度目。reduce は seeking からの START_RECORDING を受理しない
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    // 状態が failed なのに録画準備だけ進む、という食い違いを防ぐ
+    expect(h.deps.ensureOffscreen).toHaveBeenCalledTimes(1);
+    expect(h.deps.getStreamId).toHaveBeenCalledTimes(1);
+    // 受け付けられない二度目の要求で状態が壊れないこと
+    expect(h.router.getState().kind).toBe("seeking");
+  });
+
+  test("失敗後に OUT に達しても録画停止を指示しない", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    // 録画が死ぬ。ただし YouTube の再生は止まらないので OUT には到達する
+    await h.router.handle({ type: "recorder/failed", reason: "デバイスエラー" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+
+    expect(h.sentToRuntime).not.toContainEqual({ type: "recorder/stop" });
+    // 失敗の理由が internal-error に書き換わっていないこと
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "recording-aborted",
+    });
+  });
+});
+
 describe("録画の終了と保存", () => {
   async function recordUntilEncoding(h: Harness): Promise<void> {
     await markRange(h.router);
