@@ -3631,6 +3631,10 @@ recorder/started が返ってから遷移させる。録画準備の数百ミリ
 
 **設計メモ:** 「状態からどう見えるか」を純粋関数 `describeState` に分離し、文言と操作可能なボタンを単体テストで固定する。spec が定めた degraded path の文言はここで逐語的に持つ。
 
+**残り時間は popup が数える:** 状態機械は録画の開始時刻を持たないため、`describeState` が返せるのはクリップの長さだけ。残り秒数と進捗バーは popup がこの画面を開いてからの経過で数える。閉じて開き直すと数え直しになるが、録画は最長 60 秒なので「進んでいることが分かる」という目的には足りる。開始時刻を状態に持たせると `ClipState` / `reduce` / router まで波及するため、MVP ではこの範囲に留める。
+
+**ダウンロードは状態を変えない:** `download` だけ `ClipEvent` を送らないため `state/changed` が返ってこない。押した後に自分で操作可能へ戻さないと、ボタンが押せないまま残る。また blob URL は**ダウンロード完了を待ってから**解放する。保存ダイアログを開いている間はまだ実データが読まれておらず、先に解放するとダウンロードが壊れる。
+
 - [ ] **Step 1: 失敗するテストを書く**
 
 `tests/popup/view.test.ts`:
@@ -3671,10 +3675,17 @@ describe("録画中", () => {
     expect(view.actions).toEqual([]);
   });
 
-  test("recording は実時間かかることを伝える", () => {
+  test("recording はクリップの長さを返し popup が残りを数える", () => {
     const view = describeState({ kind: "recording", range, meta });
-    expect(view.message).toBe("録画中… 残り 30 秒");
+    expect(view.message).toBe("録画中…");
     expect(view.busy).toBe(true);
+    expect(view.recordingSec).toBe(30);
+  });
+
+  test("録画中以外は残り時間を数えない", () => {
+    expect(describeState({ kind: "idle" }).recordingSec).toBeNull();
+    expect(describeState({ kind: "seeking", range, meta }).recordingSec).toBeNull();
+    expect(describeState({ kind: "encoding", range, meta }).recordingSec).toBeNull();
   });
 
   test("encoding は書き出し中として扱う", () => {
@@ -3794,6 +3805,12 @@ export type PopupView = {
   busy: boolean;
   /** 録画済みクリップの再生欄を出すか */
   showPreview: boolean;
+  /**
+   * 録画中のみ、クリップの長さ (秒)。
+   * 残り時間の表示は popup が自分で数える。状態機械は録画の開始時刻を
+   * 持たないため、ここで返せるのは長さだけ。
+   */
+  recordingSec: number | null;
 };
 
 const FAILURE_MESSAGES: Record<FailureReason, string> = {
@@ -3825,6 +3842,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "marking":
@@ -3833,6 +3851,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "ready":
@@ -3841,6 +3860,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["record", "reset"],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "seeking":
@@ -3849,15 +3869,17 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: true,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "recording":
-      // 録画は実時間かかるため、待ち時間を明示する
+      // 録画は実時間かかるため、残り時間を popup 側で数えて見せる
       return {
-        message: `録画中… 残り ${durationOf(state.range.startSec, state.range.endSec)} 秒`,
+        message: "録画中…",
         actions: [],
         busy: true,
         showPreview: false,
+        recordingSec: durationOf(state.range.startSec, state.range.endSec),
       };
 
     case "encoding":
@@ -3866,6 +3888,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: true,
         showPreview: false,
+        recordingSec: null,
       };
 
     case "preview":
@@ -3874,6 +3897,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["post", "retake"],
         busy: false,
         showPreview: true,
+        recordingSec: null,
       };
 
     case "composing":
@@ -3882,6 +3906,7 @@ export function describeState(state: ClipState): PopupView {
         actions: [],
         busy: false,
         showPreview: true,
+        recordingSec: null,
       };
 
     case "downloadable":
@@ -3890,6 +3915,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["download", "retake"],
         busy: false,
         showPreview: true,
+        recordingSec: null,
       };
 
     case "failed":
@@ -3898,6 +3924,7 @@ export function describeState(state: ClipState): PopupView {
         actions: ["retry"],
         busy: false,
         showPreview: false,
+        recordingSec: null,
       };
   }
 }
@@ -3930,6 +3957,15 @@ export function describeState(state: ClipState): PopupView {
         margin-bottom: 10px;
         line-height: 1.5;
       }
+      #progress-area {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      #progress {
+        flex: 1;
+      }
       #preview {
         width: 100%;
         margin-bottom: 10px;
@@ -3952,6 +3988,10 @@ export function describeState(state: ClipState): PopupView {
   </head>
   <body>
     <p id="message"></p>
+    <div id="progress-area" hidden>
+      <progress id="progress" value="0" max="1"></progress>
+      <span id="remain"></span>
+    </div>
     <video id="preview" controls hidden></video>
     <div id="actions"></div>
     <script type="module" src="./popup.ts"></script>
@@ -3991,15 +4031,86 @@ const ACTION_EVENTS: Record<
 const messageElement = document.getElementById("message") as HTMLElement;
 const previewElement = document.getElementById("preview") as HTMLVideoElement;
 const actionsElement = document.getElementById("actions") as HTMLElement;
+const progressArea = document.getElementById("progress-area") as HTMLElement;
+const progressElement = document.getElementById("progress") as HTMLProgressElement;
+const remainElement = document.getElementById("remain") as HTMLElement;
 
 /** プレビュー用に発行した blob URL。差し替え時に解放する */
 let previewUrl: string | null = null;
+/** 残り時間を数えるタイマー */
+let countdownTimer: number | null = null;
+
+/** 失敗を画面に出し、操作をやり直せる状態に戻す */
+function showError(error: unknown): void {
+  messageElement.textContent = `操作できませんでした: ${String(error)}`;
+  setActionsDisabled(false);
+}
+
+function setActionsDisabled(disabled: boolean): void {
+  for (const button of actionsElement.querySelectorAll("button")) {
+    button.disabled = disabled;
+  }
+}
 
 function send(event: ClipEvent): void {
-  void chrome.runtime.sendMessage({
-    type: "clip/event",
-    event,
-  } satisfies Message);
+  chrome.runtime
+    .sendMessage({ type: "clip/event", event } satisfies Message)
+    .catch(showError);
+}
+
+function stopCountdown(): void {
+  if (countdownTimer !== null) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+  progressArea.hidden = true;
+}
+
+/**
+ * 録画の残り時間を数える。
+ * 状態機械は録画の開始時刻を持たないため、popup がこの画面を開いてからの
+ * 経過で数える。閉じて開き直すと数え直しになるが、録画は最長 60 秒なので
+ * 「進んでいることが分かる」という目的には足りる。
+ */
+function startCountdown(totalSec: number): void {
+  stopCountdown();
+
+  const endsAt = Date.now() + totalSec * 1000;
+  progressElement.max = totalSec;
+  progressArea.hidden = false;
+
+  const tick = (): void => {
+    const remainSec = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+    progressElement.value = totalSec - remainSec;
+    remainElement.textContent = `残り ${remainSec} 秒`;
+    if (remainSec === 0) {
+      stopCountdown();
+    }
+  };
+
+  tick();
+  countdownTimer = window.setInterval(tick, 1000);
+}
+
+/** ダウンロードの完了を待つ。保存ダイアログを開いたまま放置されても固まらないよう打ち切る */
+function waitForDownload(id: number, timeoutMs = 300_000): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      resolve();
+    };
+    const onChanged = (delta: chrome.downloads.DownloadDelta): void => {
+      if (delta.id !== id) return;
+      const next = delta.state?.current;
+      if (next === "complete" || next === "interrupted") {
+        finish();
+      }
+    };
+    const timer = setTimeout(finish, timeoutMs);
+
+    chrome.downloads.onChanged.addListener(onChanged);
+  });
 }
 
 async function download(state: ClipState): Promise<void> {
@@ -4007,15 +4118,22 @@ async function download(state: ClipState): Promise<void> {
 
   const clip = await getClip(state.clipId);
   const url = URL.createObjectURL(clip.blob);
-  await chrome.downloads.download({
-    url,
-    filename: buildClipFileName(
-      clip.meta.videoId,
-      clip.range.startSec,
-      clip.mimeType,
-    ),
-    saveAs: true,
-  });
+  try {
+    const downloadId = await chrome.downloads.download({
+      url,
+      filename: buildClipFileName(
+        clip.meta.videoId,
+        clip.range.startSec,
+        clip.mimeType,
+      ),
+      saveAs: true,
+    });
+    // 保存ダイアログを開いている間はまだ実データが読まれていないため、
+    // ここで解放するとダウンロードが壊れる。完了を待ってから解放する
+    await waitForDownload(downloadId);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 async function showPreview(state: ClipState): Promise<void> {
@@ -4027,7 +4145,7 @@ async function showPreview(state: ClipState): Promise<void> {
       : null;
 
   if (clipId === null) {
-    previewElement.hidden = true;
+    hidePreview();
     return;
   }
 
@@ -4040,6 +4158,15 @@ async function showPreview(state: ClipState): Promise<void> {
   previewElement.hidden = false;
 }
 
+function hidePreview(): void {
+  previewElement.hidden = true;
+  previewElement.removeAttribute("src");
+  if (previewUrl !== null) {
+    URL.revokeObjectURL(previewUrl);
+    previewUrl = null;
+  }
+}
+
 function render(state: ClipState): void {
   const view = describeState(state);
   messageElement.textContent = view.message;
@@ -4050,20 +4177,33 @@ function render(state: ClipState): void {
       button.textContent = ACTION_LABELS[action];
       button.disabled = view.busy;
       button.addEventListener("click", () => {
+        setActionsDisabled(true);
+
+        // ダウンロードは状態を変えないので state/changed が届かない。
+        // 自分で操作可能へ戻さないとボタンが押せないままになる
         if (action === "download") {
-          void download(state);
+          void download(state)
+            .then(() => setActionsDisabled(false))
+            .catch(showError);
           return;
         }
+
         send(ACTION_EVENTS[action]);
       });
       return button;
     }),
   );
 
-  if (view.showPreview) {
-    void showPreview(state);
+  if (view.recordingSec !== null) {
+    startCountdown(view.recordingSec);
   } else {
-    previewElement.hidden = true;
+    stopCountdown();
+  }
+
+  if (view.showPreview) {
+    void showPreview(state).catch(showError);
+  } else {
+    hidePreview();
   }
 }
 
@@ -4073,13 +4213,14 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   }
 });
 
-void chrome.runtime
+chrome.runtime
   .sendMessage({ type: "state/get" } satisfies Message)
   .then((response: MessageResponse) => {
     if ("state" in response) {
       render(response.state);
     }
-  });
+  })
+  .catch(showError);
 ```
 
 - [ ] **Step 6: 型チェックとテスト全体を通す**
