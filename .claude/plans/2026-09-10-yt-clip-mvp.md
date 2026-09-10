@@ -2811,7 +2811,9 @@ CapturePermissionError に包んで呼び出し側が理由を提示できる形
 
 service worker は停止しうるため、状態は `chrome.storage.session` に永続化し、起動時に復元する。
 
-**副作用は状態の変化で判断する:** `commit` した後、`event.type` ではなく **`state.kind` が実際に変わったこと**を条件に副作用を出す。イベント種別で判断すると、`reduce` が遷移を拒んで `failed` になった場合でも副作用が走り、公開状態と実際の動作が食い違う。`START_RECORDING` が二度届いた場合、二度目は `failed` になるのに録画準備だけ進み、状態は `failed` のまま録画が始まってしまう。
+**受け付けられないイベントは状態を書き換えない:** `reduce` を先に呼び、その結果が「新たに `internal-error` になった」なら遷移が拒まれたと判断して、状態を更新せず副作用も出さない。書き換えてしまうと、録画が `recording-aborted` で失敗した後に届く `OUT_REACHED` (再生は止まらないので必ず届く) で、正当な失敗理由が `internal-error` に潰れる。
+
+**副作用は状態の変化で判断する:** 状態を確定させた後、`event.type` ではなく **`state.kind` が実際に変わったこと**を条件に副作用を出す。なお `kind` の比較で判定するのは、`marking` → `marking` (IN の打ち直しで `startSec` だけが変わる) のように**同じ kind でも意味のある遷移**があり、そこでは副作用を出したくないため。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -2973,6 +2975,8 @@ describe("状態が進まなかったときは副作用を出さない", () => {
     // 状態が failed なのに録画準備だけ進む、という食い違いを防ぐ
     expect(h.deps.ensureOffscreen).toHaveBeenCalledTimes(1);
     expect(h.deps.getStreamId).toHaveBeenCalledTimes(1);
+    // 受け付けられない二度目の要求で状態が壊れないこと
+    expect(h.router.getState().kind).toBe("seeking");
   });
 
   test("失敗後に OUT に達しても録画停止を指示しない", async () => {
@@ -3200,8 +3204,9 @@ export function createRouter(
   let composeTabId: number | null = initial?.composeTabId ?? null;
   let streamId: string | null = null;
 
-  async function commit(event: ClipEvent): Promise<void> {
-    state = reduce(state, event);
+  /** 新しい状態を確定させ、関係者へ通知する */
+  async function publish(next: ClipState): Promise<void> {
+    state = next;
     await deps.persist({ state, captureTabId, composeTabId });
 
     const message: Message = { type: "state/changed", state };
@@ -3209,6 +3214,25 @@ export function createRouter(
     if (captureTabId !== null) {
       deps.sendToTab(captureTabId, message);
     }
+  }
+
+  async function commit(event: ClipEvent): Promise<void> {
+    await publish(reduce(state, event));
+  }
+
+  /**
+   * `reduce` がこの遷移を拒んだか (新たに internal-error になったか) を判定する。
+   *
+   * 拒まれたイベントで状態を書き換えてはいけない。たとえば録画が
+   * `recording-aborted` で失敗した後も YouTube の再生は続くので必ず OUT に達し、
+   * `OUT_REACHED` が届く。これをそのまま反映すると、正当な失敗理由が
+   * `internal-error` に潰れてユーザーに誤った説明が出る。
+   */
+  function isRejectedTransition(before: ClipState, after: ClipState): boolean {
+    if (after.kind !== "failed" || after.reason !== "internal-error") {
+      return false;
+    }
+    return !(before.kind === "failed" && before.reason === "internal-error");
   }
 
   async function fail(reason: FailureReason): Promise<void> {
@@ -3297,14 +3321,22 @@ export function createRouter(
       return;
     }
 
+    const next = reduce(state, event);
+    // 受け付けられないイベント (UI の二重送信、失敗後に遅れて届いた通知など) は
+    // 状態を書き換えずに捨てる。状態機械そのものの不正遷移は reduce の単体テストで守る。
+    if (isRejectedTransition(state, next)) {
+      console.warn(
+        `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
+      );
+      return;
+    }
+
     const previous = state;
-    await commit(event);
+    await publish(next);
 
     // 副作用は「イベントが届いたから」ではなく「状態が実際に進んだから」実行する。
-    // イベント種別だけで判断すると、reduce が遷移を拒んで failed になった場合でも
-    // 副作用だけが走り、公開している状態と実際の動作が 食い違う。たとえば
-    // START_RECORDING が二度届くと、二度目は failed になるのに録画準備だけが
-    // 進んでしまい、状態は failed のまま録画が始まる。
+    // イベント種別だけで判断すると、START_RECORDING が二度届いたときに
+    // 二度目でも録画準備が走り、状態と実際の動作が食い違う。
     if (state.kind === previous.kind) return;
 
     if (state.kind === "seeking") {
