@@ -91,22 +91,27 @@ function startCountdown(totalSec: number): void {
   countdownTimer = window.setInterval(tick, 1000);
 }
 
-/** ダウンロードの完了を待つ。保存ダイアログを開いたまま放置されても固まらないよう打ち切る */
-function waitForDownload(id: number, timeoutMs = 300_000): Promise<void> {
+/**
+ * ダウンロードの決着を待つ。
+ * 保存ダイアログを開いたまま放置されても固まらないよう打ち切る。
+ *
+ * @returns 決着を見届けられたら `true`、待ち時間を使い切ったら `false`
+ */
+function waitForDownload(id: number, timeoutMs = 300_000): Promise<boolean> {
   return new Promise((resolve) => {
-    const finish = (): void => {
+    const finish = (settled: boolean): void => {
       clearTimeout(timer);
       chrome.downloads.onChanged.removeListener(onChanged);
-      resolve();
+      resolve(settled);
     };
     const onChanged = (delta: chrome.downloads.DownloadDelta): void => {
       if (delta.id !== id) return;
       const next = delta.state?.current;
       if (next === "complete" || next === "interrupted") {
-        finish();
+        finish(true);
       }
     };
-    const timer = setTimeout(finish, timeoutMs);
+    const timer = setTimeout(() => finish(false), timeoutMs);
 
     chrome.downloads.onChanged.addListener(onChanged);
   });
@@ -117,6 +122,7 @@ async function download(state: ClipState): Promise<void> {
 
   const clip = await getClip(state.clipId);
   const url = URL.createObjectURL(clip.blob);
+  let canRelease = true;
   try {
     const downloadId = await chrome.downloads.download({
       url,
@@ -128,10 +134,14 @@ async function download(state: ClipState): Promise<void> {
       saveAs: true,
     });
     // 保存ダイアログを開いている間はまだ実データが読まれていないため、
-    // ここで解放するとダウンロードが壊れる。完了を待ってから解放する
-    await waitForDownload(downloadId);
+    // ここで解放するとダウンロードが壊れる。決着を待ってから解放する。
+    // 待ち時間を使い切った場合は読み出し中かもしれないので解放しない。
+    // blob URL はこの画面のものなので、閉じれば道連れで解放される
+    canRelease = await waitForDownload(downloadId);
   } finally {
-    URL.revokeObjectURL(url);
+    if (canRelease) {
+      URL.revokeObjectURL(url);
+    }
   }
 }
 
