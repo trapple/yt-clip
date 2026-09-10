@@ -2050,10 +2050,12 @@ function onMarkOut(): void {
     return;
   }
 
-  // IN を打った後に別の動画へ移動していた場合、その範囲はもう意味を持たない
+  // IN を打った後に別の動画へ移動していた場合、その範囲はもう意味を持たない。
+  // ここで RESET_MARKS を送ってはいけない。録画済みで投稿待ち (preview / composing) の
+  // ときに届くと状態機械が不正遷移として failed に落ち、録画したクリップへの参照ごと失う。
+  // MARK_IN はどの状態からでも受理されるので、次に IN を打てば正しく上書きされる。
   if (getVideoMeta().videoId !== markedIn.videoId) {
     markedIn = null;
-    send({ type: "RESET_MARKS" });
     setStatus("動画が変わりました。IN からやり直してください");
     return;
   }
@@ -2077,53 +2079,54 @@ const MIN_RECOMMENDED_HEIGHT = 720;
  * service worker が streamId 取得と offscreen 起動を終えるまで動画を進めないため。
  */
 async function prepareRecording(startSec: number): Promise<void> {
-  if (isAdPlaying()) {
-    send({ type: "FAIL", reason: "ad-playing" });
-    setStatus("広告の再生中です。終了後にやり直してください");
-    return;
-  }
-
-  const video = getVideo();
-  // 画質は録画してからでは上げられないので、この時点で警告する (録画は止めない)
-  if (video.videoHeight > 0 && video.videoHeight < MIN_RECOMMENDED_HEIGHT) {
-    setStatus(
-      `再生画質が低いままです (${video.videoHeight}p)。画質を上げると綺麗に切り抜けます`,
-    );
-  }
-  video.pause();
+  // 状態変化から呼ばれるため click の guard が効かない。ここで自分で包む。
+  // 握り潰すと sw は seeking のまま固まり、ユーザーには準備中の表示が残り続ける。
   try {
+    if (isAdPlaying()) {
+      send({ type: "FAIL", reason: "ad-playing" });
+      setStatus("広告の再生中です。終了後にやり直してください");
+      return;
+    }
+
+    const video = getVideo();
+    // 画質は録画してからでは上げられないので、この時点で警告する (録画は止めない)
+    if (video.videoHeight > 0 && video.videoHeight < MIN_RECOMMENDED_HEIGHT) {
+      setStatus(
+        `再生画質が低いままです (${video.videoHeight}p)。画質を上げると綺麗に切り抜けます`,
+      );
+    }
+    video.pause();
     await seekTo(video, startSec);
+
+    send({ type: "SEEK_DONE" });
+    setStatus("録画の準備をしています…");
   } catch (error) {
     send({ type: "FAIL", reason: "seek-failed" });
     setStatus(`開始位置へ移動できませんでした: ${String(error)}`);
-    return;
   }
-
-  send({ type: "SEEK_DONE" });
-  setStatus("録画の準備をしています…");
 }
 
 /**
  * 録画の後半。録画開始後に呼ばれ、再生して OUT 到達で停止する。
  */
 async function runRecording(startSec: number, endSec: number): Promise<void> {
-  const video = getVideo();
+  // prepareRecording と同じ理由で、この関数も自分で例外を拾う
   try {
+    const video = getVideo();
     await startPlayback(video);
+
+    setStatus(`録画中… (${Math.round(endSec - startSec)}秒)`);
+
+    cancelWatch = onReachTime(video, endSec, () => {
+      cancelWatch = null;
+      video.pause();
+      send({ type: "OUT_REACHED" });
+      setStatus("録画を書き出しています…");
+    });
   } catch (error) {
     send({ type: "FAIL", reason: "playback-failed" });
     setStatus(`再生を開始できませんでした: ${String(error)}`);
-    return;
   }
-
-  setStatus(`録画中… (${Math.round(endSec - startSec)}秒)`);
-
-  cancelWatch = onReachTime(video, endSec, () => {
-    cancelWatch = null;
-    video.pause();
-    send({ type: "OUT_REACHED" });
-    setStatus("録画を書き出しています…");
-  });
 }
 
 function buildBar(): HTMLElement {
