@@ -1,0 +1,191 @@
+import { describe, expect, test } from "vitest";
+import { INITIAL_STATE, reduce } from "@/background/state";
+import type { ClipRange, ClipState, VideoMeta } from "@/shared/types";
+
+const meta: VideoMeta = { videoId: "abc123", title: "テスト動画" };
+const range: ClipRange = { startSec: 10, endSec: 40 };
+
+const ready: ClipState = { kind: "ready", range, meta };
+const preview: ClipState = {
+  kind: "preview",
+  clipId: "clip-1",
+  range,
+  meta,
+  mimeType: "video/mp4",
+};
+
+describe("マーク操作", () => {
+  test("初期状態は idle", () => {
+    expect(INITIAL_STATE).toEqual({ kind: "idle" });
+  });
+
+  test("IN を打つと marking へ進む", () => {
+    expect(reduce(INITIAL_STATE, { type: "MARK_IN", sec: 10, meta })).toEqual({
+      kind: "marking",
+      startSec: 10,
+      meta,
+    });
+  });
+
+  test("OUT を打つと ready へ進む", () => {
+    const marking = reduce(INITIAL_STATE, { type: "MARK_IN", sec: 10, meta });
+    expect(reduce(marking, { type: "MARK_OUT", sec: 40 })).toEqual(ready);
+  });
+
+  test("ready からでも IN を打ち直せる", () => {
+    expect(reduce(ready, { type: "MARK_IN", sec: 20, meta })).toEqual({
+      kind: "marking",
+      startSec: 20,
+      meta,
+    });
+  });
+
+  test("RESET_MARKS で idle に戻る", () => {
+    expect(reduce(ready, { type: "RESET_MARKS" })).toEqual({ kind: "idle" });
+  });
+});
+
+describe("録画フロー", () => {
+  test("録画開始で seeking へ進む", () => {
+    expect(reduce(ready, { type: "START_RECORDING" })).toEqual({
+      kind: "seeking",
+      range,
+      meta,
+    });
+  });
+
+  test("seek 完了で recording へ進む", () => {
+    const seeking = reduce(ready, { type: "START_RECORDING" });
+    expect(reduce(seeking, { type: "SEEK_DONE" })).toEqual({
+      kind: "recording",
+      range,
+      meta,
+    });
+  });
+
+  test("OUT 到達で encoding へ進む", () => {
+    const recording: ClipState = { kind: "recording", range, meta };
+    expect(reduce(recording, { type: "OUT_REACHED" })).toEqual({
+      kind: "encoding",
+      range,
+      meta,
+    });
+  });
+
+  test("Blob 確定で preview へ進む", () => {
+    const encoding: ClipState = { kind: "encoding", range, meta };
+    expect(
+      reduce(encoding, {
+        type: "BLOB_READY",
+        clipId: "clip-1",
+        mimeType: "video/mp4",
+      }),
+    ).toEqual(preview);
+  });
+
+  test("取り直しで ready に戻る", () => {
+    expect(reduce(preview, { type: "RETAKE" })).toEqual(ready);
+  });
+});
+
+describe("投稿と degraded path", () => {
+  test("投稿すると composing へ進む", () => {
+    expect(reduce(preview, { type: "POST" })).toEqual({
+      kind: "composing",
+      clipId: "clip-1",
+      range,
+      meta,
+      mimeType: "video/mp4",
+    });
+  });
+
+  test("添付完了で idle に戻る", () => {
+    const composing = reduce(preview, { type: "POST" });
+    expect(reduce(composing, { type: "ATTACHED" })).toEqual({ kind: "idle" });
+  });
+
+  test("MP4 非対応なら preview から downloadable へ退避する", () => {
+    expect(
+      reduce(preview, { type: "DEGRADE", reason: "mp4-unsupported" }),
+    ).toEqual({
+      kind: "downloadable",
+      clipId: "clip-1",
+      range,
+      meta,
+      mimeType: "video/mp4",
+      reason: "mp4-unsupported",
+    });
+  });
+
+  test("添付失敗なら composing から downloadable へ退避し成果物を保持する", () => {
+    const composing = reduce(preview, { type: "POST" });
+    const result = reduce(composing, {
+      type: "DEGRADE",
+      reason: "x-attach-failed",
+    });
+    expect(result).toEqual({
+      kind: "downloadable",
+      clipId: "clip-1",
+      range,
+      meta,
+      mimeType: "video/mp4",
+      reason: "x-attach-failed",
+    });
+  });
+
+  test("downloadable からも取り直せる", () => {
+    const degraded = reduce(preview, {
+      type: "DEGRADE",
+      reason: "mp4-unsupported",
+    });
+    expect(reduce(degraded, { type: "RETAKE" })).toEqual(ready);
+  });
+});
+
+describe("失敗と復帰", () => {
+  test("録画中の失敗は範囲を保持したまま failed になる", () => {
+    const recording: ClipState = { kind: "recording", range, meta };
+    expect(reduce(recording, { type: "FAIL", reason: "tab-lost" })).toEqual({
+      kind: "failed",
+      reason: "tab-lost",
+      range,
+      meta,
+    });
+  });
+
+  test("RETRY で ready に戻る", () => {
+    const failed = reduce(
+      { kind: "seeking", range, meta },
+      { type: "FAIL", reason: "seek-failed" },
+    );
+    expect(reduce(failed, { type: "RETRY" })).toEqual(ready);
+  });
+
+  test("範囲を持たない failed からの RETRY は idle に戻る", () => {
+    const failed: ClipState = {
+      kind: "failed",
+      reason: "internal-error",
+      range: null,
+      meta: null,
+    };
+    expect(reduce(failed, { type: "RETRY" })).toEqual({ kind: "idle" });
+  });
+
+  test("定義されていない遷移は internal-error として明示的に失敗する", () => {
+    expect(reduce(INITIAL_STATE, { type: "OUT_REACHED" })).toEqual({
+      kind: "failed",
+      reason: "internal-error",
+      range: null,
+      meta: null,
+    });
+  });
+
+  test("遷移に失敗しても直前の範囲は失われない", () => {
+    expect(reduce(ready, { type: "SEEK_DONE" })).toEqual({
+      kind: "failed",
+      reason: "internal-error",
+      range,
+      meta,
+    });
+  });
+});
