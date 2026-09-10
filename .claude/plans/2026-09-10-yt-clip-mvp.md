@@ -2010,6 +2010,14 @@ const BAR_ID = "yt-clip-bar";
 let markedIn: { sec: number; videoId: string } | null = null;
 let cancelWatch: (() => void) | null = null;
 
+/** 録画が進行中で、範囲の変更を受け付けない状態 */
+const BUSY_KINDS: ReadonlySet<string> = new Set([
+  "seeking",
+  "recording",
+  "encoding",
+]);
+let busy = false;
+
 function send(event: ClipEvent): void {
   void chrome.runtime.sendMessage({ type: "clip/event", event } satisfies Message);
 }
@@ -2037,6 +2045,13 @@ function guard(action: () => void): () => void {
 }
 
 function onMarkIn(): void {
+  // 録画中に打ち直されると状態機械だけが marking に戻り、offscreen の録画は
+  // 走り続けて MediaRecorder と AudioContext が解放されないまま取り残される
+  if (busy) {
+    setStatus("録画中は範囲を変更できません");
+    return;
+  }
+
   const video = getVideo();
   const meta = getVideoMeta();
   markedIn = { sec: video.currentTime, videoId: meta.videoId };
@@ -2045,6 +2060,10 @@ function onMarkIn(): void {
 }
 
 function onMarkOut(): void {
+  if (busy) {
+    setStatus("録画中は範囲を変更できません");
+    return;
+  }
   if (markedIn === null) {
     setStatus("先に IN を指定してください");
     return;
@@ -2164,6 +2183,8 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   if (message.type !== "state/changed") return;
 
   const state = message.state;
+  busy = BUSY_KINDS.has(state.kind);
+
   if (state.kind === "seeking") {
     void prepareRecording(state.range.startSec);
     return;
@@ -2790,6 +2811,8 @@ CapturePermissionError に包んで呼び出し側が理由を提示できる形
 
 service worker は停止しうるため、状態は `chrome.storage.session` に永続化し、起動時に復元する。
 
+**副作用は状態の変化で判断する:** `commit` した後、`event.type` ではなく **`state.kind` が実際に変わったこと**を条件に副作用を出す。イベント種別で判断すると、`reduce` が遷移を拒んで `failed` になった場合でも副作用が走り、公開状態と実際の動作が食い違う。`START_RECORDING` が二度届いた場合、二度目は `failed` になるのに録画準備だけ進み、状態は `failed` のまま録画が始まってしまう。
+
 - [ ] **Step 1: 失敗するテストを書く**
 
 `tests/background/router.test.ts`:
@@ -2929,6 +2952,50 @@ describe("録画の開始", () => {
     expect(h.sentToTab).toContainEqual({
       tabId: 7,
       message: { type: "state/changed", state: h.router.getState() },
+    });
+  });
+});
+
+describe("状態が進まなかったときは副作用を出さない", () => {
+  test("二度目の録画要求では録画準備をやり直さない", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    // 二度目。reduce は seeking からの START_RECORDING を受理しない
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    // 状態が failed なのに録画準備だけ進む、という食い違いを防ぐ
+    expect(h.deps.ensureOffscreen).toHaveBeenCalledTimes(1);
+    expect(h.deps.getStreamId).toHaveBeenCalledTimes(1);
+  });
+
+  test("失敗後に OUT に達しても録画停止を指示しない", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    // 録画が死ぬ。ただし YouTube の再生は止まらないので OUT には到達する
+    await h.router.handle({ type: "recorder/failed", reason: "デバイスエラー" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+
+    expect(h.sentToRuntime).not.toContainEqual({ type: "recorder/stop" });
+    // 失敗の理由が internal-error に書き換わっていないこと
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "recording-aborted",
     });
   });
 });
@@ -3230,17 +3297,25 @@ export function createRouter(
       return;
     }
 
+    const previous = state;
     await commit(event);
 
-    if (event.type === "START_RECORDING") {
+    // 副作用は「イベントが届いたから」ではなく「状態が実際に進んだから」実行する。
+    // イベント種別だけで判断すると、reduce が遷移を拒んで failed になった場合でも
+    // 副作用だけが走り、公開している状態と実際の動作が 食い違う。たとえば
+    // START_RECORDING が二度届くと、二度目は failed になるのに録画準備だけが
+    // 進んでしまい、状態は failed のまま録画が始まる。
+    if (state.kind === previous.kind) return;
+
+    if (state.kind === "seeking") {
       await prepareCapture();
       return;
     }
-    if (event.type === "OUT_REACHED") {
+    if (state.kind === "encoding") {
       deps.sendToRuntime({ type: "recorder/stop" });
       return;
     }
-    if (event.type === "POST") {
+    if (state.kind === "composing") {
       composeTabId = await deps.openComposeTab();
     }
   }
