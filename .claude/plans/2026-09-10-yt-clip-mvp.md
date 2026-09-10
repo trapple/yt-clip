@@ -4282,6 +4282,13 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   reporter: [["list"]],
+  // 実 DOM 依存で落ちたとき、環境のせいなのか実装の問題なのかを後から切り分けられるよう
+  // 証跡を残す。これが無いと「たぶん広告のせい」以上のことが言えなくなる
+  use: {
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+    video: "retain-on-failure",
+  },
 });
 ```
 
@@ -4361,6 +4368,13 @@ test("IN/OUT を指定して録画するとプレビューまで到達する", a
 
   const bar = page.locator("#yt-clip-bar");
   await expect(bar).toBeVisible({ timeout: 30_000 });
+
+  // バーの表示とタイトルの読み込みは別々に進む。バーはプレイヤーのコントロールが
+  // 出た時点で挿入されるが、IN を押すと読まれる動画タイトルはもう少し後に埋まる。
+  // 待たずに押すとメタ情報を取れず「操作できませんでした」で終わる
+  await expect(
+    page.locator("h1.ytd-watch-metadata yt-formatted-string"),
+  ).not.toBeEmpty({ timeout: 30_000 });
 
   /** 再生位置を動かす。UI 操作ではシークバーの精度が出ないため直接指定する */
   const seek = (sec: number) =>
@@ -4513,6 +4527,19 @@ npm test           # 単体テスト
 npm run typecheck  # 型チェック
 npm run e2e        # E2E (ネットワーク必須。CI では実行しない)
 ```
+
+### E2E が失敗したときの切り分け
+
+E2E は実際の YouTube を開くため、実装とは無関係な理由でも落ちる。失敗したら
+`test-results/` に残る trace・スクリーンショット・動画をまず見ること。
+
+| 症状 | 原因の候補 |
+|---|---|
+| service worker が現れない | `dist/` が未ビルド、または manifest のパス誤り |
+| `#yt-clip-bar` が出ない | `YT_SELECTORS.controls` が YouTube の DOM 変更で不一致 |
+| IN を押しても範囲が確定しない | 動画タイトルの読み込みが間に合っていない、または `YT_SELECTORS.title` の不一致。広告や同意ダイアログがクリックを奪っている可能性もある |
+| status の文言が違う | `formatTime` の出力、または `validateRange` で弾かれている |
+| 録画が preview まで進まない | offscreen の起動失敗、MP4 非対応 (この場合は degraded の文言になる)、または広告の混入 |
 
 `chrome://extensions` でデベロッパーモードを有効にし、`dist/` を
 「パッケージ化されていない拡張機能」として読み込む。
