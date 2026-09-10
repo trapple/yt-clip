@@ -115,7 +115,10 @@ export function createRouter(
     try {
       await deps.ensureOffscreen();
       streamId = await deps.getStreamId(captureTabId);
-    } catch {
+    } catch (error) {
+      // 理由を捨てると、権限を拒否されたのか offscreen を作れなかったのかが
+      // 後から追えない。ユーザーに見せる文言は 1 つでも、原因は残しておく
+      console.error("録画の準備に失敗しました", error);
       await fail("capture-permission-denied");
     }
   }
