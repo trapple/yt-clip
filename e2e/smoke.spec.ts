@@ -60,6 +60,13 @@ test("IN/OUT を指定して録画するとプレビューまで到達する", a
   const bar = page.locator("#yt-clip-bar");
   await expect(bar).toBeVisible({ timeout: 30_000 });
 
+  // バーの表示とタイトルの読み込みは別々に進む。バーはプレイヤーのコントロールが
+  // 出た時点で挿入されるが、IN を押すと読まれる動画タイトルはもう少し後に埋まる。
+  // 待たずに押すとメタ情報を取れず「操作できませんでした」で終わる
+  await expect(
+    page.locator("h1.ytd-watch-metadata yt-formatted-string"),
+  ).not.toBeEmpty({ timeout: 30_000 });
+
   /** 再生位置を動かす。UI 操作ではシークバーの精度が出ないため直接指定する */
   const seek = (sec: number) =>
     page.evaluate((target: number) => {

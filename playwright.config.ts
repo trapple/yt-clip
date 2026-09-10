@@ -9,4 +9,11 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   reporter: [["list"]],
+  // 実 DOM 依存で落ちたとき、環境のせいなのか実装の問題なのかを後から切り分けられるよう
+  // 証跡を残す。これが無いと「たぶん広告のせい」以上のことが言えなくなる
+  use: {
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+    video: "retain-on-failure",
+  },
 });
