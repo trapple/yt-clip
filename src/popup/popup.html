@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>yt-clip</title>
+    <style>
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 12px;
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+      }
+      #message {
+        margin-bottom: 10px;
+        line-height: 1.5;
+      }
+      #preview {
+        width: 100%;
+        margin-bottom: 10px;
+        background: #000;
+      }
+      #actions {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        flex: 1;
+        padding: 6px;
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.5;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="message"></p>
+    <video id="preview" controls hidden></video>
+    <div id="actions"></div>
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>
