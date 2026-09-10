@@ -54,4 +54,42 @@ describe("クリップ保管", () => {
 
     await expect(getClip("clip-1")).rejects.toThrow(ClipNotFoundError);
   });
+
+  test("保存が失敗しても直前のクリップは失われない (アトミック性)", async () => {
+    await saveClip(makeClip("clip-1"));
+
+    // 容量超過などで put のコミットが失敗するケースを模擬する。
+    // IDBObjectStore.prototype.put を差し替え、実際に put request は
+    // 発行しつつ、それを含むトランザクションを次のマイクロタスクで
+    // 強制 abort させる。put だけをピンポイントで失敗させることで、
+    // 「clear() は別トランザクションで先に確定済みなので消えない」
+    // という誤った実装 (clear と put が別トランザクション) では
+    // このテストが red になり、同一トランザクションで両方 abort される
+    // 正しい実装だけが green になる。
+    const originalPut = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      this: IDBObjectStore,
+      ...args: Parameters<IDBObjectStore["put"]>
+    ) {
+      const request = originalPut.apply(this, args);
+      const tx = this.transaction;
+      queueMicrotask(() => {
+        try {
+          tx.abort();
+        } catch {
+          // 既に完了/中断済みなら何もしない
+        }
+      });
+      return request;
+    };
+
+    try {
+      await expect(saveClip(makeClip("clip-2"))).rejects.toThrow();
+    } finally {
+      IDBObjectStore.prototype.put = originalPut;
+    }
+
+    await expect(getClip("clip-1")).resolves.toMatchObject({ id: "clip-1" });
+    await expect(getClip("clip-2")).rejects.toThrow(ClipNotFoundError);
+  });
 });
