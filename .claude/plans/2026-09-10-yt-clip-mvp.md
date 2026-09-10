@@ -1436,6 +1436,12 @@ function tabConstraints(streamId: string): MediaStreamConstraints {
 /**
  * タブの映像・音声を録画する。
  * streamId 以外の文脈 (YouTube / X / 状態機械) を一切知らない。
+ *
+ * リソース解放の設計:
+ * `stop` イベントは明示的な `stop()` 呼び出しだけでなく、録画が致命的エラーで
+ * 死んだときにブラウザ側からも発火する。そのため `onstop` は `start()` の直後に
+ * 一度だけ装着し、どちらの経路でも必ず解放が走るようにする。`stop()` の中で
+ * 装着すると、自動発火を取りこぼしてストリームが解放されないまま残る。
  */
 export async function startRecording(
   streamId: string,
@@ -1445,50 +1451,77 @@ export async function startRecording(
     tabConstraints(streamId),
   );
 
-  // tabCapture 中はタブ音声がスピーカーから消えるため、取得した音声を出力へ流し戻す
-  const audioContext = new AudioContext();
-  audioContext
-    .createMediaStreamSource(stream)
-    .connect(audioContext.destination);
+  let audioContext: AudioContext | null = null;
 
-  const recorder = new MediaRecorder(stream, { mimeType });
-  const chunks: Blob[] = [];
-  let recordingError: Error | null = null;
-
-  recorder.ondataavailable = (event) => {
-    if (event.data.size > 0) {
-      chunks.push(event.data);
-    }
-  };
-  recorder.onerror = (event) => {
-    recordingError = new Error(`録画中にエラーが発生しました: ${event.type}`);
-  };
-
-  // 1 秒ごとに chunk を吐かせ、長い録画でもメモリが一度に膨らまないようにする
-  recorder.start(1000);
-
-  function cleanup(): void {
+  /** 取得済みのリソースを解放する。二度呼ばれても安全 */
+  function release(): void {
     for (const track of stream.getTracks()) {
       track.stop();
     }
-    void audioContext.close();
+    if (audioContext !== null) {
+      void audioContext.close();
+      audioContext = null;
+    }
   }
 
-  return {
-    stop() {
-      return new Promise<Blob>((resolve, reject) => {
-        recorder.onstop = () => {
-          cleanup();
-          if (recordingError !== null) {
-            reject(recordingError);
+  try {
+    // tabCapture 中はタブ音声がスピーカーから消えるため、取得した音声を出力へ流し戻す
+    audioContext = new AudioContext();
+    audioContext
+      .createMediaStreamSource(stream)
+      .connect(audioContext.destination);
+
+    const recorder = new MediaRecorder(stream, { mimeType });
+    const chunks: Blob[] = [];
+    let recordingError: Error | null = null;
+    /** 録画が終わった (自動・明示どちらでも) ときに解決する */
+    let settleStopped: (() => void) | null = null;
+    let stopped = false;
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunks.push(event.data);
+      }
+    };
+    recorder.onerror = (event) => {
+      recordingError = new Error(`録画中にエラーが発生しました: ${event.type}`);
+    };
+    recorder.onstop = () => {
+      stopped = true;
+      release();
+      settleStopped?.();
+    };
+
+    // 1 秒ごとに chunk を吐かせ、長い録画でもメモリが一度に膨らまないようにする
+    recorder.start(1000);
+
+    return {
+      stop() {
+        return new Promise<Blob>((resolve, reject) => {
+          const finish = (): void => {
+            if (recordingError !== null) {
+              reject(recordingError);
+              return;
+            }
+            resolve(new Blob(chunks, { type: mimeType }));
+          };
+
+          // 既にエラーで停止済みなら、改めて stop() を呼ばずに結果を返す
+          if (stopped) {
+            finish();
             return;
           }
-          resolve(new Blob(chunks, { type: mimeType }));
-        };
-        recorder.stop();
-      });
-    },
-  };
+
+          settleStopped = finish;
+          recorder.stop();
+        });
+      },
+    };
+  } catch (error) {
+    // 録画を開始できなかった場合、取得済みのストリームを掴んだままにしない
+    release();
+    throw error;
+  }
 }
 ```
 
