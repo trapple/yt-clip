@@ -85,6 +85,23 @@ export function insertText(editor: HTMLElement, text: string): void {
   }
 }
 
+/**
+ * service worker から base64 で届いた動画を復元する。
+ *
+ * 戻り値を `Uint8Array<ArrayBuffer>` と明示しているのは、TypeScript 5.7 以降
+ * `Uint8Array` の既定の型引数が `ArrayBufferLike` (SharedArrayBuffer を含む) に
+ * なり、無指定のままだと `BlobPart` (ArrayBuffer 限定) に代入できなくなるため。
+ * `new Uint8Array(length)` は実際には常に ArrayBuffer 裏付けなので安全な明示。
+ */
+export function decodeBase64(base64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
 function notify(message: Message): void {
   void chrome.runtime.sendMessage(message);
 }
@@ -102,9 +119,11 @@ if (typeof chrome !== "undefined") {
         const input = await waitForElement<HTMLInputElement>(
           X_SELECTORS.fileInput,
         );
-        const file = new File([message.buffer], message.fileName, {
-          type: message.mimeType,
-        });
+        const file = new File(
+          [decodeBase64(message.base64)],
+          message.fileName,
+          { type: message.mimeType },
+        );
         attachFile(input, file);
 
         const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);

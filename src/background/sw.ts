@@ -45,6 +45,10 @@ const ready = loadSnapshot().then((snapshot) =>
       persist: async (snapshot) => {
         await chrome.storage.session.set({ [SESSION_KEY]: snapshot });
       },
+      startTimer: (ms, onFire) => {
+        const id = setTimeout(onFire, ms);
+        return () => clearTimeout(id);
+      },
     },
     snapshot,
   ),
@@ -52,12 +56,12 @@ const ready = loadSnapshot().then((snapshot) =>
 
 chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
   void ready.then(async (router) => {
-    if (message.type === "state/get") {
-      sendResponse({ state: router.getState() });
-      return;
+    if (message.type !== "state/get") {
+      await router.handle(message, sender.tab?.id);
     }
-    await router.handle(message, sender.tab?.id);
-    sendResponse({ ok: true });
+    // 常に最新の状態を返す。受け付けられなかった操作では状態が変わらず
+    // state/changed も飛ばないため、送り手が結果を知る手段がこれしかない
+    sendResponse({ state: router.getState() });
   });
   // 応答が非同期であることを Chrome に伝える
   return true;

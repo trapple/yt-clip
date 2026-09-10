@@ -50,6 +50,9 @@ function setActionsDisabled(disabled: boolean): void {
 function send(event: ClipEvent): void {
   chrome.runtime
     .sendMessage({ type: "clip/event", event } satisfies Message)
+    // 応答には必ず最新の状態が入っている。受け付けられなかった操作でも
+    // これで画面が戻るので、ボタンが無効のまま取り残されない
+    .then((response: MessageResponse) => render(response.state))
     .catch(showError);
 }
 
@@ -224,9 +227,5 @@ chrome.runtime.onMessage.addListener((message: Message) => {
 
 chrome.runtime
   .sendMessage({ type: "state/get" } satisfies Message)
-  .then((response: MessageResponse) => {
-    if ("state" in response) {
-      render(response.state);
-    }
-  })
+  .then((response: MessageResponse) => render(response.state))
   .catch(showError);

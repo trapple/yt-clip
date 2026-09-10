@@ -17,6 +17,8 @@ type Harness = {
   sentToTab: Array<{ tabId: number; message: Message }>;
   saved: StoredClip[];
   deps: RouterDeps;
+  /** 登録済みのタイマーをまとめて発火させる */
+  fireTimers: () => void;
 };
 
 function makeHarness(
@@ -26,6 +28,8 @@ function makeHarness(
   const sentToRuntime: Message[] = [];
   const sentToTab: Array<{ tabId: number; message: Message }> = [];
   const saved: StoredClip[] = [];
+  /** startTimer で登録された処理。テストから任意に発火させる */
+  const timers: Array<() => void> = [];
 
   const deps: RouterDeps = {
     ensureOffscreen: vi.fn(async () => undefined),
@@ -47,10 +51,28 @@ function makeHarness(
     loadTemplate: async () => "{title}\n\n{url}",
     now: () => Date.UTC(2026, 8, 10, 3, 0, 0),
     persist: async () => undefined,
+    startTimer: (_ms, onFire) => {
+      timers.push(onFire);
+      return () => {
+        const index = timers.indexOf(onFire);
+        if (index >= 0) timers.splice(index, 1);
+      };
+    },
     ...overrides,
   };
 
-  return { router: createRouter(deps), sentToRuntime, sentToTab, saved, deps };
+  return {
+    router: createRouter(deps),
+    sentToRuntime,
+    sentToTab,
+    saved,
+    deps,
+    fireTimers: () => {
+      const pending = [...timers];
+      timers.length = 0;
+      for (const onFire of pending) onFire();
+    },
+  };
 }
 
 /** IN/OUT を打って録画直前まで進める */
@@ -111,10 +133,14 @@ describe("録画の開始", () => {
 
     // 冒頭欠けを防ぐため、録画が始まるまで seeking のまま留まる
     expect(h.router.getState().kind).toBe("seeking");
-    expect(h.sentToRuntime).toContainEqual({
-      type: "recorder/start",
-      streamId: "stream-abc",
-    });
+    // recorder/start には保存先 (clipId/range/meta) も同梱されるため、
+    // ここでは streamId が渡っていることだけを部分一致で確認する
+    expect(h.sentToRuntime).toContainEqual(
+      expect.objectContaining({
+        type: "recorder/start",
+        streamId: "stream-abc",
+      }),
+    );
   });
 
   test("録画開始の通知を受けてはじめて recording へ進む", async () => {
@@ -133,6 +159,65 @@ describe("録画の開始", () => {
       tabId: 7,
       message: { type: "state/changed", state: h.router.getState() },
     });
+  });
+});
+
+describe("投稿画面が用意できないとき", () => {
+  const clip: StoredClip = {
+    id: "clip-1",
+    blob: new Blob(["動画データ"], { type: "video/mp4" }),
+    mimeType: "video/mp4",
+    range,
+    meta,
+    createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
+  };
+
+  async function reachComposing(h: Harness): Promise<void> {
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+  }
+
+  test("準備完了が来ないまま時間切れになったらダウンロードへ退避する", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+
+    // X に未ログインだと投稿画面ではなくログイン画面が開き、
+    // 準備完了は永久に来ない。待ち続けると composing から抜けられなくなる
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState()).toMatchObject({
+      kind: "downloadable",
+      reason: "x-attach-failed",
+      clipId: "clip-1",
+    });
+  });
+
+  test("準備完了が届いたら時間切れにしない", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    // 送信済みならタイマーは取り消されている
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState().kind).toBe("composing");
   });
 });
 
@@ -161,7 +246,7 @@ describe("受け付けられないメッセージで状態を壊さない", () =
     });
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/mp4",
     });
     await h.router.handle({ type: "clip/event", event: { type: "POST" } });
@@ -228,6 +313,39 @@ describe("受け付けられないメッセージで状態を壊さない", () =
     // 録画対象タブを奪われると offscreen の録画が解放されないまま取り残される
     expect(h.router.getState().kind).toBe("recording");
     expect(h.sentToTab.every((sent) => sent.tabId === 7)).toBe(true);
+  });
+});
+
+describe("想定できない失敗を握り潰さない", () => {
+  test("副作用が例外を投げたら失敗として提示する", async () => {
+    const h = makeHarness({
+      openComposeTab: async () => {
+        throw new Error("タブを開けません");
+      },
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+
+    // 黙って止まると、状態が途中のままユーザーには何も伝わらない
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "internal-error",
+    });
   });
 });
 
@@ -300,39 +418,59 @@ describe("録画の終了と保存", () => {
     expect(h.sentToRuntime).toContainEqual({ type: "recorder/stop" });
   });
 
-  test("MP4 を受け取ったら保存して preview へ進む", async () => {
+  test("録画の完了を受けたら preview へ進む", async () => {
     const h = makeHarness();
     await recordUntilEncoding(h);
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/mp4",
     });
 
-    expect(h.saved).toHaveLength(1);
-    expect(h.saved[0]).toMatchObject({
+    expect(h.router.getState()).toMatchObject({
+      kind: "preview",
+      clipId: "clip-1",
       mimeType: "video/mp4",
-      range,
-      meta,
-      createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
     });
-    expect(h.router.getState()).toMatchObject({ kind: "preview" });
   });
 
-  test("WebM を受け取ったら保存した上で downloadable へ退避する", async () => {
+  test("保存先を先に決めて offscreen へ渡す", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+
+    // 録画データは拡張のメッセージに載せられないので、offscreen が直接
+    // IndexedDB へ書く。そのために必要な情報を開始時に渡しておく
+    const start = h.sentToRuntime.find(
+      (message) => message.type === "recorder/start",
+    );
+    expect(start).toMatchObject({
+      type: "recorder/start",
+      streamId: "stream-abc",
+      range,
+      meta,
+    });
+    expect(start && "clipId" in start && start.clipId).toBeTruthy();
+  });
+
+  test("WebM を受け取ったら downloadable へ退避する", async () => {
     const h = makeHarness();
     await recordUntilEncoding(h);
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/webm",
     });
 
     // 録画は成功しているので成果物は捨てない
-    expect(h.saved).toHaveLength(1);
     expect(h.router.getState()).toMatchObject({
       kind: "downloadable",
       reason: "mp4-unsupported",
+      clipId: "clip-1",
     });
   });
 
@@ -375,7 +513,7 @@ describe("X への受け渡し", () => {
     });
     await h.router.handle({
       type: "recorder/done",
-      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      clipId: "clip-1",
       mimeType: "video/mp4",
     });
     await h.router.handle({ type: "clip/event", event: { type: "POST" } });

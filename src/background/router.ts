@@ -19,7 +19,16 @@ export type RouterDeps = {
   /** UTC epoch ミリ秒 */
   now(): number;
   persist(snapshot: RouterSnapshot): Promise<void>;
+  /** 指定時間後に呼び出す。戻り値を呼ぶと取り消す */
+  startTimer(ms: number, onFire: () => void): () => void;
 };
+
+/**
+ * 投稿画面の準備を待つ上限。
+ * X に未ログインだと投稿画面ではなくログイン画面が開き、content script が
+ * 準備完了を送ってこない。待ち続けると composing から抜けられなくなる。
+ */
+const COMPOSE_READY_TIMEOUT_MS = 30_000;
 
 /** service worker が停止しても復元できるよう保存する内容 */
 export type RouterSnapshot = {
@@ -48,6 +57,8 @@ export function createRouter(
   let captureTabId: number | null = initial?.captureTabId ?? null;
   let composeTabId: number | null = initial?.composeTabId ?? null;
   let streamId: string | null = null;
+  /** 投稿画面の準備待ちを打ち切るためのハンドル */
+  let cancelComposeTimeout: (() => void) | null = null;
 
   /** 新しい状態を確定させ、関係者へ通知する */
   async function publish(next: ClipState): Promise<void> {
@@ -89,7 +100,11 @@ export function createRouter(
    */
   async function apply(event: ClipEvent): Promise<ClipState | null> {
     const next = reduce(state, event);
-    if (isRejectedTransition(state, next)) {
+    // FAIL は明示的な失敗通知であり、`reduce` の invalid() フォールバックとは
+    // 区別する。区別しないと「FAIL はどの状態からでも受理される」という
+    // fail() 側の前提が崩れ、想定外の例外を internal-error として提示する
+    // (I1) ための fail("internal-error") 呼び出しがここで握り潰されてしまう。
+    if (event.type !== "FAIL" && isRejectedTransition(state, next)) {
       console.warn(
         `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
       );
@@ -135,28 +150,27 @@ export function createRouter(
       await fail("capture-permission-denied");
       return;
     }
-    deps.sendToRuntime({ type: "recorder/start", streamId });
+
+    // 保存先を先に決めて offscreen へ渡す。録画データは offscreen が直接
+    // IndexedDB へ書く (拡張のメッセージには載せられないため)
+    deps.sendToRuntime({
+      type: "recorder/start",
+      streamId,
+      clipId: `clip-${deps.now()}`,
+      range: state.range,
+      meta: state.meta,
+    });
     streamId = null;
   }
 
+  /**
+   * 録画の完了を受け取る。データは offscreen が既に保存済みで、ここでは
+   * 状態を進めるだけ。保存済みのものを状態の都合で捨ててはいけない。
+   */
   async function storeRecording(
-    buffer: ArrayBuffer,
+    clipId: string,
     mimeType: string,
   ): Promise<void> {
-    if (state.kind !== "encoding") {
-      await fail("recording-aborted");
-      return;
-    }
-
-    const clipId = `clip-${deps.now()}`;
-    await deps.saveClip({
-      id: clipId,
-      blob: new Blob([buffer], { type: mimeType }),
-      mimeType,
-      range: state.range,
-      meta: state.meta,
-      createdAt: deps.now(),
-    });
     await apply({ type: "BLOB_READY", clipId, mimeType });
 
     // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない
@@ -165,14 +179,27 @@ export function createRouter(
     }
   }
 
+  /** content script へ渡せるよう base64 にする。大きすぎる文字列連結を避けて分割する */
+  function toBase64(bytes: Uint8Array): string {
+    const CHUNK = 0x8000;
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+    }
+    return btoa(binary);
+  }
+
   async function sendPayload(): Promise<void> {
     if (state.kind !== "composing" || composeTabId === null) return;
+
+    cancelComposeTimeout?.();
+    cancelComposeTimeout = null;
 
     const clip = await deps.getClip(state.clipId);
     const template = await deps.loadTemplate();
     deps.sendToTab(composeTabId, {
       type: "x/payload",
-      buffer: await clip.blob.arrayBuffer(),
+      base64: toBase64(new Uint8Array(await clip.blob.arrayBuffer())),
       mimeType: clip.mimeType,
       fileName: buildClipFileName(
         clip.meta.videoId,
@@ -225,39 +252,78 @@ export function createRouter(
     }
     if (state.kind === "composing") {
       composeTabId = await deps.openComposeTab();
+
+      // 投稿画面が用意できないまま待ち続けると composing から抜けられなくなる。
+      // X に未ログインだとログイン画面が開き、準備完了は永久に来ない
+      cancelComposeTimeout?.();
+      cancelComposeTimeout = deps.startTimer(COMPOSE_READY_TIMEOUT_MS, () => {
+        cancelComposeTimeout = null;
+        void apply({ type: "DEGRADE", reason: "x-attach-failed" });
+      });
     }
   }
+
+  async function route(
+    message: Message,
+    senderTabId?: number,
+  ): Promise<void> {
+    switch (message.type) {
+      case "clip/event":
+        await handleEvent(message.event, senderTabId);
+        return;
+      case "recorder/started":
+        await apply({ type: "SEEK_DONE" });
+        return;
+      case "recorder/done":
+        await storeRecording(message.clipId, message.mimeType);
+        return;
+      case "recorder/failed":
+        // 理由を捨てると、どの段階で録画が壊れたのかが後から追えない
+        console.error("録画に失敗しました", message.reason);
+        await fail("recording-aborted");
+        return;
+      case "x/ready":
+        await sendPayload();
+        return;
+      case "x/attached":
+        cancelComposeTimeout?.();
+        cancelComposeTimeout = null;
+        await apply({ type: "ATTACHED" });
+        return;
+      case "x/failed":
+        cancelComposeTimeout?.();
+        cancelComposeTimeout = null;
+        console.error("X への添付に失敗しました", message.reason);
+        await apply({ type: "DEGRADE", reason: "x-attach-failed" });
+        return;
+      default:
+        // state/get と state/changed は router の処理対象外
+        return;
+    }
+  }
+
+  /**
+   * 処理中の連鎖。メッセージは 1 つずつ順に処理する。
+   * 保存など時間のかかる副作用の最中に別のメッセージが状態を進めると、
+   * 戻ってきたときの遷移が拒まれて録画済みクリップへの参照を失う。
+   */
+  let queue: Promise<void> = Promise.resolve();
 
   return {
     getState: () => state,
 
-    async handle(message: Message, senderTabId?: number): Promise<void> {
-      switch (message.type) {
-        case "clip/event":
-          await handleEvent(message.event, senderTabId);
-          return;
-        case "recorder/started":
-          await apply({ type: "SEEK_DONE" });
-          return;
-        case "recorder/done":
-          await storeRecording(message.buffer, message.mimeType);
-          return;
-        case "recorder/failed":
-          await fail("recording-aborted");
-          return;
-        case "x/ready":
-          await sendPayload();
-          return;
-        case "x/attached":
-          await apply({ type: "ATTACHED" });
-          return;
-        case "x/failed":
-          await apply({ type: "DEGRADE", reason: "x-attach-failed" });
-          return;
-        default:
-          // state/get と state/changed は router の処理対象外
-          return;
-      }
+    handle(message: Message, senderTabId?: number): Promise<void> {
+      queue = queue.then(async () => {
+        try {
+          await route(message, senderTabId);
+        } catch (error) {
+          // 想定できていない失敗。黙って止まると、状態が途中のまま
+          // ユーザーには何も伝わらない
+          console.error("メッセージの処理に失敗しました", message.type, error);
+          await fail("internal-error").catch(() => undefined);
+        }
+      });
+      return queue;
     },
   };
 }

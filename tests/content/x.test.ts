@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   SelectorMissingError,
   attachFile,
+  decodeBase64,
   findElement,
   waitForElement,
 } from "@/content/x";
@@ -122,5 +123,15 @@ describe("attachFile", () => {
     );
 
     expect(onChange).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("decodeBase64", () => {
+  test("btoa で作った文字列を元のバイト列に戻せる", () => {
+    const original = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
+    const binary = String.fromCharCode(...original);
+    const base64 = btoa(binary);
+
+    expect(decodeBase64(base64)).toEqual(original);
   });
 });
