@@ -2958,6 +2958,101 @@ describe("録画の開始", () => {
   });
 });
 
+describe("受け付けられないメッセージで状態を壊さない", () => {
+  const clip: StoredClip = {
+    id: "clip-1",
+    blob: new Blob(["動画データ"], { type: "video/mp4" }),
+    mimeType: "video/mp4",
+    range,
+    meta,
+    createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
+  };
+
+  /** 録画を完走させて composing まで進める */
+  async function reachComposing(h: Harness): Promise<void> {
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+  }
+
+  test("添付失敗が二重に届いても録画済みクリップへの参照を失わない", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/failed", reason: "セレクタ不一致" });
+    // 二度目。downloadable は DEGRADE を受理しないので拒まれる遷移になる
+    await h.router.handle({ type: "x/failed", reason: "セレクタ不一致" });
+
+    const state = h.router.getState();
+    expect(state.kind).toBe("downloadable");
+    // failed に落ちると clipId ごと失われ、録画した動画を取り出せなくなる
+    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+  });
+
+  test("録画開始の通知が二重に届いても recording のまま保つ", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({ type: "recorder/started" });
+
+    expect(h.router.getState().kind).toBe("recording");
+  });
+
+  test("二度目の seek 完了を権限エラーとして報告しない", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    // 録画中に届いた重複。権限は関係ない
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+
+    expect(h.router.getState().kind).toBe("recording");
+  });
+
+  test("録画中は別タブからの IN も受け付けない", async () => {
+    const h = makeHarness();
+    await markRange(h.router, 7);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+
+    // 状態変化を受け取っていない別タブは録画中だと知らないまま IN を送りうる
+    await h.router.handle(
+      { type: "clip/event", event: { type: "MARK_IN", sec: 5, meta } },
+      99,
+    );
+
+    // 録画対象タブを奪われると offscreen の録画が解放されないまま取り残される
+    expect(h.router.getState().kind).toBe("recording");
+    expect(h.sentToTab.every((sent) => sent.tabId === 7)).toBe(true);
+  });
+});
+
 describe("状態が進まなかったときは副作用を出さない", () => {
   test("二度目の録画要求では録画準備をやり直さない", async () => {
     const h = makeHarness();
@@ -3195,6 +3290,13 @@ export type Router = {
   handle(message: Message, senderTabId?: number): Promise<void>;
 };
 
+/** 録画が進行中で、範囲の変更を受け付けない状態 */
+const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
+  "seeking",
+  "recording",
+  "encoding",
+]);
+
 export function createRouter(
   deps: RouterDeps,
   initial?: RouterSnapshot,
@@ -3216,10 +3318,6 @@ export function createRouter(
     }
   }
 
-  async function commit(event: ClipEvent): Promise<void> {
-    await publish(reduce(state, event));
-  }
-
   /**
    * `reduce` がこの遷移を拒んだか (新たに internal-error になったか) を判定する。
    *
@@ -3235,8 +3333,34 @@ export function createRouter(
     return !(before.kind === "failed" && before.reason === "internal-error");
   }
 
+  /**
+   * イベントを状態機械に適用する。**状態を変える経路はすべてここを通す。**
+   * 拒まれた遷移なら `null` を返し、状態は書き換えない。
+   *
+   * 一部のイベントだけ直接 `publish` すると保護が抜ける。たとえば `x/failed` が
+   * 二重に届いたとき、二度目は `downloadable` から拒まれる遷移になるが、それを
+   * 書き換えてしまうと `failed` には `clipId` が無いため録画済みクリップへの
+   * 参照ごと消える。
+   *
+   * @returns 適用前の状態。拒まれた場合は `null`
+   */
+  async function apply(event: ClipEvent): Promise<ClipState | null> {
+    const next = reduce(state, event);
+    if (isRejectedTransition(state, next)) {
+      console.warn(
+        `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
+      );
+      return null;
+    }
+
+    const previous = state;
+    await publish(next);
+    return previous;
+  }
+
   async function fail(reason: FailureReason): Promise<void> {
-    await commit({ type: "FAIL", reason });
+    // FAIL はどの状態からでも受理されるので拒まれることはない
+    await apply({ type: "FAIL", reason });
   }
 
   /** 録画の下準備。動画はまだ進めない */
@@ -3255,6 +3379,12 @@ export function createRouter(
 
   /** seek 完了後に録画を始めさせる。状態を進めるのは recorder/started を受けてから */
   async function beginRecording(): Promise<void> {
+    // seek 完了は reduce を経由しないぶん、ここで状態を自分で確かめる。
+    // 二度目の SEEK_DONE を権限エラーとして報告しないため。
+    if (state.kind !== "seeking") {
+      console.warn(`録画準備中ではないので seek 完了を無視しました (状態: ${state.kind})`);
+      return;
+    }
     if (streamId === null) {
       await fail("capture-permission-denied");
       return;
@@ -3311,6 +3441,16 @@ export function createRouter(
     event: ClipEvent,
     senderTabId?: number,
   ): Promise<void> {
+    // 録画中の範囲変更は受け付けない。`reduce` は MARK_IN をどの状態からでも
+    // 受理してしまうため、ここで止めないと状態機械だけが marking に戻り、
+    // offscreen の録画は解放されないまま走り続ける。UI 側でも同じガードを
+    // 持っているが、状態変化を受け取っていない別タブからの MARK_IN は
+    // UI 側では防げないので、録画対象タブを奪われないようここでも守る。
+    if (event.type === "MARK_IN" && BUSY_KINDS.has(state.kind)) {
+      console.warn(`録画中の範囲変更を無視しました (状態: ${state.kind})`);
+      return;
+    }
+
     if (event.type === "MARK_IN" && senderTabId !== undefined) {
       captureTabId = senderTabId;
     }
@@ -3321,18 +3461,8 @@ export function createRouter(
       return;
     }
 
-    const next = reduce(state, event);
-    // 受け付けられないイベント (UI の二重送信、失敗後に遅れて届いた通知など) は
-    // 状態を書き換えずに捨てる。状態機械そのものの不正遷移は reduce の単体テストで守る。
-    if (isRejectedTransition(state, next)) {
-      console.warn(
-        `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
-      );
-      return;
-    }
-
-    const previous = state;
-    await publish(next);
+    const previous = await apply(event);
+    if (previous === null) return;
 
     // 副作用は「イベントが届いたから」ではなく「状態が実際に進んだから」実行する。
     // イベント種別だけで判断すると、START_RECORDING が二度届いたときに
@@ -3361,7 +3491,7 @@ export function createRouter(
           await handleEvent(message.event, senderTabId);
           return;
         case "recorder/started":
-          await commit({ type: "SEEK_DONE" });
+          await apply({ type: "SEEK_DONE" });
           return;
         case "recorder/done":
           await storeRecording(message.buffer, message.mimeType);
@@ -3373,10 +3503,10 @@ export function createRouter(
           await sendPayload();
           return;
         case "x/attached":
-          await commit({ type: "ATTACHED" });
+          await apply({ type: "ATTACHED" });
           return;
         case "x/failed":
-          await commit({ type: "DEGRADE", reason: "x-attach-failed" });
+          await apply({ type: "DEGRADE", reason: "x-attach-failed" });
           return;
         default:
           // state/get と state/changed は router の処理対象外
