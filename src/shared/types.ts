@@ -1,0 +1,76 @@
+/** 動画内の再生位置 (秒)。実時刻ではないので Date と混同しないこと */
+export type ClipRange = {
+  startSec: number;
+  endSec: number;
+};
+
+export type VideoMeta = {
+  videoId: string;
+  title: string;
+};
+
+/** 録画は成功したが通常の投稿フローに乗せられなかった理由 */
+export type DegradedReason = "mp4-unsupported" | "x-attach-failed";
+
+/** 明示的な失敗の理由。握り潰さず必ずユーザーに提示する */
+export type FailureReason =
+  | "capture-permission-denied"
+  | "seek-failed"
+  | "playback-failed"
+  | "ad-playing"
+  | "tab-lost"
+  | "recording-aborted"
+  /** 状態機械の不正遷移など、ユーザー起因ではない内部エラー */
+  | "internal-error";
+
+export type ClipState =
+  | { kind: "idle" }
+  | { kind: "marking"; startSec: number; meta: VideoMeta }
+  | { kind: "ready"; range: ClipRange; meta: VideoMeta }
+  | { kind: "seeking"; range: ClipRange; meta: VideoMeta }
+  | { kind: "recording"; range: ClipRange; meta: VideoMeta }
+  | { kind: "encoding"; range: ClipRange; meta: VideoMeta }
+  | {
+      kind: "preview";
+      clipId: string;
+      range: ClipRange;
+      meta: VideoMeta;
+      mimeType: string;
+    }
+  | {
+      kind: "composing";
+      clipId: string;
+      range: ClipRange;
+      meta: VideoMeta;
+      mimeType: string;
+    }
+  | {
+      kind: "downloadable";
+      clipId: string;
+      range: ClipRange;
+      meta: VideoMeta;
+      mimeType: string;
+      reason: DegradedReason;
+    }
+  /** range / meta が null なのは、マーク確定前に起きた内部エラーの場合だけ */
+  | {
+      kind: "failed";
+      reason: FailureReason;
+      range: ClipRange | null;
+      meta: VideoMeta | null;
+    };
+
+export type ClipEvent =
+  | { type: "MARK_IN"; sec: number; meta: VideoMeta }
+  | { type: "MARK_OUT"; sec: number }
+  | { type: "RESET_MARKS" }
+  | { type: "START_RECORDING" }
+  | { type: "SEEK_DONE" }
+  | { type: "OUT_REACHED" }
+  | { type: "BLOB_READY"; clipId: string; mimeType: string }
+  | { type: "RETAKE" }
+  | { type: "POST" }
+  | { type: "ATTACHED" }
+  | { type: "DEGRADE"; reason: DegradedReason }
+  | { type: "FAIL"; reason: FailureReason }
+  | { type: "RETRY" };
