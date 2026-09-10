@@ -542,7 +542,7 @@ export function validateRange(
 - [ ] **Step 8: commit**
 
 ```bash
-git -C . add package.json tsconfig.json vite.config.ts vitest.config.ts manifest.config.ts .gitignore src/shared tests/shared
+git -C . add package.json package-lock.json tsconfig.json vite.config.ts vitest.config.ts manifest.config.ts .gitignore src/shared tests/shared
 git -C . commit -m "feat: プロジェクト土台と共有型定義を追加
 
 全コンポーネントが shared/ の型だけを介して通信できるよう、
