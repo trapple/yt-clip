@@ -13,7 +13,12 @@ import type { ClipEvent } from "@/shared/types";
 
 const BAR_ID = "yt-clip-bar";
 
-let markedInSec: number | null = null;
+/**
+ * IN を打った位置と、そのときの動画 ID。
+ * YouTube は SPA でページ遷移せずに動画が入れ替わるため、位置だけを覚えていると
+ * 別の動画で OUT を打ったときに違う動画同士の範囲が組み上がってしまう。
+ */
+let markedIn: { sec: number; videoId: string } | null = null;
 let cancelWatch: (() => void) | null = null;
 
 function send(event: ClipEvent): void {
@@ -30,27 +35,52 @@ function setStatus(text: string): void {
   }
 }
 
+/**
+ * クリック操作を包んで、失敗をユーザーに見える形にする。
+ * 要素が見つからない・再生位置が不正といった失敗を console に流すだけでは、
+ * ボタンが無反応になった理由がユーザーに伝わらない。
+ */
+function guard(action: () => void): () => void {
+  return () => {
+    try {
+      action();
+    } catch (error) {
+      setStatus(`操作できませんでした: ${String(error)}`);
+    }
+  };
+}
+
 function onMarkIn(): void {
   const video = getVideo();
-  markedInSec = video.currentTime;
-  send({ type: "MARK_IN", sec: markedInSec, meta: getVideoMeta() });
-  setStatus(`IN ${formatTime(markedInSec)}`);
+  const meta = getVideoMeta();
+  markedIn = { sec: video.currentTime, videoId: meta.videoId };
+  send({ type: "MARK_IN", sec: markedIn.sec, meta });
+  setStatus(`IN ${formatTime(markedIn.sec)}`);
 }
 
 function onMarkOut(): void {
-  if (markedInSec === null) {
+  if (markedIn === null) {
     setStatus("先に IN を指定してください");
     return;
   }
+
+  // IN を打った後に別の動画へ移動していた場合、その範囲はもう意味を持たない
+  if (getVideoMeta().videoId !== markedIn.videoId) {
+    markedIn = null;
+    send({ type: "RESET_MARKS" });
+    setStatus("動画が変わりました。IN からやり直してください");
+    return;
+  }
+
   const endSec = getVideo().currentTime;
   // 範囲の妥当性はここで判定する。状態機械は遷移だけに責任を持つ
-  const validation = validateRange(markedInSec, endSec);
+  const validation = validateRange(markedIn.sec, endSec);
   if (!validation.ok) {
     setStatus(validation.message);
     return;
   }
   send({ type: "MARK_OUT", sec: endSec });
-  setStatus(`${formatTime(markedInSec)} 〜 ${formatTime(endSec)}`);
+  setStatus(`${formatTime(markedIn.sec)} 〜 ${formatTime(endSec)}`);
 }
 
 /** 録画品質は再生解像度が上限になるため、低いときは事前に知らせる */
@@ -118,11 +148,11 @@ function buildBar(): HTMLElement {
 
   const inButton = document.createElement("button");
   inButton.textContent = "IN";
-  inButton.addEventListener("click", onMarkIn);
+  inButton.addEventListener("click", guard(onMarkIn));
 
   const outButton = document.createElement("button");
   outButton.textContent = "OUT";
-  outButton.addEventListener("click", onMarkOut);
+  outButton.addEventListener("click", guard(onMarkOut));
 
   const status = document.createElement("span");
   status.id = `${BAR_ID}-status`;
