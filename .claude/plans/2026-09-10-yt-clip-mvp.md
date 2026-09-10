@@ -4265,7 +4265,11 @@ git -C . commit -m "feat: popup を追加
 - Consumes: ビルド済みの `dist/`
 - Produces: なし (検証タスク)
 
-**設計メモ:** E2E は**ネットワークと YouTube の実 DOM に依存するため CI では実行しない**。`npm run e2e` を明示的に叩いたときだけ走らせ、リリース前のローカル確認に使う。X への添付は**ログイン済みアカウントを要するため自動化せず**、`docs/manual-check.md` のチェックリストで担保する。認証情報をテストに持たせないための線引き。
+**設計メモ:** E2E は**ネットワークと YouTube の実 DOM に依存するため CI では実行しない**。`npm run e2e` を明示的に叩いたときだけ走らせ、リリース前のローカル確認に使う。
+
+**自動化できる範囲は IN/OUT の範囲確定まで。** 録画は自動化できない。`chrome.tabCapture` は「拡張がそのタブに対して呼び出されたこと」を要求し、実際にはツールバーのアイコンをクリックして popup を開く操作がそれにあたる。Playwright は popup を URL 直接ナビゲーションで開くためこの呼び出しが発生せず、`getStreamId` が `Extension has not been invoked for the current page` で失敗する。ブラウザの仕様上の制約であり、テストのために実装を曲げるべきものではない。
+
+X への添付も**ログイン済みアカウントを要するため自動化しない**。認証情報をテストに持たせないための線引き。録画と添付はいずれも `docs/manual-check.md` のチェックリストで担保する。
 
 外部プロセス (ブラウザ) の起動と待機には**必ずタイムアウトを設ける**。
 
@@ -4365,7 +4369,7 @@ test("YouTube の再生画面に IN/OUT UI が注入される", async () => {
   await page.close();
 });
 
-test("IN/OUT を指定して録画するとプレビューまで到達する", async () => {
+test("IN/OUT を指定すると popup が録画できる状態になる", async () => {
   const page = await context.newPage();
   await page.goto(TEST_VIDEO, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
@@ -4397,7 +4401,14 @@ test("IN/OUT を指定して録画するとプレビューまで到達する", a
 
   await expect(page.locator("#yt-clip-bar-status")).toHaveText("0:05 〜 0:08");
 
-  // popup から録画を実行する
+  // popup が同じ範囲を認識し、録画できる状態になっていることを確かめる。
+  //
+  // ここから先 (実際の録画) は自動化できない。chrome.tabCapture は拡張がその
+  // タブに対して呼び出されたことを要求し、実ユーザーがツールバーのアイコンを
+  // 押して popup を開く操作がそれにあたる。Playwright は popup を URL 直接
+  // ナビゲーションで開くためその条件を満たせず、getStreamId が
+  // 「Extension has not been invoked for the current page」で失敗する。
+  // 録画以降は docs/manual-check.md の手動確認で担保する。
   const popup = await context.newPage();
   await popup.goto(
     `chrome-extension://${extensionId}/src/popup/popup.html`,
@@ -4406,15 +4417,7 @@ test("IN/OUT を指定して録画するとプレビューまで到達する", a
   await expect(popup.locator("#message")).toHaveText(
     "0:05 〜 0:08 (3秒) を録画できます",
   );
-
-  await popup.getByRole("button", { name: "録画" }).click();
-
-  // 実時間 3 秒の録画と書き出しを待つ
-  await expect(popup.locator("#message")).toHaveText(
-    "録画できました。内容を確認してください",
-    { timeout: 60_000 },
-  );
-  await expect(popup.locator("#preview")).toBeVisible();
+  await expect(popup.getByRole("button", { name: "録画" })).toBeEnabled();
 
   await popup.close();
   await page.close();
@@ -4458,6 +4461,7 @@ E2E で自動化していない範囲を確認する。X への添付はログ�
 - [ ] IN を押すと popup に開始位置が表示される
 - [ ] OUT を押すと「〜秒を録画できます」と表示される
 - [ ] 「録画」を押すと開始位置へ移動し、そこから再生が始まる
+- [ ] **タブの録画が権限エラーにならない**（`chrome.tabCapture` は拡張がそのタブに対して呼び出されたことを要求する。ツールバーのアイコンから popup を開いた場合にこれが満たされるかを確認する。失敗する場合は manifest への `activeTab` 追加を検討する）
 - [ ] **クリップの冒頭が欠けていない** (IN で指定した位置から始まっている)
 - [ ] 録画中もタブの音声がスピーカーから聞こえる
 - [ ] OUT の位置で録画が止まり、末尾が伸びていない
@@ -4576,4 +4580,5 @@ X への添付は自動化せず手動確認に回した。ログイン済みア
 - [ ] `npx tsc --noEmit` が型エラーなしで通る
 - [ ] `npm run build` が `dist/` を生成する
 - [ ] `dist/` を Chrome に読み込むと YouTube の再生画面に IN/OUT UI が出る
+- [ ] `npm run e2e` の 3 件が通る (範囲確定まで。録画以降は手動確認)
 - [ ] `docs/manual-check.md` の「通常フロー」が全項目チェック済みになる
