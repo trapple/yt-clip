@@ -1322,7 +1322,7 @@ git -C . commit -m "feat: クリップの IndexedDB 保管を追加
 - Produces:
   - `MP4_MIME` / `WEBM_MIME` 定数
   - `pickMimeType(isTypeSupported?: (type: string) => boolean): CodecChoice` — `CodecChoice` は `{ mimeType: string; mp4: boolean }`
-  - `startRecording(streamId: string, mimeType: string): Promise<RecorderHandle>` — `RecorderHandle` は `{ stop(): Promise<Blob> }`
+  - `startRecording(streamId: string, mimeType: string, options: RecorderOptions): Promise<RecorderHandle>` — `RecorderHandle` は `{ stop(): Promise<Blob> }`、`RecorderOptions` は `{ onUnexpectedStop(error: Error): void }`
   - offscreen は録画開始時に `recorder/started`、完了時に `recorder/done`、失敗時に `recorder/failed` を sw へ送る
 
 **テスト方針メモ:** `recorder.ts` は `getUserMedia` / `MediaRecorder` / `AudioContext` という jsdom に存在しない API に依存するため、単体テストの対象外とし **Task 11 の E2E スモークで担保する**。単体テストで検証するのは純粋関数の `codec.ts` のみ。この線引きにより、モックだらけで実質何も検証しないテストを書くことを避ける。
@@ -1420,6 +1420,15 @@ export type RecorderHandle = {
   stop(): Promise<Blob>;
 };
 
+export type RecorderOptions = {
+  /**
+   * 明示的な `stop()` より前に録画が終わってしまったときに呼ばれる。
+   * 録画中の異常を呼び出し側が即座に知るための唯一の経路であり、
+   * これが無いと OUT 到達まで (最大 60 秒) 異常に気付けない。
+   */
+  onUnexpectedStop(error: Error): void;
+};
+
 /** tabCapture の streamId から MediaStream を得るための制約 */
 function tabConstraints(streamId: string): MediaStreamConstraints {
   // chromeMediaSource は標準の型定義に存在しないため cast する
@@ -1446,6 +1455,7 @@ function tabConstraints(streamId: string): MediaStreamConstraints {
 export async function startRecording(
   streamId: string,
   mimeType: string,
+  options: RecorderOptions,
 ): Promise<RecorderHandle> {
   const stream = await navigator.mediaDevices.getUserMedia(
     tabConstraints(streamId),
@@ -1489,7 +1499,15 @@ export async function startRecording(
     recorder.onstop = () => {
       stopped = true;
       release();
-      settleStopped?.();
+
+      if (settleStopped !== null) {
+        settleStopped();
+        return;
+      }
+      // stop() を待たずに終了した = 録画中の異常。呼び出し側へ即座に知らせる
+      options.onUnexpectedStop(
+        recordingError ?? new Error("録画が予期せず終了しました"),
+      );
     };
 
     // 1 秒ごとに chunk を吐かせ、長い録画でもメモリが一度に膨らまないようにする
@@ -1569,7 +1587,10 @@ chrome.runtime.onMessage.addListener((message: Message) => {
       fail(String(error));
       return;
     }
-    startRecording(message.streamId, mimeType)
+    startRecording(message.streamId, mimeType, {
+      // 録画が途中で死んだ場合、stop() を待たずに sw へ知らせる
+      onUnexpectedStop: (error) => fail(error.message),
+    })
       .then((started) => {
         handle = started;
         // 録画が始まったことを知らせる。sw はこれを待ってから再生を再開させる
