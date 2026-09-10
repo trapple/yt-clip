@@ -33,6 +33,13 @@ export type Router = {
   handle(message: Message, senderTabId?: number): Promise<void>;
 };
 
+/** 録画が進行中で、範囲の変更を受け付けない状態 */
+const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
+  "seeking",
+  "recording",
+  "encoding",
+]);
+
 export function createRouter(
   deps: RouterDeps,
   initial?: RouterSnapshot,
@@ -54,10 +61,6 @@ export function createRouter(
     }
   }
 
-  async function commit(event: ClipEvent): Promise<void> {
-    await publish(reduce(state, event));
-  }
-
   /**
    * `reduce` がこの遷移を拒んだか (新たに internal-error になったか) を判定する。
    *
@@ -73,8 +76,34 @@ export function createRouter(
     return !(before.kind === "failed" && before.reason === "internal-error");
   }
 
+  /**
+   * イベントを状態機械に適用する。**状態を変える経路はすべてここを通す。**
+   * 拒まれた遷移なら `null` を返し、状態は書き換えない。
+   *
+   * 一部のイベントだけ直接 `publish` すると保護が抜ける。たとえば `x/failed` が
+   * 二重に届いたとき、二度目は `downloadable` から拒まれる遷移になるが、それを
+   * 書き換えてしまうと `failed` には `clipId` が無いため録画済みクリップへの
+   * 参照ごと消える。
+   *
+   * @returns 適用前の状態。拒まれた場合は `null`
+   */
+  async function apply(event: ClipEvent): Promise<ClipState | null> {
+    const next = reduce(state, event);
+    if (isRejectedTransition(state, next)) {
+      console.warn(
+        `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
+      );
+      return null;
+    }
+
+    const previous = state;
+    await publish(next);
+    return previous;
+  }
+
   async function fail(reason: FailureReason): Promise<void> {
-    await commit({ type: "FAIL", reason });
+    // FAIL はどの状態からでも受理されるので拒まれることはない
+    await apply({ type: "FAIL", reason });
   }
 
   /** 録画の下準備。動画はまだ進めない */
@@ -93,6 +122,12 @@ export function createRouter(
 
   /** seek 完了後に録画を始めさせる。状態を進めるのは recorder/started を受けてから */
   async function beginRecording(): Promise<void> {
+    // seek 完了は reduce を経由しないぶん、ここで状態を自分で確かめる。
+    // 二度目の SEEK_DONE を権限エラーとして報告しないため。
+    if (state.kind !== "seeking") {
+      console.warn(`録画準備中ではないので seek 完了を無視しました (状態: ${state.kind})`);
+      return;
+    }
     if (streamId === null) {
       await fail("capture-permission-denied");
       return;
@@ -119,11 +154,11 @@ export function createRouter(
       meta: state.meta,
       createdAt: deps.now(),
     });
-    await commit({ type: "BLOB_READY", clipId, mimeType });
+    await apply({ type: "BLOB_READY", clipId, mimeType });
 
     // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない
     if (!mimeType.includes("mp4")) {
-      await commit({ type: "DEGRADE", reason: "mp4-unsupported" });
+      await apply({ type: "DEGRADE", reason: "mp4-unsupported" });
     }
   }
 
@@ -149,6 +184,16 @@ export function createRouter(
     event: ClipEvent,
     senderTabId?: number,
   ): Promise<void> {
+    // 録画中の範囲変更は受け付けない。`reduce` は MARK_IN をどの状態からでも
+    // 受理してしまうため、ここで止めないと状態機械だけが marking に戻り、
+    // offscreen の録画は解放されないまま走り続ける。UI 側でも同じガードを
+    // 持っているが、状態変化を受け取っていない別タブからの MARK_IN は
+    // UI 側では防げないので、録画対象タブを奪われないようここでも守る。
+    if (event.type === "MARK_IN" && BUSY_KINDS.has(state.kind)) {
+      console.warn(`録画中の範囲変更を無視しました (状態: ${state.kind})`);
+      return;
+    }
+
     if (event.type === "MARK_IN" && senderTabId !== undefined) {
       captureTabId = senderTabId;
     }
@@ -159,18 +204,8 @@ export function createRouter(
       return;
     }
 
-    const next = reduce(state, event);
-    // 受け付けられないイベント (UI の二重送信、失敗後に遅れて届いた通知など) は
-    // 状態を書き換えずに捨てる。状態機械そのものの不正遷移は reduce の単体テストで守る。
-    if (isRejectedTransition(state, next)) {
-      console.warn(
-        `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
-      );
-      return;
-    }
-
-    const previous = state;
-    await publish(next);
+    const previous = await apply(event);
+    if (previous === null) return;
 
     // 副作用は「イベントが届いたから」ではなく「状態が実際に進んだから」実行する。
     // イベント種別だけで判断すると、START_RECORDING が二度届いたときに
@@ -199,7 +234,7 @@ export function createRouter(
           await handleEvent(message.event, senderTabId);
           return;
         case "recorder/started":
-          await commit({ type: "SEEK_DONE" });
+          await apply({ type: "SEEK_DONE" });
           return;
         case "recorder/done":
           await storeRecording(message.buffer, message.mimeType);
@@ -211,10 +246,10 @@ export function createRouter(
           await sendPayload();
           return;
         case "x/attached":
-          await commit({ type: "ATTACHED" });
+          await apply({ type: "ATTACHED" });
           return;
         case "x/failed":
-          await commit({ type: "DEGRADE", reason: "x-attach-failed" });
+          await apply({ type: "DEGRADE", reason: "x-attach-failed" });
           return;
         default:
           // state/get と state/changed は router の処理対象外

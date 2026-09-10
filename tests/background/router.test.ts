@@ -136,6 +136,101 @@ describe("録画の開始", () => {
   });
 });
 
+describe("受け付けられないメッセージで状態を壊さない", () => {
+  const clip: StoredClip = {
+    id: "clip-1",
+    blob: new Blob(["動画データ"], { type: "video/mp4" }),
+    mimeType: "video/mp4",
+    range,
+    meta,
+    createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
+  };
+
+  /** 録画を完走させて composing まで進める */
+  async function reachComposing(h: Harness): Promise<void> {
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      buffer: new TextEncoder().encode("動画データ").buffer as ArrayBuffer,
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+  }
+
+  test("添付失敗が二重に届いても録画済みクリップへの参照を失わない", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/failed", reason: "セレクタ不一致" });
+    // 二度目。downloadable は DEGRADE を受理しないので拒まれる遷移になる
+    await h.router.handle({ type: "x/failed", reason: "セレクタ不一致" });
+
+    const state = h.router.getState();
+    expect(state.kind).toBe("downloadable");
+    // failed に落ちると clipId ごと失われ、録画した動画を取り出せなくなる
+    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+  });
+
+  test("録画開始の通知が二重に届いても recording のまま保つ", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({ type: "recorder/started" });
+
+    expect(h.router.getState().kind).toBe("recording");
+  });
+
+  test("二度目の seek 完了を権限エラーとして報告しない", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    // 録画中に届いた重複。権限は関係ない
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+
+    expect(h.router.getState().kind).toBe("recording");
+  });
+
+  test("録画中は別タブからの IN も受け付けない", async () => {
+    const h = makeHarness();
+    await markRange(h.router, 7);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+
+    // 状態変化を受け取っていない別タブは録画中だと知らないまま IN を送りうる
+    await h.router.handle(
+      { type: "clip/event", event: { type: "MARK_IN", sec: 5, meta } },
+      99,
+    );
+
+    // 録画対象タブを奪われると offscreen の録画が解放されないまま取り残される
+    expect(h.router.getState().kind).toBe("recording");
+    expect(h.sentToTab.every((sent) => sent.tabId === 7)).toBe(true);
+  });
+});
+
 describe("状態が進まなかったときは副作用を出さない", () => {
   test("二度目の録画要求では録画準備をやり直さない", async () => {
     const h = makeHarness();
