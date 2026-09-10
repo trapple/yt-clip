@@ -113,6 +113,7 @@
     "@crxjs/vite-plugin": "^2.0.0-beta.28",
     "@playwright/test": "^1.47.0",
     "@types/chrome": "^0.0.268",
+    "@types/node": "^22.0.0",
     "fake-indexeddb": "^6.0.0",
     "jsdom": "^25.0.0",
     "typescript": "^5.6.0",
@@ -136,7 +137,7 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["chrome", "vitest/globals"],
+    "types": ["chrome", "node", "vitest/globals"],
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"] }
   },
