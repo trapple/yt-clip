@@ -3,6 +3,15 @@ export type RecorderHandle = {
   stop(): Promise<Blob>;
 };
 
+export type RecorderOptions = {
+  /**
+   * 明示的な `stop()` より前に録画が終わってしまったときに呼ばれる。
+   * 録画中の異常を呼び出し側が即座に知るための唯一の経路であり、
+   * これが無いと OUT 到達まで (最大 60 秒) 異常に気付けない。
+   */
+  onUnexpectedStop(error: Error): void;
+};
+
 /** tabCapture の streamId から MediaStream を得るための制約 */
 function tabConstraints(streamId: string): MediaStreamConstraints {
   // chromeMediaSource は標準の型定義に存在しないため cast する
@@ -29,6 +38,7 @@ function tabConstraints(streamId: string): MediaStreamConstraints {
 export async function startRecording(
   streamId: string,
   mimeType: string,
+  options: RecorderOptions,
 ): Promise<RecorderHandle> {
   const stream = await navigator.mediaDevices.getUserMedia(
     tabConstraints(streamId),
@@ -72,7 +82,15 @@ export async function startRecording(
     recorder.onstop = () => {
       stopped = true;
       release();
-      settleStopped?.();
+
+      if (settleStopped !== null) {
+        settleStopped();
+        return;
+      }
+      // stop() を待たずに終了した = 録画中の異常。呼び出し側へ即座に知らせる
+      options.onUnexpectedStop(
+        recordingError ?? new Error("録画が予期せず終了しました"),
+      );
     };
 
     // 1 秒ごとに chunk を吐かせ、長い録画でもメモリが一度に膨らまないようにする

@@ -22,7 +22,10 @@ chrome.runtime.onMessage.addListener((message: Message) => {
       fail(String(error));
       return;
     }
-    startRecording(message.streamId, mimeType)
+    startRecording(message.streamId, mimeType, {
+      // 録画が途中で死んだ場合、stop() を待たずに sw へ知らせる
+      onUnexpectedStop: (error) => fail(error.message),
+    })
       .then((started) => {
         handle = started;
         // 録画が始まったことを知らせる。sw はこれを待ってから再生を再開させる
