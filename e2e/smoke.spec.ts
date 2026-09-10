@@ -53,7 +53,7 @@ test("YouTube の再生画面に IN/OUT UI が注入される", async () => {
   await page.close();
 });
 
-test("IN/OUT を指定して録画するとプレビューまで到達する", async () => {
+test("IN/OUT を指定すると popup が録画できる状態になる", async () => {
   const page = await context.newPage();
   await page.goto(TEST_VIDEO, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
@@ -85,7 +85,14 @@ test("IN/OUT を指定して録画するとプレビューまで到達する", a
 
   await expect(page.locator("#yt-clip-bar-status")).toHaveText("0:05 〜 0:08");
 
-  // popup から録画を実行する
+  // popup が同じ範囲を認識し、録画できる状態になっていることを確かめる。
+  //
+  // ここから先 (実際の録画) は自動化できない。chrome.tabCapture は拡張がその
+  // タブに対して呼び出されたことを要求し、実ユーザーがツールバーのアイコンを
+  // 押して popup を開く操作がそれにあたる。Playwright は popup を URL 直接
+  // ナビゲーションで開くためその条件を満たせず、getStreamId が
+  // 「Extension has not been invoked for the current page」で失敗する。
+  // 録画以降は docs/manual-check.md の手動確認で担保する。
   const popup = await context.newPage();
   await popup.goto(
     `chrome-extension://${extensionId}/src/popup/popup.html`,
@@ -94,15 +101,7 @@ test("IN/OUT を指定して録画するとプレビューまで到達する", a
   await expect(popup.locator("#message")).toHaveText(
     "0:05 〜 0:08 (3秒) を録画できます",
   );
-
-  await popup.getByRole("button", { name: "録画" }).click();
-
-  // 実時間 3 秒の録画と書き出しを待つ
-  await expect(popup.locator("#message")).toHaveText(
-    "録画できました。内容を確認してください",
-    { timeout: 60_000 },
-  );
-  await expect(popup.locator("#preview")).toBeVisible();
+  await expect(popup.getByRole("button", { name: "録画" })).toBeEnabled();
 
   await popup.close();
   await page.close();
