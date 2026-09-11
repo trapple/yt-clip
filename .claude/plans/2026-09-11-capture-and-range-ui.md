@@ -124,6 +124,8 @@ Task 2 と Task 5 は他に依存しないので、どの順でも実施でき�
 
 **設計メモ:** `MARK_IN` が `sec` ではなく `range` を受け取るようになる。既定 15 秒の範囲は content script 側 (Task 2 の `makeDefaultRange`) が作る。状態機械は「与えられた範囲を保持する」だけに徹し、範囲の作り方を知らない。
 
+**録画中の拒否は状態機械にも置く。** `MARK_OUT` と `ADJUST_RANGE` は `switch` の網羅性で自動的に拒否されるが、`MARK_IN` はトップレベルで処理するためその保護から外れる。router と UI にも同じガードがあるが、そちらが漏れたときに防御が一枚も残らないのは避ける。判定に使う `BUSY_KINDS` は `types.ts` に置いて 3 箇所で共有する (これまで router と youtube.ts に重複定義されていた)。
+
 `recorder/*` の送り先が offscreen から content script に変わるが、**メッセージ名は変えない**。名前を変えると router / content / テストの広い範囲に波及し、今回の変更の本質 (どこで録画するか) と関係ない差分が増えるため。
 
 - [ ] **Step 1: 型を変更する**
@@ -150,6 +152,20 @@ export type ClipState =
   | { kind: "idle" }
   | { kind: "ready"; range: ClipRange; meta: VideoMeta }
   | { kind: "seeking"; range: ClipRange; meta: VideoMeta }
+```
+
+`ClipState` の定義の直後に、録画中を表す集合を置く。これまで `router.ts` と `youtube.ts` に同じ定義が重複していたが、状態の性質なので型と同じ場所に置く:
+
+```typescript
+/**
+ * 録画が進行中で、範囲の変更を受け付けない状態。
+ * 範囲を変えると状態機械だけが戻り、録画は走り続けて取り残される。
+ */
+export const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
+  "seeking",
+  "recording",
+  "encoding",
+]);
 ```
 
 `ClipEvent` の `MARK_IN` を置き換え、`ADJUST_RANGE` を追加する:
@@ -251,13 +267,26 @@ describe("マーク操作", () => {
     });
   });
 
-  test("録画中は範囲を動かせない", () => {
+  test("録画中は 3 つの操作すべてを拒否する", () => {
     // 状態機械だけが範囲を戻し、録画が走り続ける事態を防ぐ。
-    // UI と router でも同じ制約を持つが、ここでも拒否されることを固定する
-    const recording: ClipState = { kind: "recording", range, meta };
-    expect(
-      reduce(recording, { type: "ADJUST_RANGE", range: { startSec: 0, endSec: 5 } }),
-    ).toMatchObject({ kind: "failed", reason: "internal-error" });
+    // UI と router にも同じ制約があるが、そちらが漏れたときに
+    // 防御が一枚も残らないのは避ける
+    const other: ClipRange = { startSec: 0, endSec: 5 };
+
+    for (const kind of ["seeking", "recording", "encoding"] as const) {
+      const busy: ClipState = { kind, range, meta };
+
+      expect(reduce(busy, { type: "MARK_IN", range: other, meta })).toMatchObject(
+        { kind: "failed", reason: "internal-error" },
+      );
+      expect(reduce(busy, { type: "MARK_OUT", sec: 5 })).toMatchObject({
+        kind: "failed",
+        reason: "internal-error",
+      });
+      expect(
+        reduce(busy, { type: "ADJUST_RANGE", range: other }),
+      ).toMatchObject({ kind: "failed", reason: "internal-error" });
+    }
   });
 
   test("RESET_MARKS で idle に戻る", () => {
@@ -278,10 +307,25 @@ describe("マーク操作", () => {
 `MARK_IN` のトップレベル処理を置き換える:
 
 ```typescript
-  // 範囲の作成はどの状態からでも受け付ける。録画中の拒否は router と UI が担う
   if (event.type === "MARK_IN") {
+    // 録画中に範囲を作り直させない。状態機械だけが戻って録画が走り続ける。
+    // router と UI にも同じガードがあるが、そちらが漏れたときに
+    // 防御が一枚も残らないのは避ける
+    if (BUSY_KINDS.has(state.kind)) return invalid(state);
     return { kind: "ready", range: event.range, meta: event.meta };
   }
+```
+
+`import` に `BUSY_KINDS` を足す:
+
+```typescript
+import {
+  BUSY_KINDS,
+  type ClipEvent,
+  type ClipRange,
+  type ClipState,
+  type VideoMeta,
+} from "@/shared/types";
 ```
 
 `case "marking":` のブロックを**丸ごと削除**する。
@@ -1080,6 +1124,8 @@ export type RouterDeps = {
 };
 ```
 
+**`BUSY_KINDS` のローカル定義を削除し、`@/shared/types` から import する** (Task 1 で共有定数になった)。
+
 **`streamId` の宣言と `prepareCapture` を丸ごと削除する。**
 
 **`beginRecording` を置き換える:**
@@ -1626,17 +1672,11 @@ import { YT_SELECTORS } from "@/content/selectors";
 import { encodeBase64 } from "@/shared/base64";
 import type { Message } from "@/shared/messages";
 import { formatTime, validateRange } from "@/shared/time";
-import type { ClipEvent, ClipRange } from "@/shared/types";
+// BUSY_KINDS は状態の性質なので types.ts で共有している
+import { BUSY_KINDS, type ClipEvent, type ClipRange } from "@/shared/types";
 
 const BAR_ID = "yt-clip-bar";
 const OVERLAY_ID = "yt-clip-overlay";
-
-/** 録画が進行中で、範囲の変更を受け付けない状態 */
-const BUSY_KINDS: ReadonlySet<string> = new Set([
-  "seeking",
-  "recording",
-  "encoding",
-]);
 
 /** いま指定されている範囲。service worker と同じものを持つ */
 let currentRange: ClipRange | null = null;
