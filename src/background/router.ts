@@ -17,7 +17,12 @@ export type RouterDeps = {
   getClip(id: string): Promise<StoredClip>;
   /** popup 宛。受け手が居ないことは正常なので送信側では扱わない */
   sendToRuntime(message: Message): void;
-  sendToTab(tabId: number, message: Message): void;
+  /**
+   * タブ宛。**受け手が居ないことは異常なので必ず失敗を返す。**
+   * タブが閉じられた・content script が消えた場合、録画の続きを進める相手が
+   * 居ないまま seeking / encoding で固まり、popup からも抜けられなくなる
+   */
+  sendToTab(tabId: number, message: Message): Promise<void>;
   openComposeTab(): Promise<number>;
   loadTemplate(): Promise<string>;
   /** UTC epoch ミリ秒 */
@@ -44,6 +49,12 @@ export type RouterSnapshot = {
 export type Router = {
   getState(): ClipState;
   handle(message: Message, senderTabId?: number): Promise<void>;
+  /**
+   * タブが閉じられた。録画対象のタブなら録画は続けられない。
+   * service worker は数十秒で止まるためタイマーによる救済は当てにできず、
+   * 閉じられたことを知る経路はこれしかない
+   */
+  handleTabRemoved(tabId: number): Promise<void>;
 };
 
 export function createRouter(
@@ -55,6 +66,8 @@ export function createRouter(
   let composeTabId: number | null = initial?.composeTabId ?? null;
   /** 投稿画面の準備待ちを打ち切るためのハンドル */
   let cancelComposeTimeout: (() => void) | null = null;
+  /** 直前の publish で、録画対象タブへ状態を届けられなかったか */
+  let tabDeliveryFailed = false;
 
   /** 新しい状態を確定させ、関係者へ通知する */
   async function publish(next: ClipState): Promise<void> {
@@ -71,8 +84,17 @@ export function createRouter(
 
     const message: Message = { type: "state/changed", state };
     deps.sendToRuntime(message);
+
+    tabDeliveryFailed = false;
     if (captureTabId !== null) {
-      deps.sendToTab(captureTabId, message);
+      try {
+        await deps.sendToTab(captureTabId, message);
+      } catch (error) {
+        // ここで失敗へ落とすと publish が自分を呼び直して再帰する。
+        // 落とすかどうかの判断は apply に任せ、事実だけを残す
+        console.error("録画対象のタブへ状態を届けられませんでした", error);
+        tabDeliveryFailed = true;
+      }
     }
   }
 
@@ -117,6 +139,15 @@ export function createRouter(
 
     const previous = state;
     await publish(next);
+
+    // 録画の進行中 (seeking / recording / encoding) は、content script が
+    // state/changed を受けて次の工程を始める。届かなければ誰も先へ進めず、
+    // popup も actions: [] なのでユーザーに抜け道が残らない。
+    // 失敗状態は busy ではないため、ここから再帰しても一度きりで止まる
+    if (tabDeliveryFailed && BUSY_KINDS.has(state.kind)) {
+      tabDeliveryFailed = false;
+      await fail("tab-lost");
+    }
     return previous;
   }
 
@@ -138,7 +169,13 @@ export function createRouter(
       return;
     }
     // 録画するのは content script。service worker は指示を出すだけ
-    deps.sendToTab(captureTabId, { type: "recorder/start" });
+    try {
+      await deps.sendToTab(captureTabId, { type: "recorder/start" });
+    } catch (error) {
+      // 指示が届かなければ録画は始まらない。seeking のまま放置しない
+      console.error("録画の開始を指示できませんでした", error);
+      await fail("tab-lost");
+    }
   }
 
   /**
@@ -188,7 +225,9 @@ export function createRouter(
 
     const clip = await deps.getClip(state.clipId);
     const template = await deps.loadTemplate();
-    deps.sendToTab(composeTabId, {
+    // 投稿タブへ届かなければここで throw する。composing のまま固まらせない
+    // ため、handle の復旧処理が DEGRADE (ダウンロードへ退避) に落とす
+    await deps.sendToTab(composeTabId, {
       type: "x/payload",
       base64: encodeBase64(new Uint8Array(await clip.blob.arrayBuffer())),
       mimeType: clip.mimeType,
@@ -235,8 +274,17 @@ export function createRouter(
     if (state.kind === previous.kind) return;
 
     if (state.kind === "encoding") {
-      if (captureTabId !== null) {
-        deps.sendToTab(captureTabId, { type: "recorder/stop" });
+      if (captureTabId === null) {
+        await fail("tab-lost");
+        return;
+      }
+      try {
+        await deps.sendToTab(captureTabId, { type: "recorder/stop" });
+      } catch (error) {
+        // 停止を指示できなければ録画結果は永久に届かない。
+        // encoding のまま固まると popup からも抜けられなくなる
+        console.error("録画の停止を指示できませんでした", error);
+        await fail("tab-lost");
       }
       return;
     }
@@ -317,6 +365,25 @@ export function createRouter(
             ? { type: "DEGRADE", reason: "x-attach-failed" }
             : { type: "FAIL", reason: "internal-error" };
           await apply(recovery).catch(() => undefined);
+        }
+      });
+      return queue;
+    },
+
+    handleTabRemoved(tabId: number): Promise<void> {
+      queue = queue.then(async () => {
+        if (tabId !== captureTabId) return;
+        // このタブへはもう何も届かない。次の指示先として使わせない
+        captureTabId = null;
+
+        // 録画の進行中だけ失敗に落とす。preview / composing は録画済みの
+        // クリップを抱えており、failed には clipId が無いため参照ごと失う。
+        // ready で閉じられた場合は、録画開始時に tab-lost として弾かれる
+        if (!BUSY_KINDS.has(state.kind)) return;
+        try {
+          await fail("tab-lost");
+        } catch (error) {
+          console.error("タブ消失の反映に失敗しました", error);
         }
       });
       return queue;

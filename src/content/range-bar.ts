@@ -20,7 +20,11 @@ export type RangeBar = {
   element: HTMLElement;
   /** 範囲と動画の長さを反映して描画し直す */
   update(range: ClipRange, videoDurationSec: number): void;
-  /** 操作を受け付けるかどうか。録画中は false にする */
+  /**
+   * 操作を受け付けるかどうか。
+   * **生成直後は false。** 範囲が確定するまで (spec §5.3) と、範囲を変えられない
+   * 状態 (録画中・録画後のプレビュー待ち) では操作させない
+   */
   setEnabled(enabled: boolean): void;
   destroy(): void;
 };
@@ -38,7 +42,8 @@ const STYLE = {
 
 export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   const element = document.createElement("div");
-  element.style.cssText = STYLE.root;
+  // 初期状態は無効。見た目 (薄さ) と実際の操作可否を最初から一致させる
+  element.style.cssText = `${STYLE.root}${STYLE.disabled}`;
 
   const startLabel = document.createElement("span");
   const endLabel = document.createElement("span");
@@ -63,7 +68,13 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   /** 現在の範囲と窓。update で更新される */
   let range: ClipRange = { startSec: 0, endSec: 0 };
   let window_: TimeWindow = { startSec: 0, endSec: 0 };
-  let enabled = true;
+  /**
+   * 範囲が確定するまで操作させない (spec §5.3)。
+   * 初期値の範囲と窓はどちらも幅 0 で、この状態でハンドルを掴めてしまうと
+   * 動かせる余地が無いまま不正な範囲が生まれる。有効化は状態機械が
+   * ready を知らせてから行う
+   */
+  let enabled = false;
   /** 間引き用。次の描画フレームまで scrub をまとめる */
   let scrubFrame = 0;
   let pendingScrubSec: number | null = null;

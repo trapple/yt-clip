@@ -21,6 +21,11 @@ export type FailureReason =
   | "recording-aborted"
   /** 暗号化された動画は captureStream が黒画面を返すため録画できない */
   | "drm-protected"
+  /**
+   * 範囲を作った動画と、いま再生している動画が違う。
+   * SPA 遷移で動画が入れ替わると、範囲もタイトルも URL も別の動画のものになる
+   */
+  | "video-changed"
   /** 状態機械の不正遷移など、ユーザー起因ではない内部エラー */
   | "internal-error";
 

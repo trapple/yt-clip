@@ -21,17 +21,11 @@ const ready = loadSnapshot().then((snapshot) =>
         // popup が開いていないだけなら受け手不在は正常
         void chrome.runtime.sendMessage(message).catch(() => undefined);
       },
-      sendToTab: (tabId, message) => {
-        void chrome.tabs.sendMessage(tabId, message).catch((error: unknown) => {
-          // content script がまだ居ない場合もあるが、大きな payload が
-          // 送れなかった場合もここに来る。理由を残さないと区別できない
-          console.error(
-            "タブへの送信に失敗しました",
-            tabId,
-            message.type,
-            error,
-          );
-        });
+      // 失敗は握り潰さず router へ返す。content script が居ない場合も、
+      // 大きな payload が送れなかった場合もここで reject する。
+      // router は録画の工程に応じて tab-lost / ダウンロードへの退避に落とす
+      sendToTab: async (tabId, message) => {
+        await chrome.tabs.sendMessage(tabId, message);
       },
       openComposeTab: async () => {
         const tab = await chrome.tabs.create({ url: COMPOSE_URL });
@@ -59,6 +53,13 @@ const ready = loadSnapshot().then((snapshot) =>
     snapshot,
   ),
 );
+
+// 録画対象のタブが閉じられると、録画の続きを進める相手が居なくなる。
+// service worker は数十秒で止まるためタイマーによる救済は当てにできず、
+// 閉じられたことを知る経路はこのイベントしかない
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void ready.then((router) => router.handleTabRemoved(tabId));
+});
 
 chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
   void ready.then(async (router) => {

@@ -45,7 +45,7 @@ function makeHarness(
     sendToRuntime: (message) => {
       sentToRuntime.push(message);
     },
-    sendToTab: (tabId, message) => {
+    sendToTab: async (tabId, message) => {
       sentToTab.push({ tabId, message });
     },
     openComposeTab: async () => 99,

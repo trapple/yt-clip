@@ -149,6 +149,15 @@ export function clampHandle(
   assertRange(range);
   assertWindow(window);
 
+  // 窓が最小長より狭いと、下限が上限を追い越して範囲が反転する。
+  // 窓幅 0 (範囲が未確定) や、動画自体が最小長より短い場合に起きる。
+  // 反転した結果は負の再生位置になり、描画側の assertSeconds が
+  // pointermove の中で throw してドラッグごと固まる。
+  // どのみち動かせる余地が無いので、範囲をそのまま返す
+  if (window.endSec - window.startSec < MIN_CLIP_SEC) {
+    return range;
+  }
+
   if (kind === "in") {
     const lowest = Math.max(window.startSec, range.endSec - MAX_CLIP_SEC);
     const highest = range.endSec - MIN_CLIP_SEC;

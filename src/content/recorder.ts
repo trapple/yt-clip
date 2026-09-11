@@ -32,7 +32,9 @@ type CapturableVideo = HTMLVideoElement & {
  * 無駄だったと分かることになる。
  */
 export function assertRecordable(video: HTMLVideoElement): void {
-  if (video.mediaKeys !== null) {
+  // `mediaKeys` を持たない環境では undefined になる。`!== null` で見ると
+  // DRM でない動画まで保護扱いになり、どの動画も録画できなくなる
+  if ((video.mediaKeys ?? null) !== null) {
     throw new DrmProtectedError();
   }
 }

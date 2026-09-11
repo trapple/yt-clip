@@ -150,8 +150,18 @@ export async function insertText(
   throw new Error("本文を入力できませんでした");
 }
 
+/**
+ * service worker へ添付の結果を伝える。
+ *
+ * 送れなかった場合、service worker は `composing` のまま待ち続ける。
+ * 投稿タブにはこの拡張の UI が無く、失敗を伝える相手はコンソールしかない
+ * ため、握り潰さず理由を残す (`docs/manual-check.md` の X 添付の節で、
+ * 投稿タブのコンソールを見る手順と対になっている)。
+ */
 function notify(message: Message): void {
-  void chrome.runtime.sendMessage(message);
+  void chrome.runtime.sendMessage(message).catch((error: unknown) => {
+    console.error("[yt-clip] 拡張への通知に失敗しました", message.type, error);
+  });
 }
 
 // content script は常に chrome 拡張コンテキストで読み込まれるため実行時は必ず true になるが、
