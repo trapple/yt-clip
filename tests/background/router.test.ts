@@ -130,12 +130,14 @@ describe("録画の開始", () => {
     });
   });
 
-  test("タブへ指示が届かなければ失敗として提示する", async () => {
+  test("受け手が居ないと分かったら失敗として提示する", async () => {
     // タブは残っているが content script が消えている (拡張の再読み込み等)
     const h = makeHarness({
       sendToTab: async (_tabId, message) => {
         if (message.type === "recorder/start") {
-          throw new Error("受け手がいません");
+          throw new Error(
+            "Could not establish connection. Receiving end does not exist.",
+          );
         }
       },
     });
@@ -153,12 +155,15 @@ describe("録画の開始", () => {
     });
   });
 
-  test("状態を届けられなければ録画の進行を打ち切る", async () => {
-    // 録画対象のタブが閉じられ、state/changed すら届かない
+  test("状態の通知が届かなくても、録画の進行そのものは打ち切らない", async () => {
+    // state/changed はブロードキャスト。応答が無いこともあるうえ、
+    // publish は直列 queue の中で走るので待ってはいけない
     const h = makeHarness({
       sendToTab: async (_tabId, message) => {
-        if (message.type === "state/changed" && message.state.kind === "seeking") {
-          throw new Error("タブがありません");
+        if (message.type === "state/changed") {
+          throw new Error(
+            "The message port closed before a response was received.",
+          );
         }
       },
     });
@@ -168,12 +173,7 @@ describe("録画の開始", () => {
       event: { type: "START_RECORDING" },
     });
 
-    // content script は state/changed を受けて seek を始める。届かなければ
-    // SEEK_DONE も永久に来ない
-    expect(h.router.getState()).toMatchObject({
-      kind: "failed",
-      reason: "tab-lost",
-    });
+    expect(h.router.getState().kind).toBe("seeking");
   });
 
   test("録画対象のタブが閉じられたら失敗として提示する", async () => {

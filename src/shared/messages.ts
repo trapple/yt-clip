@@ -26,6 +26,15 @@ export type Message =
   | { type: "recorder/done"; base64: string; mimeType: string }
   /** content → sw: 録画中の失敗 */
   | { type: "recorder/failed"; reason: string }
+  /**
+   * content → sw: content script が読み込まれた (初回 / タブのリロード)。
+   *
+   * 録画中にタブをリロードすると、OUT を監視していた content script ごと消える。
+   * タブ自体は生きているため `chrome.tabs.onRemoved` では気付けず、放置すると
+   * `OUT_REACHED` が永久に来ない。**録画対象のタブかどうかは送り主の tabId を
+   * 持つ service worker にしか判定できない**ため、判断は router に委ねる。
+   */
+  | { type: "content/loaded" }
   /** content(x) → sw: 投稿画面の準備完了 */
   | { type: "x/ready" }
   /**

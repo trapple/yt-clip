@@ -169,8 +169,18 @@ function notify(message: Message): void {
 // ReferenceError で落ちる。テストのために振る舞いを変えるのではなく、
 // 拡張コンテキスト外で読み込まれた場合に安全側へ倒すガードとして扱う。
 if (typeof chrome !== "undefined") {
-  chrome.runtime.onMessage.addListener((message: Message) => {
+  /**
+   * **同期で `sendResponse()` を返すこと。** 応答しないと送り手の Promise は
+   * `The message port closed before a response was received.` で reject し、
+   * 受け取って添付を進めていることが「投稿タブが居ない」と区別できなくなる
+   * (service worker がダウンロード誘導へ退避してしまう)。
+   * `return true` にして添付の完了後に応答するのも不可 — 送り手は直列 queue の
+   * 中で待つため、その間 router 全体が止まる。添付の結果は `x/attached` /
+   * `x/failed` で別途知らせる。
+   */
+  chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) => {
     if (message.type !== "x/payload") return;
+    sendResponse();
 
     void (async () => {
       try {

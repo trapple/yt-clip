@@ -23,8 +23,14 @@ let sent: Message[] = [];
 let swState: ClipState = { kind: "idle" };
 /** このメッセージ種別の送信を失敗させる (メッセージ長超過などの再現) */
 let rejectMessageType: Message["type"] | null = null;
+/** service worker からタブへ届くメッセージを受けるリスナーの形 */
+type TabListener = (
+  message: Message,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+) => void;
 /** youtube.ts が登録した onMessage リスナー */
-let onMessage: ((message: Message) => void) | null = null;
+let onMessage: TabListener | null = null;
 
 /** MediaRecorder のフェイク。録画が止まったかを実際の状態で確かめる */
 type FakeRecorder = {
@@ -181,7 +187,7 @@ function installGlobals(): void {
   vi.stubGlobal("chrome", {
     runtime: {
       onMessage: {
-        addListener: (fn: (message: Message) => void): void => {
+        addListener: (fn: TabListener): void => {
           onMessage = fn;
         },
       },
@@ -201,15 +207,30 @@ function installGlobals(): void {
   });
 }
 
+/**
+ * service worker からタブへメッセージを届け、**同期で応答が返ったか**を見る。
+ * 応答しないと送り手の Promise は reject し、受け取って処理したことが
+ * 「タブが居ない」と区別できなくなる。
+ */
+function deliver(message: Message): { responded: boolean } {
+  const result = { responded: false };
+  onMessage?.(message, {}, () => {
+    result.responded = true;
+  });
+  return result;
+}
+
 /** service worker から状態変化を届ける */
-function emit(state: ClipState): void {
+function emit(state: ClipState): { responded: boolean } {
   swState = state;
-  onMessage?.({ type: "state/changed", state });
+  return deliver({ type: "state/changed", state });
 }
 
 /** service worker から content script への指示を届ける */
-function command(type: "recorder/start" | "recorder/stop"): void {
-  onMessage?.({ type });
+function command(type: "recorder/start" | "recorder/stop"): {
+  responded: boolean;
+} {
+  return deliver({ type });
 }
 
 function clickButton(label: string): void {

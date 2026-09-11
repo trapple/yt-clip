@@ -29,6 +29,8 @@ import {
 } from "@/shared/types";
 
 const BAR_ID = "yt-clip-bar";
+/** 拡大バーの要素。位置ではなく id で辿れるようにする */
+const RANGE_ID = "yt-clip-range";
 const OVERLAY_ID = "yt-clip-overlay";
 
 /**
@@ -201,7 +203,13 @@ function applyRange(range: ClipRange, videoDurationSec: number): void {
 function onMarkIn(): void {
   // 録画中に打ち直されると状態機械だけが範囲を作り直し、録画は走り続けて
   // 取り残される。状態機械と router にも同じガードがあるが、ここで止めれば
-  // ユーザーに理由をすぐ返せる
+  // ユーザーに理由をすぐ返せる。
+  //
+  // **ドラッグ (canAdjustRange) と違い、IN は preview からでも受け付ける。**
+  // spec §5.6 の「MARK_IN はどの状態からでも ready へ」を content script 側で
+  // 狭めると、録り終えた後に次の切り抜きを始められなくなるため。代償として、
+  // 録画済みクリップへの参照 (clipId) は状態から外れる (IndexedDB には残るが
+  // popup から辿れなくなる)。この非対称は意図したもの
   if (busy) {
     setStatus("録画中は範囲を変更できません");
     return;
@@ -558,6 +566,7 @@ function buildBar(): HTMLElement {
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される
   rangeBar = createRangeBar({ onScrub, onCommit: onRangeCommitted });
+  rangeBar.element.id = RANGE_ID;
   bar.append(row, rangeBar.element);
   return bar;
 }
@@ -593,16 +602,30 @@ function mount(): void {
   refreshOverlay();
 }
 
-chrome.runtime.onMessage.addListener((message: Message) => {
+/**
+ * service worker からの指示を受ける。
+ *
+ * **自分が扱う型には必ず同期で `sendResponse()` を返すこと。** 応答しないと
+ * 送り手の Promise は `The message port closed before a response was received.`
+ * で reject し、受け取って処理したことが「タブが居ない」と区別できなくなる。
+ *
+ * **`return true` にして非同期で応答してはいけない。** 送り手 (router) は
+ * 直列 queue の中で応答を待つため、応答が遅れると以降のメッセージが 1 つも
+ * 処理されなくなり、拡張を再読み込みするまで復帰できない。
+ */
+chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) => {
   if (message.type === "recorder/start") {
+    sendResponse();
     void beginRecording();
     return;
   }
   if (message.type === "recorder/stop") {
+    sendResponse();
     void finishRecording();
     return;
   }
   if (message.type !== "state/changed") return;
+  sendResponse();
 
   const state = message.state;
   applyStateToDisplay(state);
@@ -631,6 +654,40 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   }
 });
 
+/**
+ * 読み込み時に状態機械へ知らせ、返ってきた状態に画面を合わせる。
+ *
+ * 録画中にタブをリロードすると、OUT を監視していた content script ごと消える。
+ * タブは生きているため `tabs.onRemoved` は発火せず、`OUT_REACHED` が永久に
+ * 来ないまま service worker は `recording` で固まる。**録画対象のタブだったか
+ * どうかは送り主の tabId を持つ service worker にしか判定できない**ので、
+ * こちらは読み込まれたことを伝えるだけにして、録画を打ち切るかどうかは
+ * router に委ねる (別の YouTube タブを開いただけで録画を落とさないため)。
+ *
+ * 打ち切られなかった場合は、応答に載ってくる状態で範囲と帯を復元する。
+ * service worker は遷移したときにしか通知しないので、読み込み直した
+ * content script はこれを送らない限り状態を 1 度も受け取れない。
+ */
+function recoverFromState(): void {
+  void chrome.runtime
+    .sendMessage({ type: "content/loaded" } satisfies Message)
+    .then((response: MessageResponse | undefined) => {
+      if (response === undefined) {
+        setStatus("拡張から応答がありませんでした");
+        return;
+      }
+      applyStateToDisplay(response.state);
+      if (currentRange !== null) {
+        setStatus(rangeLabel(currentRange));
+      }
+    })
+    .catch((error: unknown) => {
+      // 拡張の再読み込み直後などは受け手が居ない。状態を取り戻せないだけで、
+      // 次の state/changed で追いつくため、ここで操作を止める必要はない
+      console.warn(`状態を取得できませんでした: ${String(error)}`);
+    });
+}
+
 /** 直前に見ていた URL。SPA 遷移の検出に使う */
 let lastHref = location.href;
 
@@ -648,3 +705,4 @@ const observer = new MutationObserver(() => {
 });
 observer.observe(document.body, { childList: true, subtree: true });
 mount();
+recoverFromState();
