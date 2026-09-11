@@ -1713,6 +1713,7 @@ git -C . commit -m "feat: 拡大バーの描画とドラッグを追加
 - Modify: `src/content/youtube.ts` (大幅改修)
 - Modify: `src/content/selectors.ts` (シークバーのセレクタを追加)
 - Modify: `src/popup/view.ts`, `tests/popup/view.test.ts`
+- Modify: `src/content/player.ts` (実態と食い違うコメントの修正のみ)
 
 **Interfaces:**
 - Consumes: `createRangeBar` (`@/content/range-bar`)、`makeDefaultRange` (`@/content/range-math`)、`assertRecordable` / `startRecording` / `DrmProtectedError` / `RecorderHandle` (`@/content/recorder`)、`pickMimeType` (`@/content/codec`)、`encodeBase64` (`@/shared/base64`)
@@ -2075,7 +2076,40 @@ chrome.runtime.onMessage.addListener((message: Message) => {
 });
 ```
 
-- [ ] **Step 7: popup を追随させる**
+- [ ] **Step 7: 実態と食い違うコメントを直す**
+
+録画方式が変わったことで、いくつかのコメントが嘘になっている。**コードは変えず、コメントだけ**を直す。
+
+`src/content/player.ts` の `startPlayback` の説明:
+
+```typescript
+/**
+ * 再生を開始し、実際に再生が始まるまで待つ。
+ * seek とは分離してある。録画が実際に始まる (content script が recorder/started を
+ * 送り、service worker が recording へ進める) まで動画を止めておかないと、
+ * クリップの冒頭が欠けるため。
+ */
+```
+
+`src/content/youtube.ts` の `onMarkIn` にある録画中ガードの説明:
+
+```typescript
+  // 録画中に打ち直されると状態機械だけが範囲を作り直し、録画は走り続けて
+  // 取り残される。状態機械と router にも同じガードがあるが、ここで止めれば
+  // ユーザーに理由をすぐ返せる
+```
+
+`src/content/youtube.ts` の `prepareRecording` の説明:
+
+```typescript
+/**
+ * 録画の前半。IN へ seek するが再生はしない。
+ * service worker が録画開始を指示し、それを受けた録画が実際に始まるまで
+ * 動画を進めないため。
+ */
+```
+
+- [ ] **Step 8: popup を追随させる**
 
 `src/popup/view.ts` の `FAILURE_MESSAGES` から `capture-permission-denied` を削除し、`drm-protected` を足す:
 
@@ -2097,17 +2131,17 @@ const FAILURE_MESSAGES: Record<FailureReason, string> = {
 - `marking` のテスト (「marking では OUT の指定を促す」) を削除
 - 失敗理由の網羅テストから `capture-permission-denied` を削除し、`["drm-protected", "この動画は保護されているため録画できません"]` を追加
 
-- [ ] **Step 8: すべて通す**
+- [ ] **Step 9: すべて通す**
 
 実行: `npx vitest run && npx tsc --noEmit && npm run build`
 期待: 全テスト PASS / 型エラーなし / ビルド成功
 
 **`tsc` のエラーがここで初めてゼロになる。** Task 1 以降ずっと残っていた `marking` 参照と `MARK_IN` の形の不一致が、この step で解消される。
 
-- [ ] **Step 9: commit**
+- [ ] **Step 10: commit**
 
 ```bash
-git -C . add src/content/youtube.ts src/content/selectors.ts src/popup/view.ts tests/popup/view.test.ts
+git -C . add src/content/youtube.ts src/content/selectors.ts src/content/player.ts src/popup/view.ts tests/popup/view.test.ts
 git -C . commit -m "feat: 拡大バーで範囲を微調整できるようにする
 
 IN を押すと既定の長さの範囲ができ、拡大バーのハンドルで秒単位に
