@@ -725,6 +725,42 @@ describe("録画の終了と保存", () => {
     });
   });
 
+  test("保存する時点でコーデック指定を落とす", async () => {
+    // content script からはコーデック付きの MIME が届く。ここで落とさないと
+    // 保存する Blob も、添付する File も、ダウンロードするファイルも
+    // パラメータ付きのラベルになり、X の対応形式の判定に落ちる
+    const h = makeHarness();
+    await recordUntilEncoding(h);
+
+    await h.router.handle({
+      type: "recorder/done",
+      base64: "AAECAw==",
+      mimeType: 'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
+    });
+
+    expect(h.saved).toHaveLength(1);
+    expect(h.saved[0]?.mimeType).toBe("video/mp4");
+    expect(h.saved[0]?.blob.type).toBe("video/mp4");
+    expect(h.router.getState().kind).toBe("preview");
+  });
+
+  test("コーデック指定を落としても WebM は添付せず退避する", async () => {
+    // 正規化が退避判定 (includes("mp4")) を壊していないことを固める
+    const h = makeHarness();
+    await recordUntilEncoding(h);
+
+    await h.router.handle({
+      type: "recorder/done",
+      base64: "AAECAw==",
+      mimeType: "video/webm;codecs=vp9,opus",
+    });
+
+    expect(h.saved[0]?.mimeType).toBe("video/webm");
+    const state = h.router.getState();
+    expect(state.kind).toBe("downloadable");
+    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+  });
+
   test("停止指示に応答が無くても、届いた録画結果を保存する", async () => {
     // ここで tab-lost に落とすと、後から届く録画結果を storeRecording が
     // 「encoding ではない」として捨てる。実時間をかけた成果物が失われる

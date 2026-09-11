@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   SelectorMissingError,
   attachFile,
+  buildClipFile,
   containsHead,
   findElement,
   waitForElement,
@@ -154,5 +155,31 @@ describe("containsHead", () => {
     expect(containsHead("別の本文が入っています", body("タイトル"))).toBe(
       false,
     );
+  });
+});
+
+describe("buildClipFile", () => {
+  const payload = {
+    base64: "AAECAw==",
+    fileName: "clip.mp4",
+    mimeType: 'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
+  };
+
+  test("File のラベルにコーデック指定を残さない", () => {
+    // 実機で X が「一部の画像/動画をアップロードできません。」を出した原因。
+    // 中身は正しい MP4 なのに、ラベルにパラメータが残ると弾かれる
+    expect(buildClipFile(payload).type).toBe("video/mp4");
+  });
+
+  test("素の MIME が渡ってきたらそのまま使う", () => {
+    expect(buildClipFile({ ...payload, mimeType: "video/mp4" }).type).toBe(
+      "video/mp4",
+    );
+  });
+
+  test("ファイル名と中身はそのまま渡す", () => {
+    const file = buildClipFile(payload);
+    expect(file.name).toBe("clip.mp4");
+    expect(file.size).toBe(4);
   });
 });
