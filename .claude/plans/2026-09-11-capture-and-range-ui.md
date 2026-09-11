@@ -1765,6 +1765,8 @@ git -C . commit -m "feat: 拡大バーの描画とドラッグを追加
 
 **DRM の判定は seek の前に行う。** 要件は「録画を開始する前」だが、可能な限り早い方がよい。`seeking` に入った直後なら、ユーザーは録画ボタンを押した直後に結果を知れる。
 
+**動画要素の取得は必ず `try` の中に入れる。** `getVideo()` は要素が見つからないと投げる。状態変化のリスナは同期なので、外に置くと例外でリスナごと止まり、その下の録画開始に到達しない。`async` 関数でも外に置くと、投げた例外が Promise の拒否になって呼び出し元の `void` に消える。**どちらも「無言で止まる」形になり、このプロジェクトで何度も踏んでいる**。
+
 - [ ] **Step 1: シークバーのセレクタを追加する**
 
 `src/content/selectors.ts` の `YT_SELECTORS` に 1 行足す:
@@ -1928,22 +1930,23 @@ async function playRange(): Promise<void> {
   cancelPreview?.();
   cancelPreview = null;
 
-  const video = getVideo();
   const range = currentRange;
+  // 動画要素の取得も try に入れる。async 関数の外に置くと、投げた例外が
+  // Promise の拒否になって呼び出し元の void に消え、押しても無反応になる
   try {
+    const video = getVideo();
     await seekTo(video, range.startSec);
     await startPlayback(video);
+
+    setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
+    cancelPreview = onReachTime(video, range.endSec, () => {
+      cancelPreview = null;
+      video.pause();
+      setStatus(rangeLabel(range));
+    });
   } catch (error) {
     setStatus(`範囲を再生できませんでした: ${String(error)}`);
-    return;
   }
-
-  setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
-  cancelPreview = onReachTime(video, range.endSec, () => {
-    cancelPreview = null;
-    video.pause();
-    setStatus(rangeLabel(range));
-  });
 }
 ```
 
@@ -2104,9 +2107,18 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   rangeBar?.setEnabled(!busy);
 
   // 無効化しただけでは、打ち切られたドラッグの見た目が最後の位置に残る。
-  // 確定していない範囲が表示され続けないよう、確定済みの範囲で描き直す
+  // 確定していない範囲が表示され続けないよう、確定済みの範囲で描き直す。
+  //
+  // ここで落とすわけにはいかない。このリスナは同期で、例外が出ると
+  // この下の録画開始まで到達しない。動画要素は SPA 遷移の直後などに
+  // 一瞬取れないことがあり、そのたびに録画が始まらないまま黙って
+  // 止まることになる。表示の乱れは録画を止める理由にならない
   if (busy && currentRange !== null) {
-    rangeBar?.update(currentRange, getVideo().duration);
+    try {
+      rangeBar?.update(currentRange, getVideo().duration);
+    } catch (error) {
+      console.warn("拡大バーを更新できませんでした", error);
+    }
   }
 
   if (state.kind === "seeking") {
