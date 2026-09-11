@@ -1,8 +1,9 @@
-import type {
-  ClipEvent,
-  ClipRange,
-  ClipState,
-  VideoMeta,
+import {
+  BUSY_KINDS,
+  type ClipEvent,
+  type ClipRange,
+  type ClipState,
+  type VideoMeta,
 } from "@/shared/types";
 
 export const INITIAL_STATE: ClipState = { kind: "idle" };
@@ -39,8 +40,11 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
     };
   }
 
-  // 範囲の作成はどの状態からでも受け付ける。録画中の拒否は router と UI が担う
   if (event.type === "MARK_IN") {
+    // 録画中に範囲を作り直させない。状態機械だけが戻って録画が走り続ける。
+    // router と UI にも同じガードがあるが、そちらが漏れたときに
+    // 防御が一枚も残らないのは避ける
+    if (BUSY_KINDS.has(state.kind)) return invalid(state);
     return { kind: "ready", range: event.range, meta: event.meta };
   }
 

@@ -51,16 +51,26 @@ describe("マーク操作", () => {
     });
   });
 
-  test("録画中は範囲を動かせない", () => {
+  test("録画中は 3 つの操作すべてを拒否する", () => {
     // 状態機械だけが範囲を戻し、録画が走り続ける事態を防ぐ。
-    // UI と router でも同じ制約を持つが、ここでも拒否されることを固定する
-    const recording: ClipState = { kind: "recording", range, meta };
-    expect(
-      reduce(recording, {
-        type: "ADJUST_RANGE",
-        range: { startSec: 0, endSec: 5 },
-      }),
-    ).toMatchObject({ kind: "failed", reason: "internal-error" });
+    // UI と router にも同じ制約があるが、そちらが漏れたときに
+    // 防御が一枚も残らないのは避ける
+    const other: ClipRange = { startSec: 0, endSec: 5 };
+
+    for (const kind of ["seeking", "recording", "encoding"] as const) {
+      const busy: ClipState = { kind, range, meta };
+
+      expect(
+        reduce(busy, { type: "MARK_IN", range: other, meta }),
+      ).toMatchObject({ kind: "failed", reason: "internal-error" });
+      expect(reduce(busy, { type: "MARK_OUT", sec: 5 })).toMatchObject({
+        kind: "failed",
+        reason: "internal-error",
+      });
+      expect(
+        reduce(busy, { type: "ADJUST_RANGE", range: other }),
+      ).toMatchObject({ kind: "failed", reason: "internal-error" });
+    }
   });
 
   test("RESET_MARKS で idle に戻る", () => {

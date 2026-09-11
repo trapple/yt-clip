@@ -60,6 +60,16 @@ export type ClipState =
       meta: VideoMeta | null;
     };
 
+/**
+ * 録画が進行中で、範囲の変更を受け付けない状態。
+ * 範囲を変えると状態機械だけが戻り、録画は走り続けて取り残される。
+ */
+export const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
+  "seeking",
+  "recording",
+  "encoding",
+]);
+
 export type ClipEvent =
   /** 範囲の作成。既定の長さを決めるのは content script の責務 */
   | { type: "MARK_IN"; range: ClipRange; meta: VideoMeta }
