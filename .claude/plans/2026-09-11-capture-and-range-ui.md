@@ -398,6 +398,8 @@ marking (IN だけ打った中間状態) が不要になる。状態機械は与
 
 **入力は全公開関数で検証する。** 一部だけ検証すると、検証していない経路から `NaN` が入って黙って下流へ流れる。`Math.max(0, NaN)` は `NaN` を返すので、丸めでは防げない。順序の逆転 (`endSec < startSec`) も、そのままだと「もっともらしいが無意味な」結果を返すため弾く。
 
+**`ClipRange` と `TimeWindow` は同じ規則で検証する。** 形が同じで同じ関数群に渡されるため、片方にだけ順序チェックを入れると、もう片方から無意味な値が入り込む。`assertInterval` に集約して、同型の型が増えても同じ原則が自動的に効くようにする。
+
 `clampHandle` は「動かしたい位置」を受け取り、制約を適用した**範囲全体**を返す。片方のハンドルだけを返さないのは、最大長の制約で反対側も動く可能性があるため……ではなく、**反対側は動かさない**方針を型で表すためである。呼び出し側が「どちらを動かしたか」を忘れても、返ってきた範囲をそのまま使えばよい。
 
 - [ ] **Step 1: 失敗するテストを書く**
@@ -608,6 +610,17 @@ describe("clampHandle", () => {
       clampHandle("in", 125, { startSec: 150, endSec: 100 }, window),
     ).toThrow(RangeError);
   });
+
+  test("順序が逆転した窓も受け付けない", () => {
+    // 窓が壊れていると、制約の上限と下限が入れ替わって
+    // 「動かせるはずのない位置」に収まった結果が返る
+    expect(() =>
+      clampHandle("in", 125, range, { startSec: 160, endSec: 100 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      timeToRatio(130, { startSec: 160, endSec: 100 }),
+    ).toThrow(RangeError);
+  });
 });
 ```
 
@@ -644,20 +657,30 @@ function assertSeconds(value: number, label: string): void {
   }
 }
 
-/** 範囲として筋が通っているか。値そのものだけでなく順序も見る */
-function assertRange(range: ClipRange): void {
-  assertSeconds(range.startSec, "開始位置");
-  assertSeconds(range.endSec, "終了位置");
-  if (range.endSec < range.startSec) {
+/**
+ * 時間の区間として筋が通っているか。値そのものだけでなく順序も見る。
+ * `ClipRange` と `TimeWindow` は同じ形なので、同じ規則を同じ場所で適用する。
+ * 片方にだけ順序チェックを入れると、もう片方から無意味な値が入り込む
+ */
+function assertInterval(
+  interval: { startSec: number; endSec: number },
+  label: string,
+): void {
+  assertSeconds(interval.startSec, `${label}の開始`);
+  assertSeconds(interval.endSec, `${label}の終了`);
+  if (interval.endSec < interval.startSec) {
     throw new RangeError(
-      `終了位置が開始位置より前です: ${range.startSec} → ${range.endSec}`,
+      `${label}の終了が開始より前です: ${interval.startSec} → ${interval.endSec}`,
     );
   }
 }
 
+function assertRange(range: ClipRange): void {
+  assertInterval(range, "範囲");
+}
+
 function assertWindow(window: TimeWindow): void {
-  assertSeconds(window.startSec, "窓の開始");
-  assertSeconds(window.endSec, "窓の終了");
+  assertInterval(window, "窓");
 }
 
 /** 指定した幅の区間を、0 から duration の中に収める */
@@ -783,7 +806,7 @@ export function clampHandle(
 - [ ] **Step 4: 実行して通過を確認**
 
 実行: `npx vitest run tests/content/range-math.test.ts`
-期待: PASS (25 tests)
+期待: PASS (26 tests)
 
 - [ ] **Step 5: commit**
 
