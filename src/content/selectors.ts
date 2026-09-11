@@ -7,6 +7,8 @@ export const YT_SELECTORS = {
   player: "#movie_player",
   controls: ".ytp-right-controls",
   title: "h1.ytd-watch-metadata yt-formatted-string",
+  /** 範囲を帯で重ねる対象。プレイヤーのシークバー */
+  progressBar: ".ytp-progress-bar",
 } as const;
 
 export const X_SELECTORS = {

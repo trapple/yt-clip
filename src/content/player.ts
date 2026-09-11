@@ -78,8 +78,9 @@ export function seekTo(
 
 /**
  * 再生を開始し、実際に再生が始まるまで待つ。
- * seek とは分離してある。録画開始の準備 (streamId 取得と offscreen 起動) が
- * 終わるまで動画を止めておかないと、クリップの冒頭が欠けるため。
+ * seek とは分離してある。録画が実際に始まる (content script が recorder/started を
+ * 送り、service worker が recording へ進める) まで動画を止めておかないと、
+ * クリップの冒頭が欠けるため。
  */
 export function startPlayback(
   video: HTMLVideoElement,

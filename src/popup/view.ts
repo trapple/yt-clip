@@ -25,12 +25,12 @@ export type PopupView = {
 };
 
 const FAILURE_MESSAGES: Record<FailureReason, string> = {
-  "capture-permission-denied": "タブの録画が許可されませんでした",
   "seek-failed": "開始位置へ移動できませんでした",
   "playback-failed": "再生を開始できませんでした",
   "ad-playing": "広告の再生中です。終了後にやり直してください",
   "tab-lost": "録画対象のタブが見つかりません",
   "recording-aborted": "録画が中断されました",
+  "drm-protected": "この動画は保護されているため録画できません",
   "internal-error": "内部エラーが発生しました",
 };
 
@@ -50,15 +50,6 @@ export function describeState(state: ClipState): PopupView {
     case "idle":
       return {
         message: "YouTube の再生画面で IN を押してください",
-        actions: [],
-        busy: false,
-        showPreview: false,
-        recordingSec: null,
-      };
-
-    case "marking":
-      return {
-        message: `${formatTime(state.startSec)} から開始。OUT を押してください`,
         actions: [],
         busy: false,
         showPreview: false,

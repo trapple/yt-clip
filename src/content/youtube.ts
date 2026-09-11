@@ -1,3 +1,4 @@
+import { pickMimeType } from "@/content/codec";
 import {
   getVideo,
   getVideoMeta,
@@ -6,28 +7,33 @@ import {
   seekTo,
   startPlayback,
 } from "@/content/player";
+import { createRangeBar, type RangeBar } from "@/content/range-bar";
+import { makeDefaultRange } from "@/content/range-math";
+import {
+  DrmProtectedError,
+  assertRecordable,
+  startRecording,
+  type RecorderHandle,
+} from "@/content/recorder";
 import { YT_SELECTORS } from "@/content/selectors";
+import { encodeBase64 } from "@/shared/base64";
 import type { Message } from "@/shared/messages";
 import { formatTime, validateRange } from "@/shared/time";
-import type { ClipEvent } from "@/shared/types";
+// BUSY_KINDS は状態の性質なので types.ts で共有している
+import { BUSY_KINDS, type ClipEvent, type ClipRange } from "@/shared/types";
 
 const BAR_ID = "yt-clip-bar";
+const OVERLAY_ID = "yt-clip-overlay";
 
-/**
- * IN を打った位置と、そのときの動画 ID。
- * YouTube は SPA でページ遷移せずに動画が入れ替わるため、位置だけを覚えていると
- * 別の動画で OUT を打ったときに違う動画同士の範囲が組み上がってしまう。
- */
-let markedIn: { sec: number; videoId: string } | null = null;
-let cancelWatch: (() => void) | null = null;
-
-/** 録画が進行中で、範囲の変更を受け付けない状態 */
-const BUSY_KINDS: ReadonlySet<string> = new Set([
-  "seeking",
-  "recording",
-  "encoding",
-]);
+/** いま指定されている範囲。service worker と同じものを持つ */
+let currentRange: ClipRange | null = null;
+/** 範囲を作ったときの動画。SPA で動画が変わったら無効になる */
+let rangeVideoId: string | null = null;
 let busy = false;
+let cancelWatch: (() => void) | null = null;
+let cancelPreview: (() => void) | null = null;
+let rangeBar: RangeBar | null = null;
+let handle: RecorderHandle | null = null;
 
 function send(event: ClipEvent): void {
   void chrome.runtime.sendMessage({
@@ -58,9 +64,23 @@ function guard(action: () => void): () => void {
   };
 }
 
+/** 範囲を人が読める形にする。同じ文言を 3 箇所で使うのでここに集める */
+function rangeLabel(range: ClipRange): string {
+  const durationSec = Math.round(range.endSec - range.startSec);
+  return `${formatTime(range.startSec)} 〜 ${formatTime(range.endSec)} (${durationSec}秒)`;
+}
+
+function applyRange(range: ClipRange, videoDurationSec: number): void {
+  currentRange = range;
+  rangeBar?.update(range, videoDurationSec);
+  paintOverlay(range, videoDurationSec);
+  setStatus(rangeLabel(range));
+}
+
 function onMarkIn(): void {
-  // 録画中に打ち直されると状態機械だけが marking に戻り、offscreen の録画は
-  // 走り続けて MediaRecorder と AudioContext が解放されないまま取り残される
+  // 録画中に打ち直されると状態機械だけが範囲を作り直し、録画は走り続けて
+  // 取り残される。状態機械と router にも同じガードがあるが、ここで止めれば
+  // ユーザーに理由をすぐ返せる
   if (busy) {
     setStatus("録画中は範囲を変更できません");
     return;
@@ -68,9 +88,12 @@ function onMarkIn(): void {
 
   const video = getVideo();
   const meta = getVideoMeta();
-  markedIn = { sec: video.currentTime, videoId: meta.videoId };
-  send({ type: "MARK_IN", sec: markedIn.sec, meta });
-  setStatus(`IN ${formatTime(markedIn.sec)}`);
+  // 既定の長さの範囲をここで作る。状態機械は長さの決め方を知らない
+  const range = makeDefaultRange(video.currentTime, video.duration);
+
+  rangeVideoId = meta.videoId;
+  applyRange(range, video.duration);
+  send({ type: "MARK_IN", range, meta });
 }
 
 function onMarkOut(): void {
@@ -78,43 +101,103 @@ function onMarkOut(): void {
     setStatus("録画中は範囲を変更できません");
     return;
   }
-  if (markedIn === null) {
+  if (currentRange === null) {
     setStatus("先に IN を指定してください");
     return;
   }
 
   // IN を打った後に別の動画へ移動していた場合、その範囲はもう意味を持たない。
-  // ここで RESET_MARKS を送ってはいけない。録画済みで投稿待ち (preview / composing) の
-  // ときに届くと状態機械が不正遷移として failed に落ち、録画したクリップへの参照ごと失う。
-  // MARK_IN はどの状態からでも受理されるので、次に IN を打てば正しく上書きされる。
-  if (getVideoMeta().videoId !== markedIn.videoId) {
-    markedIn = null;
+  // ここで RESET_MARKS を送ってはいけない。録画済みで投稿待ちのときに届くと
+  // 状態機械が不正遷移として failed に落ち、クリップへの参照ごと失う
+  if (getVideoMeta().videoId !== rangeVideoId) {
+    currentRange = null;
+    rangeVideoId = null;
     setStatus("動画が変わりました。IN からやり直してください");
     return;
   }
 
-  const endSec = getVideo().currentTime;
-  // 範囲の妥当性はここで判定する。状態機械は遷移だけに責任を持つ
-  const validation = validateRange(markedIn.sec, endSec);
+  const video = getVideo();
+  const next = { startSec: currentRange.startSec, endSec: video.currentTime };
+  const validation = validateRange(next.startSec, next.endSec);
   if (!validation.ok) {
     setStatus(validation.message);
     return;
   }
-  send({ type: "MARK_OUT", sec: endSec });
-  setStatus(`${formatTime(markedIn.sec)} 〜 ${formatTime(endSec)}`);
+
+  applyRange(next, video.duration);
+  send({ type: "MARK_OUT", sec: next.endSec });
 }
 
-/** 録画品質は再生解像度が上限になるため、低いときは事前に知らせる */
-const MIN_RECOMMENDED_HEIGHT = 720;
+/** 拡大バーでのドラッグが確定したとき */
+function onRangeCommitted(range: ClipRange): void {
+  if (busy) return;
+  currentRange = range;
+  paintOverlay(range, getVideo().duration);
+  setStatus(rangeLabel(range));
+  send({ type: "ADJUST_RANGE", range });
+}
+
+/** ドラッグ中の追従。動かしている側の位置を見せる */
+function onScrub(sec: number): void {
+  const video = getVideo();
+  video.pause();
+  video.currentTime = sec;
+}
+
+/** YouTube のシークバーに範囲を帯で重ねて、動画全体のどこかを示す */
+function paintOverlay(range: ClipRange, videoDurationSec: number): void {
+  const bar = document.querySelector<HTMLElement>(YT_SELECTORS.progressBar);
+  if (bar === null || videoDurationSec <= 0) return;
+
+  let overlay = document.getElementById(OVERLAY_ID);
+  if (overlay === null) {
+    overlay = document.createElement("div");
+    overlay.id = OVERLAY_ID;
+    overlay.style.cssText =
+      "position:absolute;top:0;bottom:0;background:#3ea6ff;opacity:0.5;pointer-events:none;z-index:1;";
+    bar.appendChild(overlay);
+  }
+
+  overlay.style.left = `${(range.startSec / videoDurationSec) * 100}%`;
+  overlay.style.width = `${((range.endSec - range.startSec) / videoDurationSec) * 100}%`;
+}
+
+/** 指定した範囲を通しで再生して内容を確認する */
+async function playRange(): Promise<void> {
+  if (currentRange === null || busy) return;
+
+  cancelPreview?.();
+  cancelPreview = null;
+
+  const video = getVideo();
+  const range = currentRange;
+  try {
+    await seekTo(video, range.startSec);
+    await startPlayback(video);
+  } catch (error) {
+    setStatus(`範囲を再生できませんでした: ${String(error)}`);
+    return;
+  }
+
+  setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
+  cancelPreview = onReachTime(video, range.endSec, () => {
+    cancelPreview = null;
+    video.pause();
+    setStatus(rangeLabel(range));
+  });
+}
 
 /**
  * 録画の前半。IN へ seek するが再生はしない。
- * service worker が streamId 取得と offscreen 起動を終えるまで動画を進めないため。
+ * service worker が録画開始を指示し、それを受けた録画が実際に始まるまで
+ * 動画を進めないため。
  */
 async function prepareRecording(startSec: number): Promise<void> {
-  // 状態変化から呼ばれるため click の guard が効かない。ここで自分で包む。
-  // 握り潰すと sw は seeking のまま固まり、ユーザーには準備中の表示が残り続ける。
   try {
+    // 保護された動画は captureStream が黒画面を返すだけで失敗しない。
+    // 実時間を払い切ってから無駄と分かることのないよう、ここで弾く
+    assertRecordable(getVideo());
+
     if (isAdPlaying()) {
       send({ type: "FAIL", reason: "ad-playing" });
       setStatus("広告の再生中です。終了後にやり直してください");
@@ -122,28 +205,41 @@ async function prepareRecording(startSec: number): Promise<void> {
     }
 
     const video = getVideo();
-    // 画質は録画してからでは上げられないので、この時点で警告する (録画は止めない)
-    if (video.videoHeight > 0 && video.videoHeight < MIN_RECOMMENDED_HEIGHT) {
-      setStatus(
-        `再生画質が低いままです (${video.videoHeight}p)。画質を上げると綺麗に切り抜けます`,
-      );
-    }
     video.pause();
     await seekTo(video, startSec);
 
     send({ type: "SEEK_DONE" });
     setStatus("録画の準備をしています…");
   } catch (error) {
+    if (error instanceof DrmProtectedError) {
+      send({ type: "FAIL", reason: "drm-protected" });
+      setStatus(error.message);
+      return;
+    }
     send({ type: "FAIL", reason: "seek-failed" });
     setStatus(`開始位置へ移動できませんでした: ${String(error)}`);
   }
 }
 
-/**
- * 録画の後半。録画開始後に呼ばれ、再生して OUT 到達で停止する。
- */
+/** service worker からの指示で録画を始める */
+async function beginRecording(): Promise<void> {
+  try {
+    const video = getVideo();
+    const { mimeType } = pickMimeType();
+    handle = await startRecording(video, mimeType, {
+      onUnexpectedStop: (error) => {
+        handle = null;
+        notify({ type: "recorder/failed", reason: error.message });
+      },
+    });
+    notify({ type: "recorder/started" });
+  } catch (error) {
+    notify({ type: "recorder/failed", reason: String(error) });
+  }
+}
+
+/** 録画の後半。録画開始後に呼ばれ、再生して OUT 到達で停止する */
 async function runRecording(startSec: number, endSec: number): Promise<void> {
-  // prepareRecording と同じ理由で、この関数も自分で例外を拾う
   try {
     const video = getVideo();
     await startPlayback(video);
@@ -162,11 +258,40 @@ async function runRecording(startSec: number, endSec: number): Promise<void> {
   }
 }
 
+/** 録画を止めて結果を送る。拡張の IndexedDB は content script から触れない */
+async function finishRecording(): Promise<void> {
+  if (handle === null) {
+    notify({ type: "recorder/failed", reason: "録画が開始されていません" });
+    return;
+  }
+
+  const stopping = handle;
+  handle = null;
+  try {
+    const blob = await stopping.stop();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    notify({
+      type: "recorder/done",
+      base64: encodeBase64(bytes),
+      mimeType: blob.type,
+    });
+  } catch (error) {
+    notify({ type: "recorder/failed", reason: String(error) });
+  }
+}
+
+function notify(message: Message): void {
+  void chrome.runtime.sendMessage(message);
+}
+
 function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
   bar.style.cssText =
-    "display:flex;gap:8px;align-items:center;padding:8px 0;color:var(--yt-spec-text-primary,#fff);font-size:13px;";
+    "display:flex;flex-direction:column;gap:4px;padding:8px 0;color:var(--yt-spec-text-primary,#fff);font-size:13px;";
+
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:8px;align-items:center;";
 
   const inButton = document.createElement("button");
   inButton.textContent = "IN";
@@ -176,11 +301,18 @@ function buildBar(): HTMLElement {
   outButton.textContent = "OUT";
   outButton.addEventListener("click", guard(onMarkOut));
 
+  const playButton = document.createElement("button");
+  playButton.textContent = "範囲を再生";
+  playButton.addEventListener("click", guard(() => void playRange()));
+
   const status = document.createElement("span");
   status.id = `${BAR_ID}-status`;
   status.textContent = "IN を押して開始位置を指定";
 
-  bar.append(inButton, outButton, status);
+  row.append(inButton, outButton, playButton, status);
+
+  rangeBar = createRangeBar({ onScrub, onCommit: onRangeCommitted });
+  bar.append(row, rangeBar.element);
   return bar;
 }
 
@@ -194,10 +326,25 @@ function mount(): void {
 }
 
 chrome.runtime.onMessage.addListener((message: Message) => {
+  if (message.type === "recorder/start") {
+    void beginRecording();
+    return;
+  }
+  if (message.type === "recorder/stop") {
+    void finishRecording();
+    return;
+  }
   if (message.type !== "state/changed") return;
 
   const state = message.state;
   busy = BUSY_KINDS.has(state.kind);
+  rangeBar?.setEnabled(!busy);
+
+  // 無効化しただけでは、打ち切られたドラッグの見た目が最後の位置に残る。
+  // 確定していない範囲が表示され続けないよう、確定済みの範囲で描き直す
+  if (busy && currentRange !== null) {
+    rangeBar?.update(currentRange, getVideo().duration);
+  }
 
   if (state.kind === "seeking") {
     void prepareRecording(state.range.startSec);
@@ -207,8 +354,8 @@ chrome.runtime.onMessage.addListener((message: Message) => {
     void runRecording(state.range.startSec, state.range.endSec);
     return;
   }
-  if (state.kind === "failed" && cancelWatch !== null) {
-    cancelWatch();
+  if (state.kind === "failed") {
+    cancelWatch?.();
     cancelWatch = null;
   }
 });

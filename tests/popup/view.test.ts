@@ -12,12 +12,6 @@ describe("マーク前後", () => {
     expect(view.actions).toEqual([]);
   });
 
-  test("marking では OUT の指定を促す", () => {
-    const view = describeState({ kind: "marking", startSec: 10, meta });
-    expect(view.message).toBe("0:10 から開始。OUT を押してください");
-    expect(view.actions).toEqual([]);
-  });
-
   test("ready では録画と取り消しができる", () => {
     const view = describeState({ kind: "ready", range, meta });
     expect(view.message).toBe("0:10 〜 0:40 (30秒) を録画できます");
@@ -122,12 +116,12 @@ describe("degraded path", () => {
 describe("失敗", () => {
   test("失敗理由ごとに日本語で提示する", () => {
     const cases = [
-      ["capture-permission-denied", "タブの録画が許可されませんでした"],
       ["seek-failed", "開始位置へ移動できませんでした"],
       ["playback-failed", "再生を開始できませんでした"],
       ["ad-playing", "広告の再生中です。終了後にやり直してください"],
       ["tab-lost", "録画対象のタブが見つかりません"],
       ["recording-aborted", "録画が中断されました"],
+      ["drm-protected", "この動画は保護されているため録画できません"],
       ["internal-error", "内部エラーが発生しました"],
     ] as const;
 
