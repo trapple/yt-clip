@@ -76,6 +76,12 @@ describe("computeWindow", () => {
       endSec: 20,
     });
   });
+
+  test("順序が逆転した範囲は受け付けない", () => {
+    expect(() => computeWindow({ startSec: 150, endSec: 100 }, 600)).toThrow(
+      RangeError,
+    );
+  });
 });
 
 describe("timeToRatio / ratioToTime", () => {
@@ -102,6 +108,16 @@ describe("timeToRatio / ratioToTime", () => {
     expect(timeToRatio(200, window)).toBe(1);
     expect(ratioToTime(-0.5, window)).toBe(100);
     expect(ratioToTime(1.5, window)).toBe(160);
+  });
+
+  test("不正な値は握り潰さず throw する", () => {
+    // Math.max(0, NaN) は NaN を返すので、丸めでは防げない。
+    // 黙って NaN が下流へ流れると、範囲が壊れたまま保存されうる
+    expect(() => timeToRatio(Number.NaN, window)).toThrow(RangeError);
+    expect(() => ratioToTime(Number.NaN, window)).toThrow(RangeError);
+    expect(() =>
+      timeToRatio(100, { startSec: Number.NaN, endSec: 160 }),
+    ).toThrow(RangeError);
   });
 });
 
@@ -170,5 +186,19 @@ describe("clampHandle", () => {
     expect(() => clampHandle("in", Number.NaN, range, window)).toThrow(
       RangeError,
     );
+    // 範囲や窓が壊れていても、結果が NaN のまま返ることがないようにする
+    expect(() =>
+      clampHandle("in", 125, { startSec: 120, endSec: Number.NaN }, window),
+    ).toThrow(RangeError);
+    expect(() =>
+      clampHandle("in", 125, range, { startSec: Number.NaN, endSec: 160 }),
+    ).toThrow(RangeError);
+  });
+
+  test("順序が逆転した範囲は受け付けない", () => {
+    // 呼び出し側のバグを黙って通すと、もっともらしいが無意味な結果を返す
+    expect(() =>
+      clampHandle("in", 125, { startSec: 150, endSec: 100 }, window),
+    ).toThrow(RangeError);
   });
 });

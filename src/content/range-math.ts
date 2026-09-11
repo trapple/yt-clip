@@ -21,6 +21,22 @@ function assertSeconds(value: number, label: string): void {
   }
 }
 
+/** 範囲として筋が通っているか。値そのものだけでなく順序も見る */
+function assertRange(range: ClipRange): void {
+  assertSeconds(range.startSec, "開始位置");
+  assertSeconds(range.endSec, "終了位置");
+  if (range.endSec < range.startSec) {
+    throw new RangeError(
+      `終了位置が開始位置より前です: ${range.startSec} → ${range.endSec}`,
+    );
+  }
+}
+
+function assertWindow(window: TimeWindow): void {
+  assertSeconds(window.startSec, "窓の開始");
+  assertSeconds(window.endSec, "窓の終了");
+}
+
 /** 指定した幅の区間を、0 から duration の中に収める */
 function fitWithin(
   centerSec: number,
@@ -71,8 +87,7 @@ export function computeWindow(
   range: ClipRange,
   videoDurationSec: number,
 ): TimeWindow {
-  assertSeconds(range.startSec, "開始位置");
-  assertSeconds(range.endSec, "終了位置");
+  assertRange(range);
   assertSeconds(videoDurationSec, "動画の長さ");
 
   const rangeSec = range.endSec - range.startSec;
@@ -82,8 +97,14 @@ export function computeWindow(
   return fitWithin(centerSec, widthSec, videoDurationSec);
 }
 
-/** 再生位置を窓の中の割合 (0..1) に変換する */
+/**
+ * 再生位置を窓の中の割合 (0..1) に変換する。
+ * 窓の外は 0 と 1 に丸める。範囲外は「端まで動かした」という意味を持つため。
+ */
 export function timeToRatio(sec: number, window: TimeWindow): number {
+  assertSeconds(sec, "再生位置");
+  assertWindow(window);
+
   const widthSec = window.endSec - window.startSec;
   if (widthSec <= 0) return 0;
 
@@ -93,6 +114,13 @@ export function timeToRatio(sec: number, window: TimeWindow): number {
 
 /** 窓の中の割合 (0..1) を再生位置に変換する */
 export function ratioToTime(ratio: number, window: TimeWindow): number {
+  // 割合は負にもなりうる (端の外へドラッグした場合) ので、有限かどうかだけ見る。
+  // NaN を通すと Math.max も素通りしてしまい、黙って NaN が下流へ流れる
+  if (!Number.isFinite(ratio)) {
+    throw new RangeError(`割合が不正です: ${ratio}`);
+  }
+  assertWindow(window);
+
   const clamped = Math.min(1, Math.max(0, ratio));
   return window.startSec + (window.endSec - window.startSec) * clamped;
 }
@@ -108,6 +136,8 @@ export function clampHandle(
   window: TimeWindow,
 ): ClipRange {
   assertSeconds(desiredSec, "ハンドルの位置");
+  assertRange(range);
+  assertWindow(window);
 
   if (kind === "in") {
     const lowest = Math.max(window.startSec, range.endSec - MAX_CLIP_SEC);
