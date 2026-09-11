@@ -93,6 +93,9 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
       if (pendingScrubSec === null) return;
       const target = pendingScrubSec;
       pendingScrubSec = null;
+      // 予約した後に録画が始まっていることがある。ここで見ないと
+      // seek 中に再生位置が書き換わり、録画の開始位置がずれる
+      if (!enabled) return;
       callbacks.onScrub(target);
     });
   }
