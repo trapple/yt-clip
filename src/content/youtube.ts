@@ -9,6 +9,7 @@ import {
   startPlayback,
 } from "@/content/player";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
+import { remuxToProgressiveMp4 } from "@/content/remux";
 import { makeDefaultRange } from "@/content/range-math";
 import {
   DrmProtectedError,
@@ -544,7 +545,15 @@ async function finishRecording(): Promise<void> {
   handle = null;
   try {
     const blob = await stopping.stop();
-    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const recorded = new Uint8Array(await blob.arrayBuffer());
+
+    // MediaRecorder の MP4 は断片化 MP4 で、X はこれを受け付けない
+    // (アップロード後の変換で失敗する)。通常の MP4 に組み直してから渡す。
+    // WebM はそもそも添付できずダウンロードへ退避するので、触らない
+    const bytes = blob.type.includes("mp4")
+      ? remuxToProgressiveMp4(recorded)
+      : recorded;
+
     notify({
       type: "recorder/done",
       base64: encodeBase64(bytes),

@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { Blob as NodeBlob } from "node:buffer";
+import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
+
+/** 録画結果として流す、最小限の断片化 MP4 */
+const RECORDED_BYTES = buildFragmentedMp4({
+  fragments: [[{ data: new Uint8Array([1, 2, 3]), duration: 3000, sync: true }]],
+});
 import {
   afterAll,
   beforeAll,
@@ -196,7 +202,9 @@ function installGlobals(): void {
     }
     stop(): void {
       this.state = "inactive";
-      this.ondataavailable?.({ data: new Blob(["clip"]) });
+      // remux を通る経路を実際に検証するため、MediaRecorder が出すものと
+      // 同じ断片化 MP4 を流す。中身が MP4 でないと remux が正しく弾く
+      this.ondataavailable?.({ data: new Blob([RECORDED_BYTES]) });
       this.onstop?.();
     }
   }
