@@ -4,6 +4,23 @@ export const MP4_MIME = 'video/mp4;codecs="avc1.42E01E,mp4a.40.2"';
 /** MP4 非対応環境での退避先。X には直接添付できない */
 export const WEBM_MIME = "video/webm;codecs=vp9,opus";
 
+/**
+ * MIME からパラメータ (`;codecs=...` など) を落として型だけにする。
+ *
+ * `MediaRecorder` はコーデックまで指定した MIME を必要とするが、**その MIME を
+ * そのまま `File` / `Blob` のラベルに使ってはいけない。** `File.type` は
+ * パラメータを保持するため、X の「対応形式か」の判定に落ちて
+ * 「一部の画像/動画をアップロードできません。」になる。中身は正しい MP4 なのに
+ * ラベルだけで弾かれる、という形で表に出る。
+ *
+ * コーデック付きの MIME を使ってよいのは `MediaRecorder` と
+ * `MediaRecorder.isTypeSupported` だけ。
+ */
+export function baseMimeType(mime: string): string {
+  const base = mime.split(";")[0] ?? "";
+  return base.trim();
+}
+
 export type CodecChoice = {
   mimeType: string;
   /** X へ直接添付できる形式かどうか */

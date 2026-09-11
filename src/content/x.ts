@@ -1,3 +1,4 @@
+import { baseMimeType } from "@/content/codec";
 import { X_SELECTORS } from "@/content/selectors";
 import { decodeBase64 } from "@/shared/base64";
 import type { Message } from "@/shared/messages";
@@ -158,6 +159,27 @@ export async function insertText(
  * ため、握り潰さず理由を残す (`docs/manual-check.md` の X 添付の節で、
  * 投稿タブのコンソールを見る手順と対になっている)。
  */
+/**
+ * 添付するファイルを組み立てる。
+ *
+ * **MIME からパラメータを落とすこと。** X は `File.type` で対応形式を判定し、
+ * `video/mp4;codecs="avc1.42E01E,mp4a.40.2"` のようなコーデック付きの値は
+ * そのまま `File.type` に残るため、中身が正しい MP4 でも
+ * 「一部の画像/動画をアップロードできません。」で弾かれる。
+ *
+ * 送られてくる時点で service worker が素の MIME にしているが、ここは
+ * 相手 (X) がラベルを検証する境界なので、送り手を信用せずここでも落とす。
+ */
+export function buildClipFile(message: {
+  base64: string;
+  fileName: string;
+  mimeType: string;
+}): File {
+  return new File([decodeBase64(message.base64)], message.fileName, {
+    type: baseMimeType(message.mimeType),
+  });
+}
+
 function notify(message: Message): void {
   void chrome.runtime.sendMessage(message).catch((error: unknown) => {
     console.error("[yt-clip] 拡張への通知に失敗しました", message.type, error);
@@ -192,12 +214,7 @@ if (typeof chrome !== "undefined") {
         const input = await waitForElement<HTMLInputElement>(
           X_SELECTORS.fileInput,
         );
-        const file = new File(
-          [decodeBase64(message.base64)],
-          message.fileName,
-          { type: message.mimeType },
-        );
-        attachFile(input, file);
+        attachFile(input, buildClipFile(message));
 
         // 投稿ボタンは押さない。最終確認はユーザーに委ねる
         notify({ type: "x/attached" });

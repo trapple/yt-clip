@@ -1,5 +1,7 @@
 import { INITIAL_STATE, reduce } from "@/background/state";
 import type { StoredClip } from "@/background/storage";
+// MIME の扱いは録画形式の知識なので codec.ts に集約している (DOM 非依存)
+import { baseMimeType } from "@/content/codec";
 import { decodeBase64, encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message } from "@/shared/messages";
@@ -265,19 +267,27 @@ export function createRouter(
       return;
     }
 
+    // **ここが録画データの入口。以降は素の MIME だけを扱う。**
+    // content script から届くのは MediaRecorder 用のコーデック付き MIME
+    // (`video/mp4;codecs="avc1.42E01E,mp4a.40.2"`)。そのまま持ち回ると、
+    // 保存する Blob も、添付する File も、ダウンロードするファイルも
+    // パラメータ付きのラベルになる。X はそれで対応形式の判定に落ちる
+    const storedMime = baseMimeType(mimeType);
+
     const clipId = `clip-${deps.now()}`;
     await deps.saveClip({
       id: clipId,
-      blob: new Blob([decodeBase64(base64)], { type: mimeType }),
-      mimeType,
+      blob: new Blob([decodeBase64(base64)], { type: storedMime }),
+      mimeType: storedMime,
       range: state.range,
       meta: state.meta,
       createdAt: deps.now(),
     });
-    await apply({ type: "BLOB_READY", clipId, mimeType });
+    await apply({ type: "BLOB_READY", clipId, mimeType: storedMime });
 
-    // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない
-    if (!mimeType.includes("mp4")) {
+    // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない。
+    // パラメータを落としても video/mp4 / video/webm の判定は変わらない
+    if (!storedMime.includes("mp4")) {
       await apply({ type: "DEGRADE", reason: "mp4-unsupported" });
     }
   }
