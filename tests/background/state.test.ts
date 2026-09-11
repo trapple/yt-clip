@@ -19,25 +19,48 @@ describe("マーク操作", () => {
     expect(INITIAL_STATE).toEqual({ kind: "idle" });
   });
 
-  test("IN を打つと marking へ進む", () => {
-    expect(reduce(INITIAL_STATE, { type: "MARK_IN", sec: 10, meta })).toEqual({
-      kind: "marking",
-      startSec: 10,
-      meta,
-    });
-  });
-
-  test("OUT を打つと ready へ進む", () => {
-    const marking = reduce(INITIAL_STATE, { type: "MARK_IN", sec: 10, meta });
-    expect(reduce(marking, { type: "MARK_OUT", sec: 40 })).toEqual(ready);
+  test("IN を打つと範囲つきで ready へ進む", () => {
+    expect(
+      reduce(INITIAL_STATE, { type: "MARK_IN", range, meta }),
+    ).toEqual(ready);
   });
 
   test("ready からでも IN を打ち直せる", () => {
-    expect(reduce(ready, { type: "MARK_IN", sec: 20, meta })).toEqual({
-      kind: "marking",
-      startSec: 20,
+    const next: ClipRange = { startSec: 20, endSec: 50 };
+    expect(reduce(ready, { type: "MARK_IN", range: next, meta })).toEqual({
+      kind: "ready",
+      range: next,
       meta,
     });
+  });
+
+  test("OUT は終了位置だけを更新する", () => {
+    expect(reduce(ready, { type: "MARK_OUT", sec: 55 })).toEqual({
+      kind: "ready",
+      range: { startSec: 10, endSec: 55 },
+      meta,
+    });
+  });
+
+  test("ドラッグ結果は範囲をまるごと置き換える", () => {
+    const dragged: ClipRange = { startSec: 12.5, endSec: 38.25 };
+    expect(reduce(ready, { type: "ADJUST_RANGE", range: dragged })).toEqual({
+      kind: "ready",
+      range: dragged,
+      meta,
+    });
+  });
+
+  test("録画中は範囲を動かせない", () => {
+    // 状態機械だけが範囲を戻し、録画が走り続ける事態を防ぐ。
+    // UI と router でも同じ制約を持つが、ここでも拒否されることを固定する
+    const recording: ClipState = { kind: "recording", range, meta };
+    expect(
+      reduce(recording, {
+        type: "ADJUST_RANGE",
+        range: { startSec: 0, endSec: 5 },
+      }),
+    ).toMatchObject({ kind: "failed", reason: "internal-error" });
   });
 
   test("RESET_MARKS で idle に戻る", () => {

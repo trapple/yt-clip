@@ -39,27 +39,26 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
     };
   }
 
-  // IN の打ち直しはマーク済みのどの段階からでも許す
+  // 範囲の作成はどの状態からでも受け付ける。録画中の拒否は router と UI が担う
   if (event.type === "MARK_IN") {
-    return { kind: "marking", startSec: event.sec, meta: event.meta };
+    return { kind: "ready", range: event.range, meta: event.meta };
   }
 
   switch (state.kind) {
     case "idle":
       return invalid(state);
 
-    case "marking":
+    case "ready":
       if (event.type === "MARK_OUT") {
         return {
           kind: "ready",
-          range: { startSec: state.startSec, endSec: event.sec },
+          range: { startSec: state.range.startSec, endSec: event.sec },
           meta: state.meta,
         };
       }
-      if (event.type === "RESET_MARKS") return { kind: "idle" };
-      return invalid(state);
-
-    case "ready":
+      if (event.type === "ADJUST_RANGE") {
+        return { kind: "ready", range: event.range, meta: state.meta };
+      }
       if (event.type === "START_RECORDING") {
         return { kind: "seeking", range: state.range, meta: state.meta };
       }

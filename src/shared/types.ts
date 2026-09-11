@@ -14,18 +14,18 @@ export type DegradedReason = "mp4-unsupported" | "x-attach-failed";
 
 /** 明示的な失敗の理由。握り潰さず必ずユーザーに提示する */
 export type FailureReason =
-  | "capture-permission-denied"
   | "seek-failed"
   | "playback-failed"
   | "ad-playing"
   | "tab-lost"
   | "recording-aborted"
+  /** 暗号化された動画は captureStream が黒画面を返すため録画できない */
+  | "drm-protected"
   /** 状態機械の不正遷移など、ユーザー起因ではない内部エラー */
   | "internal-error";
 
 export type ClipState =
   | { kind: "idle" }
-  | { kind: "marking"; startSec: number; meta: VideoMeta }
   | { kind: "ready"; range: ClipRange; meta: VideoMeta }
   | { kind: "seeking"; range: ClipRange; meta: VideoMeta }
   | { kind: "recording"; range: ClipRange; meta: VideoMeta }
@@ -61,8 +61,12 @@ export type ClipState =
     };
 
 export type ClipEvent =
-  | { type: "MARK_IN"; sec: number; meta: VideoMeta }
+  /** 範囲の作成。既定の長さを決めるのは content script の責務 */
+  | { type: "MARK_IN"; range: ClipRange; meta: VideoMeta }
+  /** 終了位置だけを今の再生位置に合わせる */
   | { type: "MARK_OUT"; sec: number }
+  /** 拡大バーでのドラッグ結果。取りこぼしで両者がずれないよう常に両端を送る */
+  | { type: "ADJUST_RANGE"; range: ClipRange }
   | { type: "RESET_MARKS" }
   | { type: "START_RECORDING" }
   | { type: "SEEK_DONE" }

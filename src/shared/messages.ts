@@ -1,9 +1,4 @@
-import type {
-  ClipEvent,
-  ClipRange,
-  ClipState,
-  VideoMeta,
-} from "@/shared/types";
+import type { ClipEvent, ClipState } from "@/shared/types";
 
 /** chrome.runtime を流れるメッセージ。両端がこの型だけを知る */
 export type Message =
@@ -14,26 +9,22 @@ export type Message =
   /** content / popup → sw: 状態機械へのイベント投入 */
   | { type: "clip/event"; event: ClipEvent }
   /**
-   * sw → offscreen: 録画開始。使用する形式は offscreen 側が判定する。
-   *
-   * 保存に必要な情報を一緒に渡すのは、録画データを offscreen から直接
-   * IndexedDB へ書くため。拡張のメッセージは JSON 化されるので ArrayBuffer を
-   * そのまま載せると中身が失われる (`{}` になる)。
+   * sw → content: 録画開始。
+   * 録画するのは content script なので、範囲も動画情報も content 側が持っている。
+   * 使用する形式の判定も content 側で行う
    */
-  | {
-      type: "recorder/start";
-      streamId: string;
-      clipId: string;
-      range: ClipRange;
-      meta: VideoMeta;
-    }
-  /** sw → offscreen: 録画停止 */
+  | { type: "recorder/start" }
+  /** sw → content: 録画停止 */
   | { type: "recorder/stop" }
-  /** offscreen → sw: 録画が実際に始まった。これを待ってから再生を再開させる */
+  /** content → sw: 録画が実際に始まった。これを待ってから再生を再開させる */
   | { type: "recorder/started" }
-  /** offscreen → sw: 録画を保存し終えた。データ本体は IndexedDB にある */
-  | { type: "recorder/done"; clipId: string; mimeType: string }
-  /** offscreen → sw: 録画中の失敗 */
+  /**
+   * content → sw: 録画結果。
+   * content script は拡張の IndexedDB を読み書きできないため、
+   * base64 にして渡し、保存は service worker が行う
+   */
+  | { type: "recorder/done"; base64: string; mimeType: string }
+  /** content → sw: 録画中の失敗 */
   | { type: "recorder/failed"; reason: string }
   /** content(x) → sw: 投稿画面の準備完了 */
   | { type: "x/ready" }
