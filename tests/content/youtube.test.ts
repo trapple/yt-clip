@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { Blob as NodeBlob } from "node:buffer";
-import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { reduce } from "@/background/state";
 import type { Message } from "@/shared/messages";
 import type { ClipRange, ClipState, VideoMeta } from "@/shared/types";
@@ -199,9 +207,22 @@ function installGlobals(): void {
         // 状態機械は本物を使う。応答の状態が実物と違うと、
         // content script 側の受理判定の意味が変わってしまう
         if (message.type === "clip/event") {
-          swState = reduce(swState, message.event);
+          const next = reduce(swState, message.event);
+          // router.apply と同じく、拒まれた遷移では状態を書き換えない。
+          // reduce は定義されていない遷移を internal-error の failed で表す
+          const rejected =
+            message.event.type !== "FAIL" &&
+            next.kind === "failed" &&
+            next.reason === "internal-error" &&
+            !(swState.kind === "failed" && swState.reason === "internal-error");
+          if (!rejected) swState = next;
         }
-        return { state: swState };
+
+        const response = { state: swState };
+        // 実機の応答はコンテキストをまたぐので同期では返らない。
+        // ここを同期で返すと、読み込み直後の見た目を観測できなくなる
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return response;
       },
     },
   });
@@ -253,12 +274,18 @@ function overlay(): HTMLElement | null {
 
 /** 拡大バー本体。操作を受け付けるかどうかは pointer-events で決まる */
 function rangeBarElement(): HTMLElement {
-  const bar = document.getElementById("yt-clip-bar");
-  const element = bar?.children[1];
-  if (!(element instanceof HTMLElement)) {
+  const element = document.getElementById("yt-clip-range");
+  if (element === null) {
     throw new Error("拡大バーが見つかりません");
   }
   return element;
+}
+
+/** ハンドルに付く説明。今どの範囲を見せているかを外から見る手がかり */
+function handleLabels(): string[] {
+  return [...rangeBarElement().querySelectorAll("[aria-label]")].map(
+    (element) => element.getAttribute("aria-label") ?? "",
+  );
 }
 
 /** 実際に作られた MediaRecorder。無ければ録画が始まっていない */
@@ -276,11 +303,39 @@ function clipEvents(): unknown[] {
     .map((message) => (message as { event: unknown }).event);
 }
 
+/** import 直後 (state/changed を 1 通も受け取っていない) の拡大バーの状態 */
+let pointerEventsAtLoad = "";
+/** 読み込み時に content script が service worker へ送ったもの */
+let sentAtLoad: Message[] = [];
+/** 読み込み時の問い合わせに応答が返った後の画面 */
+let restoredAtLoad = {
+  status: "",
+  hasOverlay: false,
+  pointerEvents: "",
+  labels: [] as string[],
+};
+
 beforeAll(async () => {
   buildPage();
   installGlobals();
+  // 読み込み時点で service worker が範囲を持っている場面を再現する
+  // (録画中でないタブのリロード。状態は content script に残っていない)
+  swState = { kind: "ready", range: RANGE, meta: META_A };
+
   // chrome を用意してから読み込む。import 時に listener と observer を張る
   await import("@/content/youtube");
+  // **応答が返る前**の状態を捕まえる。実機でも service worker は遷移した
+  // ときにしか通知しないので、マウント直後は何も受け取っていない
+  pointerEventsAtLoad = rangeBarElement().style.pointerEvents;
+
+  await flush();
+  sentAtLoad = [...sent];
+  restoredAtLoad = {
+    status: statusText(),
+    hasOverlay: overlay() !== null,
+    pointerEvents: rangeBarElement().style.pointerEvents,
+    labels: handleLabels(),
+  };
 });
 
 beforeEach(async () => {
@@ -298,6 +353,14 @@ beforeEach(async () => {
   emit({ kind: "idle" });
   await flush();
   sent = [];
+});
+
+afterAll(async () => {
+  // youtube.ts の MutationObserver は解除できない。保留中の DOM 変化が
+  // jsdom の破棄後に配られると location を参照できず、テストとは無関係な
+  // 例外が出力に混ざる。ここで出し切ってから終わらせる
+  document.body.innerHTML = "";
+  await flush();
 });
 
 describe("範囲再生の監視", () => {
@@ -422,6 +485,34 @@ describe("録画の後始末", () => {
     expect(sent.some((message) => message.type === "recorder/done")).toBe(false);
   });
 
+  test("実機の順序 (seeking 中に録画開始が届く) で録画が生き残る", async () => {
+    // service worker は seeking の state/changed を送った後、SEEK_DONE を
+    // 受けて recorder/start を送り、録画開始の通知を受けてから recording へ
+    // 進める。この順序で「録画から離れた状態」の後始末が誤爆しないこと
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "seeking", range: RANGE, meta: META_A });
+    await flush();
+    expect(clipEvents()).toContainEqual({ type: "SEEK_DONE" });
+
+    command("recorder/start");
+    await flush();
+    expect(startedRecorder().state).toBe("recording");
+
+    emit({ kind: "recording", range: RANGE, meta: META_A });
+    await flush();
+    // recording への遷移で録画を捨てていないこと
+    expect(startedRecorder().state).toBe("recording");
+
+    // OUT に到達 → 書き出し → 結果の送信まで通す
+    video.advanceFrame(20.1);
+    expect(clipEvents()).toContainEqual({ type: "OUT_REACHED" });
+    emit({ kind: "encoding", range: RANGE, meta: META_A });
+    command("recorder/stop");
+    await flush();
+
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+  });
+
   test("録画結果を送れなかったら失敗として知らせる", async () => {
     emit({ kind: "ready", range: RANGE, meta: META_A });
     emit({ kind: "recording", range: RANGE, meta: META_A });
@@ -442,7 +533,43 @@ describe("録画の後始末", () => {
   });
 });
 
+describe("読み込み時の復帰", () => {
+  test("読み込まれたことを service worker へ知らせる", () => {
+    // 録画中にタブをリロードすると tabs.onRemoved は発火せず、OUT を監視して
+    // いた content script だけが消える。録画対象のタブだったかは tabId を持つ
+    // service worker にしか判定できないので、こちらは知らせるだけにする
+    expect(sentAtLoad).toContainEqual({ type: "content/loaded" });
+  });
+
+  test("応答に載ってきた範囲で画面を復元する", () => {
+    // service worker は遷移したときにしか通知しないため、読み込み直した
+    // content script は問い合わせない限り状態を 1 度も受け取れない
+    expect(restoredAtLoad.status).toBe("0:10 〜 0:20 (10秒)");
+    expect(restoredAtLoad.hasOverlay).toBe(true);
+    expect(restoredAtLoad.labels).toEqual(["開始 0:10", "終了 0:20"]);
+    // ready なので操作もできる
+    expect(restoredAtLoad.pointerEvents).not.toBe("none");
+  });
+});
+
+describe("service worker への応答", () => {
+  test("扱うメッセージには必ず同期で応答する", () => {
+    // 応答しないと送り手の Promise は "The message port closed..." で reject し、
+    // **受け取って処理したこと**が「タブが居ない」と区別できなくなる。
+    // 非同期に応答する (return true) のも不可 — 送り手は直列 queue の中で待つ
+    expect(emit({ kind: "idle" }).responded).toBe(true);
+    expect(command("recorder/start").responded).toBe(true);
+    expect(command("recorder/stop").responded).toBe(true);
+  });
+});
+
 describe("拡大バーを操作できる状態", () => {
+  test("読み込み直後 (状態を 1 度も受け取っていない) は操作させない", () => {
+    // 実機では service worker は遷移したときにしか通知しない。
+    // マウントした時点のバーが掴めてしまうと、範囲が無いまま操作できる
+    expect(pointerEventsAtLoad).toBe("none");
+  });
+
   test("範囲が確定するまでは操作させない", () => {
     // idle のまま。IN を押していないので範囲が無い
     expect(rangeBarElement().style.pointerEvents).toBe("none");
@@ -461,5 +588,28 @@ describe("拡大バーを操作できる状態", () => {
     });
     // service worker は preview での範囲変更を拒む。画面もそれに合わせる
     expect(rangeBarElement().style.pointerEvents).toBe("none");
+  });
+
+  test("受け付けられなかった範囲変更は、画面を状態機械側へ戻す", async () => {
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      range: RANGE,
+      meta: META_A,
+    });
+
+    // ハンドルのドラッグは塞いだが、OUT ボタンは preview でも押せる
+    video.element.currentTime = 50;
+    clickButton("OUT");
+    await flush();
+
+    // service worker は preview の範囲変更を拒むので状態は変わらない。
+    // 拒まれたことは state/changed では飛んでこないため、応答でしか分からない
+    expect(swState.kind).toBe("preview");
+    expect(statusText()).toContain("受け付けられませんでした");
+    // 送っていない範囲 (0:50) ではなく、状態機械が持つ範囲に戻る
+    expect(handleLabels()).toEqual(["開始 0:10", "終了 0:20"]);
   });
 });

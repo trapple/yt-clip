@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   createRouter,
+  isTabUnreachable,
   type Router,
   type RouterDeps,
 } from "@/background/router";
@@ -10,6 +11,17 @@ import type { ClipRange, VideoMeta } from "@/shared/types";
 
 const meta: VideoMeta = { videoId: "abc123", title: "テスト動画" };
 const range: ClipRange = { startSec: 10, endSec: 40 };
+
+/** 受け手が居ないときに Chrome が返す文言 */
+const UNREACHABLE =
+  "Could not establish connection. Receiving end does not exist.";
+/** 受け手は居るが応答しなかったときに Chrome が返す文言 */
+const NO_RESPONSE = "The message port closed before a response was received.";
+
+/** 保留中の処理を進める。タイマーを発火させる前に使う */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 type Harness = {
   router: Router;
@@ -130,15 +142,61 @@ describe("録画の開始", () => {
     });
   });
 
+  test("応答が無いだけなら録画を続ける", async () => {
+    // リスナは居るが sendResponse を呼ばなかった場合。**受け手は居て、
+    // 指示も受け取っている。** これを tab-lost と解釈すると全録画が死ぬ
+    const h = makeHarness({
+      sendToTab: async (_tabId, message) => {
+        if (message.type === "recorder/start") throw new Error(NO_RESPONSE);
+      },
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+
+    expect(h.router.getState().kind).toBe("seeking");
+    // content script は指示を受け取っているので、録画開始の通知が続く
+    await h.router.handle({ type: "recorder/started" });
+    expect(h.router.getState().kind).toBe("recording");
+  });
+
+  test("応答が返らないまま時間切れになっても失敗にせず、queue も止めない", async () => {
+    // 応答しないリスナー。上限を置かないと publish 以降のメッセージが
+    // 1 つも処理されなくなり、拡張を再読み込みするまで復帰できない
+    const h = makeHarness({
+      sendToTab: (_tabId, message) =>
+        message.type === "recorder/start"
+          ? new Promise<void>(() => undefined)
+          : Promise.resolve(),
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    const pending = h.router.handle({
+      type: "clip/event",
+      event: { type: "SEEK_DONE" },
+    });
+    await tick();
+    h.fireTimers();
+    await pending;
+
+    expect(h.router.getState().kind).toBe("seeking");
+    // 待ちが解けているので、後続のメッセージも処理できる
+    await h.router.handle({ type: "recorder/started" });
+    expect(h.router.getState().kind).toBe("recording");
+  });
+
   test("受け手が居ないと分かったら失敗として提示する", async () => {
     // タブは残っているが content script が消えている (拡張の再読み込み等)
     const h = makeHarness({
       sendToTab: async (_tabId, message) => {
-        if (message.type === "recorder/start") {
-          throw new Error(
-            "Could not establish connection. Receiving end does not exist.",
-          );
-        }
+        if (message.type === "recorder/start") throw new Error(UNREACHABLE);
       },
     });
     await markRange(h.router);
@@ -160,11 +218,7 @@ describe("録画の開始", () => {
     // publish は直列 queue の中で走るので待ってはいけない
     const h = makeHarness({
       sendToTab: async (_tabId, message) => {
-        if (message.type === "state/changed") {
-          throw new Error(
-            "The message port closed before a response was received.",
-          );
-        }
+        if (message.type === "state/changed") throw new Error(NO_RESPONSE);
       },
     });
     await markRange(h.router);
@@ -648,6 +702,43 @@ describe("録画の終了と保存", () => {
     });
   });
 
+  test("停止指示に応答が無くても、届いた録画結果を保存する", async () => {
+    // ここで tab-lost に落とすと、後から届く録画結果を storeRecording が
+    // 「encoding ではない」として捨てる。実時間をかけた成果物が失われる
+    const h = makeHarness(
+      {
+        sendToTab: async (_tabId, message) => {
+          if (message.type === "recorder/stop") throw new Error(NO_RESPONSE);
+        },
+      },
+    );
+    await recordUntilEncoding(h);
+    expect(h.router.getState().kind).toBe("encoding");
+
+    await h.router.handle({
+      type: "recorder/done",
+      base64: "AAECAw==",
+      mimeType: "video/mp4",
+    });
+
+    expect(h.router.getState().kind).toBe("preview");
+    expect(h.saved).toHaveLength(1);
+  });
+
+  test("停止を受け取る相手が居なければ失敗として提示する", async () => {
+    const h = makeHarness({
+      sendToTab: async (_tabId, message) => {
+        if (message.type === "recorder/stop") throw new Error(UNREACHABLE);
+      },
+    });
+    await recordUntilEncoding(h);
+
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "tab-lost",
+    });
+  });
+
   test("録画済みクリップを抱えていればタブが閉じても失敗させない", async () => {
     const h = makeHarness();
     await recordUntilEncoding(h);
@@ -782,6 +873,49 @@ describe("X への受け渡し", () => {
     expect(h.router.getState()).toEqual({ kind: "idle" });
   });
 
+  test("投稿タブの応答が無いだけなら composing のまま添付の結果を待つ", async () => {
+    // **添付は投稿タブで正常に進んでいる。** ここで退避すると popup が
+    // ダウンロード誘導になり、後から届く x/attached は downloadable から
+    // 拒まれて戻れなくなる
+    const h = makeHarness(
+      {
+        sendToTab: async (_tabId, message) => {
+          if (message.type === "x/payload") throw new Error(NO_RESPONSE);
+        },
+      },
+      clip,
+    );
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    expect(h.router.getState().kind).toBe("composing");
+
+    // 添付の完了は後から届く
+    await h.router.handle({ type: "x/attached" });
+    expect(h.router.getState()).toEqual({ kind: "idle" });
+  });
+
+  test("投稿タブに受け手が居なければダウンロードへ退避する", async () => {
+    const h = makeHarness(
+      {
+        sendToTab: async (_tabId, message) => {
+          if (message.type === "x/payload") throw new Error(UNREACHABLE);
+        },
+      },
+      clip,
+    );
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    const state = h.router.getState();
+    expect(state).toMatchObject({
+      kind: "downloadable",
+      reason: "x-attach-failed",
+    });
+    // 録画済みクリップへの参照は残す
+    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+  });
+
   test("添付失敗でも成果物は捨てず downloadable へ退避する", async () => {
     const h = makeHarness({}, clip);
     await reachComposing(h);
@@ -795,5 +929,64 @@ describe("X への受け渡し", () => {
     });
     // 保存済みクリップへの参照が残っていること
     expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+  });
+});
+
+describe("タブへの送信失敗の分類", () => {
+  test("受け手が居ないことを示す失敗だけを、タブの喪失として扱う", () => {
+    // chrome.tabs.sendMessage の reject には意味が正反対の 2 種類がある。
+    // 取り違えると、正常に処理されたものを「タブが居ない」と誤解する
+    expect(isTabUnreachable(new Error(UNREACHABLE))).toBe(true);
+    expect(
+      isTabUnreachable(new Error("Could not establish connection.")),
+    ).toBe(true);
+
+    expect(isTabUnreachable(new Error(NO_RESPONSE))).toBe(false);
+    expect(isTabUnreachable(new Error("メッセージが大きすぎます"))).toBe(false);
+    expect(isTabUnreachable("文字列で投げられた失敗")).toBe(false);
+  });
+});
+
+describe("content script の読み込み", () => {
+  test("録画中に対象タブが読み込み直されたら失敗として提示する", async () => {
+    // タブは生きているので tabs.onRemoved は発火せず、OUT を監視していた
+    // content script だけが消える。OUT_REACHED は永久に来ない
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    await h.router.handle({ type: "content/loaded" }, 7);
+
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "recording-aborted",
+    });
+  });
+
+  test("別のタブが読み込まれても進行中の録画は止めない", async () => {
+    // 録画中に別の YouTube タブを開いただけで録画を落としてはいけない
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    await h.router.handle({ type: "content/loaded" }, 12);
+
+    expect(h.router.getState().kind).toBe("seeking");
+  });
+
+  test("録画中でなければ何も起こさない", async () => {
+    // 範囲を作った後のリロード。範囲は content script 側で復元される
+    const h = makeHarness();
+    await markRange(h.router);
+
+    await h.router.handle({ type: "content/loaded" }, 7);
+
+    expect(h.router.getState()).toMatchObject({ kind: "ready", range, meta });
   });
 });
