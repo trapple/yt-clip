@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { MP4_MIME, WEBM_MIME, pickMimeType } from "@/offscreen/codec";
+import { MP4_MIME, WEBM_MIME, pickMimeType } from "@/content/codec";
 
 describe("pickMimeType", () => {
   test("MP4 が使えるなら MP4 を選ぶ", () => {
