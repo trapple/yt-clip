@@ -202,6 +202,42 @@ describe("clampHandle", () => {
     ).toThrow(RangeError);
   });
 
+  test("範囲が確定する前 (窓も範囲も幅 0) は範囲を動かさない", () => {
+    // mount 直後の値。ここで desiredSec を通すと
+    // 上限 (endSec - MIN_CLIP_SEC) が負になり、負の再生位置が生まれる
+    const zero = { startSec: 0, endSec: 0 };
+    expect(clampHandle("in", 5, zero, zero)).toEqual(zero);
+    expect(clampHandle("out", 5, zero, zero)).toEqual(zero);
+  });
+
+  test("動画が最小長より短いときは範囲を動かさない", () => {
+    // 0.5 秒の動画。窓は動画全体になるが、最小長すら確保できない
+    const short = { startSec: 0, endSec: 0.5 };
+    expect(clampHandle("in", 0.4, short, short)).toEqual(short);
+    expect(clampHandle("out", 0.1, short, short)).toEqual(short);
+  });
+
+  test("窓が最小長ちょうどのときは、上限と下限が一致して範囲が保たれる", () => {
+    // 退化ケースの境界。ここでも負の再生位置は生まれない
+    const window_ = { startSec: 10, endSec: 10 + MIN_CLIP_SEC };
+    const from = { startSec: 10, endSec: 10 + MIN_CLIP_SEC };
+    expect(clampHandle("in", 10.5, from, window_)).toEqual(from);
+    expect(clampHandle("out", 20, from, window_)).toEqual(from);
+  });
+
+  test("長さ 0 の範囲でも、窓が足りていれば最小長を確保して動かせる", () => {
+    // IN と OUT が重なった状態。窓は十分に広いので調整できる
+    const collapsed = { startSec: 120, endSec: 120 };
+    expect(clampHandle("in", 125, collapsed, window)).toEqual({
+      startSec: 120 - MIN_CLIP_SEC,
+      endSec: 120,
+    });
+    expect(clampHandle("out", 125, collapsed, window)).toEqual({
+      startSec: 120,
+      endSec: 125,
+    });
+  });
+
   test("順序が逆転した窓も受け付けない", () => {
     // 窓が壊れていると、制約の上限と下限が入れ替わって
     // 「動かせるはずのない位置」に収まった結果が返る

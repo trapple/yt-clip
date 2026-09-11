@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   SelectorMissingError,
   attachFile,
+  containsHead,
   findElement,
   waitForElement,
 } from "@/content/x";
@@ -122,5 +123,36 @@ describe("attachFile", () => {
     );
 
     expect(onChange).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("containsHead", () => {
+  /** 本文テンプレートの既定値と同じ形。タイトル + 空行 + URL */
+  const body = (title: string) => `${title}\n\nhttps://youtu.be/abc123?t=10`;
+
+  test("入力された本文に先頭が現れていれば一致とみなす", () => {
+    const text = body("とても長いタイトルの動画です");
+    expect(containsHead(text, text)).toBe(true);
+  });
+
+  test("Draft.js が改行を落としても一致とみなす", () => {
+    // Draft.js は改行をブロックの境目として表し、テキストノードには
+    // 改行文字を置かない。改行を含んだまま比べると必ず一致しなくなる
+    const text = body("短い");
+    const asRendered = text.replace(/\n/g, "");
+    expect(containsHead(asRendered, text)).toBe(true);
+  });
+
+  test("タイトルが 1 文字でも、改行のせいで失敗と判定しない", () => {
+    // 先頭 20 文字に改行が入るのは、まさにタイトルが短いとき
+    const text = body("あ");
+    expect(containsHead(text.replace(/\n/g, ""), text)).toBe(true);
+  });
+
+  test("本文が入っていなければ一致しない", () => {
+    expect(containsHead("", body("タイトル"))).toBe(false);
+    expect(containsHead("別の本文が入っています", body("タイトル"))).toBe(
+      false,
+    );
   });
 });

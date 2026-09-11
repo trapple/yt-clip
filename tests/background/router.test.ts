@@ -111,22 +111,6 @@ describe("録画の開始", () => {
     });
   });
 
-  test("seek 完了を受けたら録画対象のタブへ開始を指示する", async () => {
-    const h = makeHarness();
-    await markRange(h.router);
-    await h.router.handle({
-      type: "clip/event",
-      event: { type: "START_RECORDING" },
-    });
-    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
-
-    // 録画するのは content script なので、指示はタブ宛に送る
-    expect(h.sentToTab).toContainEqual({
-      tabId: 7,
-      message: { type: "recorder/start" },
-    });
-  });
-
   test("録画対象のタブが分からなければ失敗として提示する", async () => {
     const h = makeHarness();
     // タブ ID を持たない経路 (popup から直接) で範囲を作る
@@ -144,6 +128,81 @@ describe("録画の開始", () => {
       kind: "failed",
       reason: "tab-lost",
     });
+  });
+
+  test("タブへ指示が届かなければ失敗として提示する", async () => {
+    // タブは残っているが content script が消えている (拡張の再読み込み等)
+    const h = makeHarness({
+      sendToTab: async (_tabId, message) => {
+        if (message.type === "recorder/start") {
+          throw new Error("受け手がいません");
+        }
+      },
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+
+    // seeking のまま固まると popup にも押せるボタンが残らない
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "tab-lost",
+    });
+  });
+
+  test("状態を届けられなければ録画の進行を打ち切る", async () => {
+    // 録画対象のタブが閉じられ、state/changed すら届かない
+    const h = makeHarness({
+      sendToTab: async (_tabId, message) => {
+        if (message.type === "state/changed" && message.state.kind === "seeking") {
+          throw new Error("タブがありません");
+        }
+      },
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    // content script は state/changed を受けて seek を始める。届かなければ
+    // SEEK_DONE も永久に来ない
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "tab-lost",
+    });
+  });
+
+  test("録画対象のタブが閉じられたら失敗として提示する", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    await h.router.handleTabRemoved(7);
+
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "tab-lost",
+    });
+  });
+
+  test("関係のないタブが閉じられても録画は続ける", async () => {
+    const h = makeHarness();
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    await h.router.handleTabRemoved(999);
+
+    expect(h.router.getState().kind).toBe("seeking");
   });
 
   test("録画開始の通知を受けてはじめて recording へ進む", async () => {
@@ -587,6 +646,22 @@ describe("録画の終了と保存", () => {
       tabId: 7,
       message: { type: "recorder/stop" },
     });
+  });
+
+  test("録画済みクリップを抱えていればタブが閉じても失敗させない", async () => {
+    const h = makeHarness();
+    await recordUntilEncoding(h);
+    await h.router.handle({
+      type: "recorder/done",
+      base64: "AAECAw==",
+      mimeType: "video/mp4",
+    });
+
+    // 録画元のタブはもう要らない。failed は clipId を持たないため、
+    // ここで失敗に落とすと録画済みクリップへの参照ごと失う
+    await h.router.handleTabRemoved(7);
+
+    expect(h.router.getState().kind).toBe("preview");
   });
 
   test("録画の完了を受けたら preview へ進む", async () => {

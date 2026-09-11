@@ -93,7 +93,7 @@ const HEAD_LENGTH = 20;
  * 「タイトル + 空行 + URL」なので、タイトルが短いと先頭 20 文字に
  * 改行が入り、成功しているのに失敗と判定してしまう。
  */
-function containsHead(actual: string, expected: string): boolean {
+export function containsHead(actual: string, expected: string): boolean {
   const withoutBreaks = (value: string): string =>
     value.replace(/[\r\n]/g, "");
   return withoutBreaks(actual).includes(
