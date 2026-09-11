@@ -1767,6 +1767,8 @@ git -C . commit -m "feat: 拡大バーの描画とドラッグを追加
 
 **動画要素の取得は必ず `try` の中に入れる。** `getVideo()` は要素が見つからないと投げる。状態変化のリスナは同期なので、外に置くと例外でリスナごと止まり、その下の録画開始に到達しない。`async` 関数でも外に置くと、投げた例外が Promise の拒否になって呼び出し元の `void` に消える。**どちらも「無言で止まる」形になり、このプロジェクトで何度も踏んでいる**。
 
+**拡大バーのコールバックも同じ。** `onScrub` と `onRangeCommitted` は拡大バーから直接呼ばれるため、click 用の `guard` を通らない。`guard` は引数を取らない関数しか包めないので、それぞれの中で扱う。ただし扱い方は同じでない: **確定は失敗を画面に出す** (送られないと見た目と状態が食い違うため)、**追従は黙って見送る** (フレームごとに例外を出しても意味がなく、ハンドルまで動かせなくなるため)。
+
 - [ ] **Step 1: シークバーのセレクタを追加する**
 
 `src/content/selectors.ts` の `YT_SELECTORS` に 1 行足す:
@@ -1885,20 +1887,41 @@ function onMarkOut(): void {
   send({ type: "MARK_OUT", sec: next.endSec });
 }
 
-/** 拡大バーでのドラッグが確定したとき */
+/**
+ * 拡大バーでのドラッグが確定したとき。
+ *
+ * 拡大バーから直接呼ばれるので click 用の guard を通らない。ここで落とすと
+ * 範囲が service worker へ送られず、画面の見た目だけが新しい範囲になって
+ * 実際の状態と食い違う
+ */
 function onRangeCommitted(range: ClipRange): void {
   if (busy) return;
-  currentRange = range;
-  paintOverlay(range, getVideo().duration);
-  setStatus(rangeLabel(range));
-  send({ type: "ADJUST_RANGE", range });
+
+  try {
+    currentRange = range;
+    paintOverlay(range, getVideo().duration);
+    setStatus(rangeLabel(range));
+    send({ type: "ADJUST_RANGE", range });
+  } catch (error) {
+    setStatus(`範囲を確定できませんでした: ${String(error)}`);
+  }
 }
 
-/** ドラッグ中の追従。動かしている側の位置を見せる */
+/**
+ * ドラッグ中の追従。動かしている側の位置を見せる。
+ *
+ * 追従できなくてもドラッグは続けさせる。ここで投げるとフレームごとに
+ * 例外が出るうえ、ハンドルまで動かせなくなる。範囲の指定という本来の
+ * 目的は追従なしでも達成できる
+ */
 function onScrub(sec: number): void {
-  const video = getVideo();
-  video.pause();
-  video.currentTime = sec;
+  try {
+    const video = getVideo();
+    video.pause();
+    video.currentTime = sec;
+  } catch {
+    // 動画が一瞬取れないだけ。次のフレームで拾い直せる
+  }
 }
 ```
 
