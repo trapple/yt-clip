@@ -1767,6 +1767,10 @@ git -C . commit -m "feat: 拡大バーの描画とドラッグを追加
 
 **動画要素の取得は必ず `try` の中に入れる。** `getVideo()` は要素が見つからないと投げる。状態変化のリスナは同期なので、外に置くと例外でリスナごと止まり、その下の録画開始に到達しない。`async` 関数でも外に置くと、投げた例外が Promise の拒否になって呼び出し元の `void` に消える。**どちらも「無言で止まる」形になり、このプロジェクトで何度も踏んでいる**。
 
+**投げうる呼び出しは、状態を書き換える前に済ませる。** `try` で包んでも、途中で落ちれば「その手前までは実行済み」になる。先に状態を書き換えてから落ちると、送っていない値が content script 側にだけ残る。
+
+**`try` の中に書いてあっても、後から呼ばれるものは守られない。** `onReachTime` に渡すコールバックは構文上 `try` の内側にあるが、実行されるのは `try` を抜けた後なので、その `catch` は効かない。見た目が包まれているだけに気付きにくい。
+
 **拡大バーのコールバックも同じ。** `onScrub` と `onRangeCommitted` は拡大バーから直接呼ばれるため、click 用の `guard` を通らない。`guard` は引数を取らない関数しか包めないので、それぞれの中で扱う。ただし扱い方は同じでない: **確定は失敗を画面に出す** (送られないと見た目と状態が食い違うため)、**追従は黙って見送る** (フレームごとに例外を出しても意味がなく、ハンドルまで動かせなくなるため)。
 
 - [ ] **Step 1: シークバーのセレクタを追加する**
@@ -1898,8 +1902,13 @@ function onRangeCommitted(range: ClipRange): void {
   if (busy) return;
 
   try {
+    // 動画が取れるかを先に確かめる。範囲を覚えてから落ちると、送っていない
+    // 範囲が content script 側にだけ残り、まさにこの関数が防ごうとしている
+    // 「画面と状態の食い違い」が起きる
+    const durationSec = getVideo().duration;
+
     currentRange = range;
-    paintOverlay(range, getVideo().duration);
+    paintOverlay(range, durationSec);
     setStatus(rangeLabel(range));
     send({ type: "ADJUST_RANGE", range });
   } catch (error) {
