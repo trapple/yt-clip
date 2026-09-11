@@ -18,6 +18,8 @@ type Harness = {
   deps: RouterDeps;
   /** 登録済みのタイマーをまとめて発火させる */
   fireTimers: () => void;
+  /** 取り消し漏れがないかを確認するための、登録済みタイマー数 */
+  pendingTimerCount: () => number;
 };
 
 function makeHarness(
@@ -66,6 +68,7 @@ function makeHarness(
       timers.length = 0;
       for (const onFire of pending) onFire();
     },
+    pendingTimerCount: () => timers.length,
   };
 }
 
@@ -232,12 +235,109 @@ describe("投稿画面が用意できないとき", () => {
     const h = makeHarness({}, clip);
     await reachComposing(h);
     await h.router.handle({ type: "x/ready" });
+    expect(h.pendingTimerCount()).toBe(1);
+
     await h.router.handle({ type: "x/attached" });
+
+    // x/attached 後は idle なので DEGRADE は拒まれる遷移になり、タイマーを
+    // 取り消し忘れても fireTimers で状態は動かない。だからこそタイマーが
+    // 実際に片付いていることを直接確認する
+    expect(h.pendingTimerCount()).toBe(0);
+    expect(h.router.getState()).toEqual({ kind: "idle" });
+  });
+});
+
+describe("投稿待ちから離れたらタイマーを始末する", () => {
+  const clip: StoredClip = {
+    id: "clip-1",
+    blob: new Blob(["動画データ"], { type: "video/mp4" }),
+    mimeType: "video/mp4",
+    range,
+    meta,
+    createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
+  };
+
+  test("取り直しで抜けた後は古いタイマーが発火しても影響しない", async () => {
+    const h = makeHarness({}, clip);
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+
+    // 投稿画面が開かないので取り直しで抜ける
+    await h.router.handle({ type: "clip/event", event: { type: "RETAKE" } });
+    expect(h.router.getState().kind).toBe("ready");
+
+    // 残っていたタイマーが後から発火しても、関係ない場面を壊さない
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState().kind).toBe("ready");
+  });
+
+  // brief 記載のテストに加えて追加した回帰テスト。上のテストは RETAKE 直後の
+  // "ready" でタイマーを発火させるが、"ready" は DEGRADE を受理しないため
+  // 拒まれる遷移になり、タイマーを取り消していなくても偶然通ってしまう
+  // (実際に確認済み)。実害が出るのは "preview" (DEGRADE を受理する) まで
+  // 進んでから発火した場合なので、そこまで再現してから検証する。
+  test("取り直しで抜けた後、録り直した preview を古いタイマーが壊さない", async () => {
+    const h = makeHarness({}, clip);
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+    await h.router.handle({ type: "clip/event", event: { type: "RETAKE" } });
+
+    // 30 秒以内に録り直して preview まで進む。ここで古いタイマーが残っていると、
+    // 全く無関係なこの場面が「X の画面構成が変わった」という誤った理由で
+    // downloadable に落ちてしまう
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-2",
+      mimeType: "video/mp4",
+    });
+    expect(h.router.getState().kind).toBe("preview");
 
     h.fireTimers();
     await Promise.resolve();
 
-    expect(h.router.getState()).toEqual({ kind: "idle" });
+    expect(h.router.getState().kind).toBe("preview");
   });
 });
 
@@ -371,22 +471,32 @@ describe("想定できない失敗を握り潰さない", () => {
   });
 
   test("クリップを持たない状態の例外は内部エラーとして提示する", async () => {
+    // getStreamId/ensureOffscreen を throw させても prepareCapture 自身の
+    // try/catch が先に拾ってしまい、catch-all (handle 側) を通らない。
+    // catch-all を本当に踏ませるため、どの経路にも try/catch のない
+    // persist の失敗を注入する
+    let shouldFailPersist = false;
     const h = makeHarness({
-      getStreamId: async () => {
-        throw new Error("想定外");
-      },
-      ensureOffscreen: async () => {
-        throw new Error("offscreen を作れません");
+      persist: async () => {
+        if (shouldFailPersist) {
+          throw new Error("永続化に失敗しました");
+        }
       },
     });
     await markRange(h.router);
+
+    // preview/composing のようにクリップを抱えていない状態 (ready →
+    // seeking への遷移中) で例外を起こす
+    shouldFailPersist = true;
     await h.router.handle({
       type: "clip/event",
       event: { type: "START_RECORDING" },
     });
 
-    // prepareCapture 自身の catch が拾うので capture-permission-denied になる
-    expect(h.router.getState()).toMatchObject({ kind: "failed" });
+    expect(h.router.getState()).toMatchObject({
+      kind: "failed",
+      reason: "internal-error",
+    });
   });
 });
 
