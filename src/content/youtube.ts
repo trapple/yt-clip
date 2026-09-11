@@ -347,10 +347,12 @@ function buildBar(): HTMLElement {
 function mount(): void {
   if (document.getElementById(BAR_ID) !== null) return;
 
-  const anchor = document.querySelector(YT_SELECTORS.controls);
-  if (anchor === null) return; // プレイヤー未生成。次の observe で再試行する
+  const anchor = document.querySelector(YT_SELECTORS.mountAnchor);
+  if (anchor === null) return; // 動画ページ未生成。次の observe で再試行する
 
-  anchor.parentElement?.insertBefore(buildBar(), anchor.nextSibling);
+  // 先頭に入れてプレイヤーのすぐ下に置く。タイトルより下だと、操作するたびに
+  // 画面をスクロールして動画と往復することになる
+  anchor.insertBefore(buildBar(), anchor.firstChild);
 }
 
 chrome.runtime.onMessage.addListener((message: Message) => {

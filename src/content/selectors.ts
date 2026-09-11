@@ -5,7 +5,12 @@
 export const YT_SELECTORS = {
   video: "video.html5-main-video",
   player: "#movie_player",
-  controls: ".ytp-right-controls",
+  /**
+   * 操作 UI を差し込む位置。プレイヤーの直下にあり、動画ページの間は残り続ける。
+   * プレイヤー内部の操作列 (.ytp-right-controls) に入れると、列の高さに収まらず、
+   * さらにマウスを外したときプレイヤーの UI ごと隠れてしまう
+   */
+  mountAnchor: "#below",
   title: "h1.ytd-watch-metadata yt-formatted-string",
   /** 範囲を帯で重ねる対象。プレイヤーのシークバー */
   progressBar: ".ytp-progress-bar",
