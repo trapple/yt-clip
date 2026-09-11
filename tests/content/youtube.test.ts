@@ -137,15 +137,23 @@ function installVideo(): FakeVideo {
     cancelVideoFrameCallback: (handle: number): void => {
       frames.delete(handle);
     },
-    captureStream: () => ({
-      getTracks: () => [
-        {
-          stop: (): void => {
-            stoppedTracks += 1;
-          },
+    // 実物の MediaStream と同じ 3 つのメソッドを備える。ここを欠くと
+    // buildRecordingStream が音声の有無を見た時点で落ちる。
+    // 音声の取り回し (ステレオへの変換) は recorder.test.ts で見るので、
+    // ここでは映像だけのストリームにして寿命の検証に絞る
+    captureStream: () => {
+      const track = {
+        kind: "video",
+        stop: (): void => {
+          stoppedTracks += 1;
         },
-      ],
-    }),
+      };
+      return {
+        getTracks: () => [track],
+        getVideoTracks: () => [track],
+        getAudioTracks: () => [],
+      };
+    },
   });
 
   return fake;
