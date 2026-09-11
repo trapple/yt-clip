@@ -10,14 +10,4 @@ export default defineConfig({
   resolve: {
     alias: { "@": src },
   },
-  build: {
-    rollupOptions: {
-      // offscreen document は manifest から参照されないため明示的に入力へ加える
-      input: {
-        offscreen: fileURLToPath(
-          new URL("./src/offscreen/offscreen.html", import.meta.url),
-        ),
-      },
-    },
-  },
 });

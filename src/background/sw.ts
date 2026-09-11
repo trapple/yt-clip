@@ -1,6 +1,5 @@
-import { ensureOffscreen, getStreamId } from "@/background/capture";
 import { createRouter, type RouterSnapshot } from "@/background/router";
-import { getClip } from "@/background/storage";
+import { getClip, saveClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
 import { DEFAULT_TEMPLATE } from "@/shared/template";
 
@@ -16,11 +15,10 @@ async function loadSnapshot(): Promise<RouterSnapshot | undefined> {
 const ready = loadSnapshot().then((snapshot) =>
   createRouter(
     {
-      ensureOffscreen: () => ensureOffscreen(),
-      getStreamId: (tabId) => getStreamId(tabId),
+      saveClip,
       getClip,
       sendToRuntime: (message) => {
-        // popup や offscreen が開いていないだけなら受け手不在は正常
+        // popup が開いていないだけなら受け手不在は正常
         void chrome.runtime.sendMessage(message).catch(() => undefined);
       },
       sendToTab: (tabId, message) => {

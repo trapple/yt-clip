@@ -1,17 +1,21 @@
 import { INITIAL_STATE, reduce } from "@/background/state";
 import type { StoredClip } from "@/background/storage";
-import { encodeBase64 } from "@/shared/base64";
+import { decodeBase64, encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message } from "@/shared/messages";
 import { renderTemplate } from "@/shared/template";
-import type { ClipEvent, ClipState, FailureReason } from "@/shared/types";
+import {
+  BUSY_KINDS,
+  type ClipEvent,
+  type ClipState,
+  type FailureReason,
+} from "@/shared/types";
 
 /** router が使う外部依存。テストではフェイクを渡す */
 export type RouterDeps = {
-  ensureOffscreen(): Promise<void>;
-  getStreamId(tabId: number): Promise<string>;
+  saveClip(clip: StoredClip): Promise<void>;
   getClip(id: string): Promise<StoredClip>;
-  /** offscreen / popup 宛。受け手が居ないことは正常なので送信側では扱わない */
+  /** popup 宛。受け手が居ないことは正常なので送信側では扱わない */
   sendToRuntime(message: Message): void;
   sendToTab(tabId: number, message: Message): void;
   openComposeTab(): Promise<number>;
@@ -42,13 +46,6 @@ export type Router = {
   handle(message: Message, senderTabId?: number): Promise<void>;
 };
 
-/** 録画が進行中で、範囲の変更を受け付けない状態 */
-const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
-  "seeking",
-  "recording",
-  "encoding",
-]);
-
 export function createRouter(
   deps: RouterDeps,
   initial?: RouterSnapshot,
@@ -56,7 +53,6 @@ export function createRouter(
   let state: ClipState = initial?.state ?? INITIAL_STATE;
   let captureTabId: number | null = initial?.captureTabId ?? null;
   let composeTabId: number | null = initial?.composeTabId ?? null;
-  let streamId: string | null = null;
   /** 投稿画面の準備待ちを打ち切るためのハンドル */
   let cancelComposeTimeout: (() => void) | null = null;
 
@@ -129,56 +125,48 @@ export function createRouter(
     await apply({ type: "FAIL", reason });
   }
 
-  /** 録画の下準備。動画はまだ進めない */
-  async function prepareCapture(): Promise<void> {
-    if (captureTabId === null) {
-      await fail("tab-lost");
-      return;
-    }
-    try {
-      await deps.ensureOffscreen();
-      streamId = await deps.getStreamId(captureTabId);
-    } catch (error) {
-      // 理由を捨てると、権限を拒否されたのか offscreen を作れなかったのかが
-      // 後から追えない。ユーザーに見せる文言は 1 つでも、原因は残しておく
-      console.error("録画の準備に失敗しました", error);
-      await fail("capture-permission-denied");
-    }
-  }
-
   /** seek 完了後に録画を始めさせる。状態を進めるのは recorder/started を受けてから */
   async function beginRecording(): Promise<void> {
     // seek 完了は reduce を経由しないぶん、ここで状態を自分で確かめる。
-    // 二度目の SEEK_DONE を権限エラーとして報告しないため。
+    // 二度目の SEEK_DONE で余計な指示を出さないため
     if (state.kind !== "seeking") {
       console.warn(`録画準備中ではないので seek 完了を無視しました (状態: ${state.kind})`);
       return;
     }
-    if (streamId === null) {
-      await fail("capture-permission-denied");
+    if (captureTabId === null) {
+      await fail("tab-lost");
       return;
     }
-
-    // 保存先を先に決めて offscreen へ渡す。録画データは offscreen が直接
-    // IndexedDB へ書く (拡張のメッセージには載せられないため)
-    deps.sendToRuntime({
-      type: "recorder/start",
-      streamId,
-      clipId: `clip-${deps.now()}`,
-      range: state.range,
-      meta: state.meta,
-    });
-    streamId = null;
+    // 録画するのは content script。service worker は指示を出すだけ
+    deps.sendToTab(captureTabId, { type: "recorder/start" });
   }
 
   /**
-   * 録画の完了を受け取る。データは offscreen が既に保存済みで、ここでは
-   * 状態を進めるだけ。保存済みのものを状態の都合で捨ててはいけない。
+   * 録画結果を受け取って保存する。
+   * content script は拡張の IndexedDB を読み書きできないため、
+   * base64 で運ばれてきたものをここで Blob に戻す。
    */
   async function storeRecording(
-    clipId: string,
+    base64: string,
     mimeType: string,
   ): Promise<void> {
+    if (state.kind !== "encoding") {
+      // 録画は実時間のコストを払い終えている。状態が想定と違うことは
+      // 捨てる理由にならないが、範囲も動画情報も state にしか無いため保存できない
+      console.error(`録画結果を保存できません (状態: ${state.kind})`);
+      await fail("recording-aborted");
+      return;
+    }
+
+    const clipId = `clip-${deps.now()}`;
+    await deps.saveClip({
+      id: clipId,
+      blob: new Blob([decodeBase64(base64)], { type: mimeType }),
+      mimeType,
+      range: state.range,
+      meta: state.meta,
+      createdAt: deps.now(),
+    });
     await apply({ type: "BLOB_READY", clipId, mimeType });
 
     // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない
@@ -218,10 +206,11 @@ export function createRouter(
     senderTabId?: number,
   ): Promise<void> {
     // 録画中の範囲変更は受け付けない。`reduce` は MARK_IN をどの状態からでも
-    // 受理してしまうため、ここで止めないと状態機械だけが marking に戻り、
-    // offscreen の録画は解放されないまま走り続ける。UI 側でも同じガードを
-    // 持っているが、状態変化を受け取っていない別タブからの MARK_IN は
-    // UI 側では防げないので、録画対象タブを奪われないようここでも守る。
+    // 受理してしまうため、ここで止めないと状態機械だけが ready に戻り、
+    // 録画中の content script は指示を受けないまま走り続ける。UI 側でも
+    // 同じガードを持っているが、状態変化を受け取っていない別タブからの
+    // MARK_IN は UI 側では防げないので、録画対象タブを奪われないよう
+    // ここでも守る。
     if (event.type === "MARK_IN" && BUSY_KINDS.has(state.kind)) {
       console.warn(`録画中の範囲変更を無視しました (状態: ${state.kind})`);
       return;
@@ -245,12 +234,10 @@ export function createRouter(
     // 二度目でも録画準備が走り、状態と実際の動作が食い違う。
     if (state.kind === previous.kind) return;
 
-    if (state.kind === "seeking") {
-      await prepareCapture();
-      return;
-    }
     if (state.kind === "encoding") {
-      deps.sendToRuntime({ type: "recorder/stop" });
+      if (captureTabId !== null) {
+        deps.sendToTab(captureTabId, { type: "recorder/stop" });
+      }
       return;
     }
     if (state.kind === "composing") {
@@ -278,7 +265,7 @@ export function createRouter(
         await apply({ type: "SEEK_DONE" });
         return;
       case "recorder/done":
-        await storeRecording(message.clipId, message.mimeType);
+        await storeRecording(message.base64, message.mimeType);
         return;
       case "recorder/failed":
         // 理由を捨てると、どの段階で録画が壊れたのかが後から追えない
