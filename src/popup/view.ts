@@ -112,9 +112,10 @@ export function describeState(state: ClipState): PopupView {
       };
 
     case "composing":
+      // 投稿画面が開かないまま戻ってきたときに詰まないよう、抜ける道を必ず残す
       return {
         message: "X の投稿画面で内容を確認して投稿してください",
-        actions: [],
+        actions: ["retake"],
         busy: false,
         showPreview: true,
         recordingSec: null,

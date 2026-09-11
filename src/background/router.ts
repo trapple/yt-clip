@@ -1,5 +1,6 @@
 import { INITIAL_STATE, reduce } from "@/background/state";
 import type { StoredClip } from "@/background/storage";
+import { encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message } from "@/shared/messages";
 import { renderTemplate } from "@/shared/template";
@@ -9,7 +10,6 @@ import type { ClipEvent, ClipState, FailureReason } from "@/shared/types";
 export type RouterDeps = {
   ensureOffscreen(): Promise<void>;
   getStreamId(tabId: number): Promise<string>;
-  saveClip(clip: StoredClip): Promise<void>;
   getClip(id: string): Promise<StoredClip>;
   /** offscreen / popup 宛。受け手が居ないことは正常なので送信側では扱わない */
   sendToRuntime(message: Message): void;
@@ -103,7 +103,7 @@ export function createRouter(
     // FAIL は明示的な失敗通知であり、`reduce` の invalid() フォールバックとは
     // 区別する。区別しないと「FAIL はどの状態からでも受理される」という
     // fail() 側の前提が崩れ、想定外の例外を internal-error として提示する
-    // (I1) ための fail("internal-error") 呼び出しがここで握り潰されてしまう。
+    // ための fail("internal-error") 呼び出しがここで握り潰されてしまう。
     if (event.type !== "FAIL" && isRejectedTransition(state, next)) {
       console.warn(
         `受け付けられない操作を無視しました: ${event.type} (状態: ${state.kind})`,
@@ -179,27 +179,22 @@ export function createRouter(
     }
   }
 
-  /** content script へ渡せるよう base64 にする。大きすぎる文字列連結を避けて分割する */
-  function toBase64(bytes: Uint8Array): string {
-    const CHUNK = 0x8000;
-    let binary = "";
-    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
-      binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
-    }
-    return btoa(binary);
-  }
-
   async function sendPayload(): Promise<void> {
     if (state.kind !== "composing" || composeTabId === null) return;
 
+    // 待つ対象が「投稿画面の準備」から「添付の結果」に変わるだけで、
+    // 待たなくてよくなるわけではない。タブを閉じられれば結果は永久に来ない
     cancelComposeTimeout?.();
-    cancelComposeTimeout = null;
+    cancelComposeTimeout = deps.startTimer(COMPOSE_READY_TIMEOUT_MS, () => {
+      cancelComposeTimeout = null;
+      void apply({ type: "DEGRADE", reason: "x-attach-failed" });
+    });
 
     const clip = await deps.getClip(state.clipId);
     const template = await deps.loadTemplate();
     deps.sendToTab(composeTabId, {
       type: "x/payload",
-      base64: toBase64(new Uint8Array(await clip.blob.arrayBuffer())),
+      base64: encodeBase64(new Uint8Array(await clip.blob.arrayBuffer())),
       mimeType: clip.mimeType,
       fileName: buildClipFileName(
         clip.meta.videoId,
@@ -320,7 +315,16 @@ export function createRouter(
           // 想定できていない失敗。黙って止まると、状態が途中のまま
           // ユーザーには何も伝わらない
           console.error("メッセージの処理に失敗しました", message.type, error);
-          await fail("internal-error").catch(() => undefined);
+
+          // 録画済みクリップを抱えている状態を failed で潰すと、
+          // failed は clipId を持たないためデータへの参照ごと失われる。
+          // 保存済みのものは必ずダウンロードで回収できる形に倒す
+          const holdsClip =
+            state.kind === "preview" || state.kind === "composing";
+          const recovery: ClipEvent = holdsClip
+            ? { type: "DEGRADE", reason: "x-attach-failed" }
+            : { type: "FAIL", reason: "internal-error" };
+          await apply(recovery).catch(() => undefined);
         }
       });
       return queue;

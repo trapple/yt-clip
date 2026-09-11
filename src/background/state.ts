@@ -117,6 +117,11 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
 
     case "composing":
       if (event.type === "ATTACHED") return { kind: "idle" };
+      // 投稿画面が用意できないまま待たされたとき、ユーザーが自分で抜けられる道。
+      // service worker は数十秒で止まるためタイマーによる退避は当てにできない
+      if (event.type === "RETAKE") {
+        return { kind: "ready", range: state.range, meta: state.meta };
+      }
       // 録画済みの成果物は捨てずにダウンロードへ退避させる
       if (event.type === "DEGRADE") {
         return {

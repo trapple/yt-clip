@@ -1,6 +1,6 @@
 import { ensureOffscreen, getStreamId } from "@/background/capture";
 import { createRouter, type RouterSnapshot } from "@/background/router";
-import { getClip, saveClip } from "@/background/storage";
+import { getClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
 import { DEFAULT_TEMPLATE } from "@/shared/template";
 
@@ -18,14 +18,22 @@ const ready = loadSnapshot().then((snapshot) =>
     {
       ensureOffscreen: () => ensureOffscreen(),
       getStreamId: (tabId) => getStreamId(tabId),
-      saveClip,
       getClip,
       sendToRuntime: (message) => {
         // popup や offscreen が開いていないだけなら受け手不在は正常
         void chrome.runtime.sendMessage(message).catch(() => undefined);
       },
       sendToTab: (tabId, message) => {
-        void chrome.tabs.sendMessage(tabId, message).catch(() => undefined);
+        void chrome.tabs.sendMessage(tabId, message).catch((error: unknown) => {
+          // content script がまだ居ない場合もあるが、大きな payload が
+          // 送れなかった場合もここに来る。理由を残さないと区別できない
+          console.error(
+            "タブへの送信に失敗しました",
+            tabId,
+            message.type,
+            error,
+          );
+        });
       },
       openComposeTab: async () => {
         const tab = await chrome.tabs.create({ url: COMPOSE_URL });

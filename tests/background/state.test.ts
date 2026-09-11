@@ -104,6 +104,11 @@ describe("投稿と degraded path", () => {
     expect(reduce(composing, { type: "ATTACHED" })).toEqual({ kind: "idle" });
   });
 
+  test("投稿画面が用意できないときは composing から取り直せる", () => {
+    const composing = reduce(preview, { type: "POST" });
+    expect(reduce(composing, { type: "RETAKE" })).toEqual(ready);
+  });
+
   test("MP4 非対応なら preview から downloadable へ退避する", () => {
     expect(
       reduce(preview, { type: "DEGRADE", reason: "mp4-unsupported" }),

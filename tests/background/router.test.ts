@@ -15,7 +15,6 @@ type Harness = {
   router: Router;
   sentToRuntime: Message[];
   sentToTab: Array<{ tabId: number; message: Message }>;
-  saved: StoredClip[];
   deps: RouterDeps;
   /** 登録済みのタイマーをまとめて発火させる */
   fireTimers: () => void;
@@ -27,16 +26,12 @@ function makeHarness(
 ): Harness {
   const sentToRuntime: Message[] = [];
   const sentToTab: Array<{ tabId: number; message: Message }> = [];
-  const saved: StoredClip[] = [];
   /** startTimer で登録された処理。テストから任意に発火させる */
   const timers: Array<() => void> = [];
 
   const deps: RouterDeps = {
     ensureOffscreen: vi.fn(async () => undefined),
     getStreamId: vi.fn(async () => "stream-abc"),
-    saveClip: async (clip) => {
-      saved.push(clip);
-    },
     getClip: async () => {
       if (stored === undefined) throw new Error("クリップがありません");
       return stored;
@@ -65,7 +60,6 @@ function makeHarness(
     router: createRouter(deps),
     sentToRuntime,
     sentToTab,
-    saved,
     deps,
     fireTimers: () => {
       const pending = [...timers];
@@ -208,16 +202,42 @@ describe("投稿画面が用意できないとき", () => {
     });
   });
 
-  test("準備完了が届いたら時間切れにしない", async () => {
+  test("準備完了直後はまだ composing のまま", async () => {
     const h = makeHarness({}, clip);
     await reachComposing(h);
     await h.router.handle({ type: "x/ready" });
 
-    // 送信済みならタイマーは取り消されている
+    expect(h.router.getState().kind).toBe("composing");
+  });
+
+  test("準備完了後は添付結果を待つタイマーに張り替わる", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    // タイマーは取り消されるのではなく、待つ対象が「投稿画面の準備」から
+    // 「添付の結果」に張り替わるだけ。タブを閉じられれば結果は永久に
+    // 来ないため、ここでも時間切れになれば downloadable へ退避する
     h.fireTimers();
     await Promise.resolve();
 
-    expect(h.router.getState().kind).toBe("composing");
+    expect(h.router.getState()).toMatchObject({
+      kind: "downloadable",
+      reason: "x-attach-failed",
+      clipId: "clip-1",
+    });
+  });
+
+  test("添付完了が届けば張り替えたタイマーも取り消される", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+    await h.router.handle({ type: "x/attached" });
+
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState()).toEqual({ kind: "idle" });
   });
 });
 
@@ -341,11 +361,32 @@ describe("想定できない失敗を握り潰さない", () => {
     });
     await h.router.handle({ type: "clip/event", event: { type: "POST" } });
 
-    // 黙って止まると、状態が途中のままユーザーには何も伝わらない
+    // 録画済みクリップを抱えたまま failed にすると clipId ごと失われる。
+    // 保存済みのものは必ず回収できる形に倒す
     expect(h.router.getState()).toMatchObject({
-      kind: "failed",
-      reason: "internal-error",
+      kind: "downloadable",
+      reason: "x-attach-failed",
+      clipId: "clip-1",
     });
+  });
+
+  test("クリップを持たない状態の例外は内部エラーとして提示する", async () => {
+    const h = makeHarness({
+      getStreamId: async () => {
+        throw new Error("想定外");
+      },
+      ensureOffscreen: async () => {
+        throw new Error("offscreen を作れません");
+      },
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    // prepareCapture 自身の catch が拾うので capture-permission-denied になる
+    expect(h.router.getState()).toMatchObject({ kind: "failed" });
   });
 });
 
@@ -448,12 +489,15 @@ describe("録画の終了と保存", () => {
     const start = h.sentToRuntime.find(
       (message) => message.type === "recorder/start",
     );
-    expect(start).toMatchObject({
-      type: "recorder/start",
-      streamId: "stream-abc",
-      range,
-      meta,
-    });
+    // clipId は実行のたびに変わるので、それ以外が揃っていることを見る
+    expect(start).toEqual(
+      expect.objectContaining({
+        type: "recorder/start",
+        streamId: "stream-abc",
+        range,
+        meta,
+      }),
+    );
     expect(start && "clipId" in start && start.clipId).toBeTruthy();
   });
 

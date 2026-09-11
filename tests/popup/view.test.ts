@@ -72,7 +72,7 @@ describe("プレビューと投稿", () => {
     expect(view.actions).toEqual(["post", "retake"]);
   });
 
-  test("composing は投稿画面側の操作を促す", () => {
+  test("composing は投稿画面側の操作を促しつつ抜け道を残す", () => {
     const view = describeState({
       kind: "composing",
       clipId: "clip-1",
@@ -81,7 +81,8 @@ describe("プレビューと投稿", () => {
       mimeType: "video/mp4",
     });
     expect(view.message).toBe("X の投稿画面で内容を確認して投稿してください");
-    expect(view.actions).toEqual([]);
+    // 投稿画面が開かないまま戻ってきたときに詰まないよう、必ず操作を残す
+    expect(view.actions).toEqual(["retake"]);
   });
 });
 

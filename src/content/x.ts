@@ -1,4 +1,5 @@
 import { X_SELECTORS } from "@/content/selectors";
+import { decodeBase64 } from "@/shared/base64";
 import type { Message } from "@/shared/messages";
 
 export class SelectorMissingError extends Error {
@@ -83,23 +84,6 @@ export function insertText(editor: HTMLElement, text: string): void {
   if (!inserted) {
     throw new Error("本文を入力できませんでした");
   }
-}
-
-/**
- * service worker から base64 で届いた動画を復元する。
- *
- * 戻り値を `Uint8Array<ArrayBuffer>` と明示しているのは、TypeScript 5.7 以降
- * `Uint8Array` の既定の型引数が `ArrayBufferLike` (SharedArrayBuffer を含む) に
- * なり、無指定のままだと `BlobPart` (ArrayBuffer 限定) に代入できなくなるため。
- * `new Uint8Array(length)` は実際には常に ArrayBuffer 裏付けなので安全な明示。
- */
-export function decodeBase64(base64: string): Uint8Array<ArrayBuffer> {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
 }
 
 function notify(message: Message): void {
