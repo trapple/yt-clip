@@ -169,22 +169,24 @@ async function playRange(): Promise<void> {
   cancelPreview?.();
   cancelPreview = null;
 
-  const video = getVideo();
   const range = currentRange;
   try {
+    // getVideo() を try の外に置くと、この関数は async なので同期的な throw が
+    // Promise の拒否になり、呼び出し元の `void playRange()` で握り潰されて
+    // ボタンが無反応に見える。onReachTime の登録まで含めて 1 つの try で拾う
+    const video = getVideo();
     await seekTo(video, range.startSec);
     await startPlayback(video);
+
+    setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
+    cancelPreview = onReachTime(video, range.endSec, () => {
+      cancelPreview = null;
+      video.pause();
+      setStatus(rangeLabel(range));
+    });
   } catch (error) {
     setStatus(`範囲を再生できませんでした: ${String(error)}`);
-    return;
   }
-
-  setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
-  cancelPreview = onReachTime(video, range.endSec, () => {
-    cancelPreview = null;
-    video.pause();
-    setStatus(rangeLabel(range));
-  });
 }
 
 /**
@@ -341,9 +343,16 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   rangeBar?.setEnabled(!busy);
 
   // 無効化しただけでは、打ち切られたドラッグの見た目が最後の位置に残る。
-  // 確定していない範囲が表示され続けないよう、確定済みの範囲で描き直す
+  // 確定していない範囲が表示され続けないよう、確定済みの範囲で描き直す。
+  // ここは同期リスナーなので、getVideo() が投げると下の prepareRecording /
+  // runRecording に処理が届かず SEEK_DONE も送られない = 録画が無音で
+  // 止まる。表示の乱れは録画を止める理由にならないため、失敗しても先へ進める
   if (busy && currentRange !== null) {
-    rangeBar?.update(currentRange, getVideo().duration);
+    try {
+      rangeBar?.update(currentRange, getVideo().duration);
+    } catch (error) {
+      console.warn(`拡大バーの再描画に失敗しました: ${String(error)}`);
+    }
   }
 
   if (state.kind === "seeking") {
