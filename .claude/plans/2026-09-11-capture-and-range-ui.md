@@ -1381,6 +1381,8 @@ base64 で service worker へ渡し、保存は service worker が行う。
 
 **どの方式で成功したかを `console.info` に残す。** 次に壊れたときに、どこまで効いていたのかが分かる。
 
+**一致の判定では改行を落とす。** Draft.js は貼り付けたテキストの改行をブロック要素の境目として表し、テキストノードには改行文字を置かない。本文テンプレートは「タイトル + 空行 + URL」なので、タイトルが短いと先頭 20 文字に改行が入り、**成功しているのに失敗と判定**してしまう。
+
 **テストは書かない。** `document.execCommand` も `ClipboardEvent` も jsdom に無く、モックで固めても実際の Draft.js に対する挙動は何も検証できない。代わりに `console.info` のログを手動確認の項目にする (Task 8)。
 
 - [ ] **Step 1: insertText を 3 段構えにする**
@@ -1390,6 +1392,26 @@ base64 で service worker へ渡し、保存は service worker が行う。
 ```typescript
 /** paste が反映されるのを待つ時間 (ミリ秒) */
 const PASTE_SETTLE_MS = 100;
+
+/** 一致を確かめるために見る先頭の文字数 */
+const HEAD_LENGTH = 20;
+
+/**
+ * 入力された本文に、渡したテキストの先頭が現れているかを見る。
+ *
+ * 改行を落としてから比べる。Draft.js は貼り付けたテキストの改行を
+ * ブロック要素の境目として表し、テキストノードには改行文字を置かない。
+ * そのため本文が正しく入っていても `textContent` に改行は現れず、
+ * 改行を含んだまま比較すると必ず一致しない。本文テンプレートは
+ * 「タイトル + 空行 + URL」なので、タイトルが短いと先頭 20 文字に
+ * 改行が入り、成功しているのに失敗と判定してしまう。
+ */
+function containsHead(actual: string, expected: string): boolean {
+  const withoutBreaks = (value: string): string => value.replace(/[\r\n]/g, "");
+  return withoutBreaks(actual).includes(
+    withoutBreaks(expected).slice(0, HEAD_LENGTH),
+  );
+}
 
 /**
  * 本文を入力する。contenteditable への代入では React の state に反映されない。
@@ -1432,8 +1454,7 @@ export async function insertText(
 
   // 入ったかどうかは戻り値では判断できない (preventDefault の有無しか分からない)。
   // 実際に本文へ現れたかを見る
-  const head = text.slice(0, 20);
-  if ((editor.textContent ?? "").includes(head)) {
+  if (containsHead(editor.textContent ?? "", text)) {
     console.info("[yt-clip] 本文を paste で入力しました");
     return;
   }
