@@ -56,6 +56,7 @@
 | `src/shared/time.ts` | 秒⇄表示変換、範囲バリデーション | Task 1 |
 | `src/shared/template.ts` | 本文テンプレート展開、YouTube URL 生成 | Task 2 |
 | `src/shared/filename.ts` | 添付・保存用のファイル名生成 | Task 7 |
+| `src/shared/base64.ts` | 動画を content script へ渡すための base64 変換 | 統合修正 |
 | `src/background/state.ts` | 状態機械 (純粋関数 reducer) | Task 3 |
 | `src/background/storage.ts` | IndexedDB へのクリップ CRUD | Task 4 |
 | `src/offscreen/codec.ts` | MP4 対応判定 | Task 5 |
@@ -844,6 +845,11 @@ describe("投稿と degraded path", () => {
     expect(reduce(composing, { type: "ATTACHED" })).toEqual({ kind: "idle" });
   });
 
+  test("投稿画面が用意できないときは composing から取り直せる", () => {
+    const composing = reduce(preview, { type: "POST" });
+    expect(reduce(composing, { type: "RETAKE" })).toEqual(ready);
+  });
+
   test("MP4 非対応なら preview から downloadable へ退避する", () => {
     expect(
       reduce(preview, { type: "DEGRADE", reason: "mp4-unsupported" }),
@@ -1060,6 +1066,11 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
 
     case "composing":
       if (event.type === "ATTACHED") return { kind: "idle" };
+      // 投稿画面が用意できないまま待たされたとき、ユーザーが自分で抜けられる道。
+      // service worker は数十秒で止まるためタイマーによる退避は当てにできない
+      if (event.type === "RETAKE") {
+        return { kind: "ready", range: state.range, meta: state.meta };
+      }
       // 録画済みの成果物は捨てずにダウンロードへ退避させる
       if (event.type === "DEGRADE") {
         return {
@@ -2501,6 +2512,7 @@ describe("buildClipFileName", () => {
 
 ```typescript
 import { X_SELECTORS } from "@/content/selectors";
+import { decodeBase64 } from "@/shared/base64";
 import type { Message } from "@/shared/messages";
 
 export class SelectorMissingError extends Error {
@@ -2585,16 +2597,6 @@ export function insertText(editor: HTMLElement, text: string): void {
   if (!inserted) {
     throw new Error("本文を入力できませんでした");
   }
-}
-
-/** service worker から base64 で届いた動画を復元する */
-export function decodeBase64(base64: string): Uint8Array<ArrayBuffer> {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
 }
 
 function notify(message: Message): void {
@@ -3223,11 +3225,32 @@ describe("想定できない失敗を握り潰さない", () => {
     });
     await h.router.handle({ type: "clip/event", event: { type: "POST" } });
 
-    // 黙って止まると、状態が途中のままユーザーには何も伝わらない
+    // 録画済みクリップを抱えたまま failed にすると clipId ごと失われる。
+    // 保存済みのものは必ず回収できる形に倒す
     expect(h.router.getState()).toMatchObject({
-      kind: "failed",
-      reason: "internal-error",
+      kind: "downloadable",
+      reason: "x-attach-failed",
+      clipId: "clip-1",
     });
+  });
+
+  test("クリップを持たない状態の例外は内部エラーとして提示する", async () => {
+    const h = makeHarness({
+      getStreamId: async () => {
+        throw new Error("想定外");
+      },
+      ensureOffscreen: async () => {
+        throw new Error("offscreen を作れません");
+      },
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+
+    // prepareCapture 自身の catch が拾うので capture-permission-denied になる
+    expect(h.router.getState()).toMatchObject({ kind: "failed" });
   });
 });
 
@@ -3458,6 +3481,7 @@ describe("X への受け渡し", () => {
 ```typescript
 import { INITIAL_STATE, reduce } from "@/background/state";
 import type { StoredClip } from "@/background/storage";
+import { encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message } from "@/shared/messages";
 import { renderTemplate } from "@/shared/template";
@@ -3467,7 +3491,6 @@ import type { ClipEvent, ClipState, FailureReason } from "@/shared/types";
 export type RouterDeps = {
   ensureOffscreen(): Promise<void>;
   getStreamId(tabId: number): Promise<string>;
-  saveClip(clip: StoredClip): Promise<void>;
   getClip(id: string): Promise<StoredClip>;
   /** offscreen / popup 宛。受け手が居ないことは正常なので送信側では扱わない */
   sendToRuntime(message: Message): void;
@@ -3637,27 +3660,22 @@ export function createRouter(
     }
   }
 
-  /** content script へ渡せるよう base64 にする。大きすぎる文字列連結を避けて分割する */
-  function toBase64(bytes: Uint8Array): string {
-    const CHUNK = 0x8000;
-    let binary = "";
-    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
-      binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
-    }
-    return btoa(binary);
-  }
-
   async function sendPayload(): Promise<void> {
     if (state.kind !== "composing" || composeTabId === null) return;
 
+    // 待つ対象が「投稿画面の準備」から「添付の結果」に変わるだけで、
+    // 待たなくてよくなるわけではない。タブを閉じられれば結果は永久に来ない
     cancelComposeTimeout?.();
-    cancelComposeTimeout = null;
+    cancelComposeTimeout = deps.startTimer(COMPOSE_READY_TIMEOUT_MS, () => {
+      cancelComposeTimeout = null;
+      void apply({ type: "DEGRADE", reason: "x-attach-failed" });
+    });
 
     const clip = await deps.getClip(state.clipId);
     const template = await deps.loadTemplate();
     deps.sendToTab(composeTabId, {
       type: "x/payload",
-      base64: toBase64(new Uint8Array(await clip.blob.arrayBuffer())),
+      base64: encodeBase64(new Uint8Array(await clip.blob.arrayBuffer())),
       mimeType: clip.mimeType,
       fileName: buildClipFileName(
         clip.meta.videoId,
@@ -3778,7 +3796,16 @@ export function createRouter(
           // 想定できていない失敗。黙って止まると、状態が途中のまま
           // ユーザーには何も伝わらない
           console.error("メッセージの処理に失敗しました", message.type, error);
-          await fail("internal-error").catch(() => undefined);
+
+          // 録画済みクリップを抱えている状態を failed で潰すと、
+          // failed は clipId を持たないためデータへの参照ごと失われる。
+          // 保存済みのものは必ずダウンロードで回収できる形に倒す
+          const holdsClip =
+            state.kind === "preview" || state.kind === "composing";
+          const recovery: ClipEvent = holdsClip
+            ? { type: "DEGRADE", reason: "x-attach-failed" }
+            : { type: "FAIL", reason: "internal-error" };
+          await apply(recovery).catch(() => undefined);
         }
       });
       return queue;
@@ -3799,7 +3826,7 @@ export function createRouter(
 ```typescript
 import { ensureOffscreen, getStreamId } from "@/background/capture";
 import { createRouter, type RouterSnapshot } from "@/background/router";
-import { getClip, saveClip } from "@/background/storage";
+import { getClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
 import { DEFAULT_TEMPLATE } from "@/shared/template";
 
@@ -3817,14 +3844,22 @@ const ready = loadSnapshot().then((snapshot) =>
     {
       ensureOffscreen: () => ensureOffscreen(),
       getStreamId: (tabId) => getStreamId(tabId),
-      saveClip,
       getClip,
       sendToRuntime: (message) => {
         // popup や offscreen が開いていないだけなら受け手不在は正常
         void chrome.runtime.sendMessage(message).catch(() => undefined);
       },
       sendToTab: (tabId, message) => {
-        void chrome.tabs.sendMessage(tabId, message).catch(() => undefined);
+        void chrome.tabs.sendMessage(tabId, message).catch((error: unknown) => {
+          // content script がまだ居ない場合もあるが、大きな payload が
+          // 送れなかった場合もここに来る。理由を残さないと区別できない
+          console.error(
+            "タブへの送信に失敗しました",
+            tabId,
+            message.type,
+            error,
+          );
+        });
       },
       openComposeTab: async () => {
         const tab = await chrome.tabs.create({ url: COMPOSE_URL });
@@ -3984,7 +4019,7 @@ describe("プレビューと投稿", () => {
     expect(view.actions).toEqual(["post", "retake"]);
   });
 
-  test("composing は投稿画面側の操作を促す", () => {
+  test("composing は投稿画面側の操作を促しつつ抜け道を残す", () => {
     const view = describeState({
       kind: "composing",
       clipId: "clip-1",
@@ -3993,7 +4028,8 @@ describe("プレビューと投稿", () => {
       mimeType: "video/mp4",
     });
     expect(view.message).toBe("X の投稿画面で内容を確認して投稿してください");
-    expect(view.actions).toEqual([]);
+    // 投稿画面が開かないまま戻ってきたときに詰まないよう、必ず操作を残す
+    expect(view.actions).toEqual(["retake"]);
   });
 });
 
@@ -4175,9 +4211,10 @@ export function describeState(state: ClipState): PopupView {
       };
 
     case "composing":
+      // 投稿画面が開かないまま戻ってきたときに詰まないよう、抜ける道を必ず残す
       return {
         message: "X の投稿画面で内容を確認して投稿してください",
-        actions: [],
+        actions: ["retake"],
         busy: false,
         showPreview: true,
         recordingSec: null,
@@ -4838,6 +4875,103 @@ git -C . commit -m "test: E2E スモークとリリース前手動確認を追�
 X への添付は自動化せず手動確認に回した。ログイン済みアカウントが
 必要で、テストに認証情報を持たせたくないため。E2E も実 DOM 依存の
 ため CI では動かさず、リリース前のローカル確認に限定する。"
+```
+
+---
+
+## 統合修正: base64 変換を shared へ
+
+**背景:** 録画データを content script へ渡すために base64 を使う。拡張のメッセージは JSON 化されるため `ArrayBuffer` を載せられず、content script は拡張の IndexedDB も読めないため、この経路だけは文字列で運ぶしかない。
+
+エンコードとデコードは互いの逆関数なので、離れた場所に置くとどちらかだけが変更されて壊れる。`shared/` に対で置き、**チャンク境界を跨ぐ往復をテストで固定する**。
+
+**Files:**
+- Create: `src/shared/base64.ts`
+- Test: `tests/shared/base64.test.ts`
+- Modify: `src/background/router.ts`（`toBase64` を削除し `encodeBase64` を import）
+- Modify: `src/content/x.ts`（`decodeBase64` を削除し import に変更）
+
+`src/shared/base64.ts`:
+
+```typescript
+/**
+ * 一度に `String.fromCharCode` へ渡す最大バイト数。
+ * 引数が多すぎると呼び出しが失敗するため分割する。
+ */
+const CHUNK_SIZE = 0x8000;
+
+/**
+ * 動画データを base64 にする。
+ *
+ * **`btoa` は必ず最後に 1 回だけ呼ぶこと。** チャンクごとに呼ぶと、
+ * `CHUNK_SIZE` が 3 の倍数でないため境界ごとにパディング (`=`) が挟まり、
+ * デコードしたときに壊れたデータになる。
+ */
+export function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += CHUNK_SIZE) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + CHUNK_SIZE),
+    );
+  }
+  return btoa(binary);
+}
+
+/** `encodeBase64` の逆。戻り値の型引数は Blob / File へ渡すために必要 */
+export function decodeBase64(base64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+```
+
+`tests/shared/base64.test.ts`:
+
+```typescript
+import { describe, expect, test } from "vitest";
+import { decodeBase64, encodeBase64 } from "@/shared/base64";
+
+/** 中身が偏らないよう、位置ごとに違う値を並べる */
+function makeBytes(length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  for (let index = 0; index < length; index += 1) {
+    bytes[index] = (index * 7 + 13) % 256;
+  }
+  return bytes;
+}
+
+describe("base64 の往復", () => {
+  test("空のデータを扱える", () => {
+    expect(decodeBase64(encodeBase64(new Uint8Array(0)))).toEqual(
+      new Uint8Array(0),
+    );
+  });
+
+  test("0 から 255 までのすべてのバイト値が保たれる", () => {
+    const bytes = new Uint8Array(256);
+    for (let index = 0; index < 256; index += 1) bytes[index] = index;
+
+    expect(decodeBase64(encodeBase64(bytes))).toEqual(bytes);
+  });
+
+  test("分割の境界をまたいでも壊れない", () => {
+    // 0x8000 ごとに分割している。境界の前後と、3 の倍数でない長さを試す。
+    // チャンクごとに btoa を呼ぶ実装だと、ここでパディングが混入して壊れる
+    for (const length of [0x7fff, 0x8000, 0x8001, 0x8000 * 2 + 1]) {
+      const bytes = makeBytes(length);
+      expect(decodeBase64(encodeBase64(bytes))).toEqual(bytes);
+    }
+  });
+
+  test("大きなデータでも呼び出しが失敗しない", () => {
+    // String.fromCharCode に一度に渡しすぎると落ちる。分割の目的がこれ
+    const bytes = makeBytes(0x8000 * 5);
+    expect(decodeBase64(encodeBase64(bytes))).toEqual(bytes);
+  });
+});
 ```
 
 ---
