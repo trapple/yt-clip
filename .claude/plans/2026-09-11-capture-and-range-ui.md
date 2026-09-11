@@ -1640,6 +1640,9 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
       if (pendingScrubSec === null) return;
       const target = pendingScrubSec;
       pendingScrubSec = null;
+      // 予約した後に録画が始まっていることがある。ここで見ないと
+      // seek 中に再生位置が書き換わり、録画の開始位置がずれる
+      if (!enabled) return;
       callbacks.onScrub(target);
     });
   }
@@ -2099,6 +2102,12 @@ chrome.runtime.onMessage.addListener((message: Message) => {
   const state = message.state;
   busy = BUSY_KINDS.has(state.kind);
   rangeBar?.setEnabled(!busy);
+
+  // 無効化しただけでは、打ち切られたドラッグの見た目が最後の位置に残る。
+  // 確定していない範囲が表示され続けないよう、確定済みの範囲で描き直す
+  if (busy && currentRange !== null) {
+    rangeBar?.update(currentRange, getVideo().duration);
+  }
 
   if (state.kind === "seeking") {
     void prepareRecording(state.range.startSec);
