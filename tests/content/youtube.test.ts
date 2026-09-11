@@ -12,7 +12,12 @@ import {
 } from "vitest";
 import { reduce } from "@/background/state";
 import type { Message } from "@/shared/messages";
-import type { ClipRange, ClipState, VideoMeta } from "@/shared/types";
+import {
+  FAILURE_MESSAGES,
+  type ClipRange,
+  type ClipState,
+  type VideoMeta,
+} from "@/shared/types";
 
 /**
  * content script のライフサイクル試験。
@@ -431,7 +436,9 @@ describe("動画の入れ替わり", () => {
       reason: "video-changed",
     });
     expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
-    expect(statusText()).toContain("動画が変わりました");
+    // 状態機械が返す文言と同じもの。言い回しが割れると、直後に届く
+    // state/changed で表示が言い換わって見える
+    expect(statusText()).toBe(FAILURE_MESSAGES["video-changed"]);
     // 旧動画の範囲を示す帯も残さない
     expect(overlay()).toBeNull();
   });

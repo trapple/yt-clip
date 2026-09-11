@@ -23,6 +23,7 @@ import { formatTime, validateRange } from "@/shared/time";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
   BUSY_KINDS,
+  FAILURE_MESSAGES,
   type ClipEvent,
   type ClipRange,
   type ClipState,
@@ -245,7 +246,8 @@ function onMarkOut(): void {
     currentRange = null;
     rangeVideoId = null;
     clearOverlay();
-    setStatus("動画が変わりました。IN からやり直してください");
+    // 同じ状況を指す文言は 1 つにする (失敗として届く場合と同じ言い回し)
+    setStatus(FAILURE_MESSAGES["video-changed"]);
     return;
   }
 
@@ -357,9 +359,17 @@ function applyStateToDisplay(state: ClipState): void {
   const stateRange = "range" in state ? state.range : null;
   const stateMeta = "meta" in state ? state.meta : null;
   // idle と failed が持つ範囲は「もう操作できない過去のもの」。画面から消す。
-  // failed から RETRY で戻るときは、ready の state/changed が範囲を持ってくる
+  // failed から RETRY で戻るときは、ready の state/changed が範囲を持ってくる。
+  //
+  // **別の動画を見ているタブでは取り込まない。** 状態機械の範囲は他の動画の
+  // ものなので、覚えてしまうとステータス行に別動画の範囲が出るうえ、
+  // 「範囲を再生」でこの動画をその位置へ飛ばしてしまう (canAdjustRange と同じ規則)
   const liveRange =
-    state.kind === "idle" || state.kind === "failed" ? null : stateRange;
+    state.kind === "idle" ||
+    state.kind === "failed" ||
+    stateMeta?.videoId !== currentVideoId()
+      ? null
+      : stateRange;
 
   const drifted =
     currentRange === null || liveRange === null
@@ -375,6 +385,12 @@ function applyStateToDisplay(state: ClipState): void {
 
   rangeBar?.setEnabled(canAdjustRange());
   refreshOverlay();
+
+  // 失敗はバーにも出す。録画中にタブをリロードした場合、このバーが
+  // 唯一の手がかりになる (popup を開かない限り理由が分からない)
+  if (state.kind === "failed") {
+    setStatus(FAILURE_MESSAGES[state.reason]);
+  }
 
   // 拡大バーを描き直すのは、表示がずれているときだけにする。確定のたびに
   // 描き直すと窓が計算し直されてハンドルが跳ねる。
@@ -438,7 +454,9 @@ async function prepareRecording(
     // IN 単独で ready になれるため、OUT を押さずに録画へ進む経路がある
     if (currentVideoId() !== expectedVideoId) {
       send({ type: "FAIL", reason: "video-changed" });
-      setStatus("動画が変わりました。IN からやり直してください");
+      // 状態機械から返ってくる文言と同じものを先に出す。違う言い回しを
+      // 出すと、直後に届く state/changed で表示が言い換わって見える
+      setStatus(FAILURE_MESSAGES["video-changed"]);
       return;
     }
 

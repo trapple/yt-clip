@@ -1,5 +1,6 @@
 import { formatTime } from "@/shared/time";
-import type { ClipState, FailureReason } from "@/shared/types";
+// 文言は content script (YouTube ページのバー) とも共有する
+import { FAILURE_MESSAGES, type ClipState } from "@/shared/types";
 
 export type PopupAction =
   | "record"
@@ -22,17 +23,6 @@ export type PopupView = {
    * 持たないため、ここで返せるのは長さだけ。
    */
   recordingSec: number | null;
-};
-
-const FAILURE_MESSAGES: Record<FailureReason, string> = {
-  "seek-failed": "開始位置へ移動できませんでした",
-  "playback-failed": "再生を開始できませんでした",
-  "ad-playing": "広告の再生中です。終了後にやり直してください",
-  "tab-lost": "録画対象のタブが見つかりません",
-  "recording-aborted": "録画が中断されました",
-  "drm-protected": "この動画は保護されているため録画できません",
-  "video-changed": "動画が切り替わりました。IN を押し直してください",
-  "internal-error": "内部エラーが発生しました",
 };
 
 const DEGRADED_MESSAGES = {
