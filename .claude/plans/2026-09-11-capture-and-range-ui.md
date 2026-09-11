@@ -783,7 +783,7 @@ export function clampHandle(
 - [ ] **Step 4: 実行して通過を確認**
 
 実行: `npx vitest run tests/content/range-math.test.ts`
-期待: PASS (26 tests)
+期待: PASS (25 tests)
 
 - [ ] **Step 5: commit**
 
