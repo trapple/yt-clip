@@ -139,8 +139,13 @@ function onRangeCommitted(range: ClipRange): void {
   if (busy) return;
 
   try {
+    // 動画が取れるかを先に確かめる。範囲を覚えてから落ちると、送っていない
+    // 範囲が content script 側にだけ残り、まさにこの関数が防ごうとしている
+    // 「画面と状態の食い違い」が起きる
+    const durationSec = getVideo().duration;
+
     currentRange = range;
-    paintOverlay(range, getVideo().duration);
+    paintOverlay(range, durationSec);
     setStatus(rangeLabel(range));
     send({ type: "ADJUST_RANGE", range });
   } catch (error) {
