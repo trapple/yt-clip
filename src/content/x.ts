@@ -77,13 +77,57 @@ export function attachFile(
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-/** 本文を入力する。contenteditable への代入では React の state に反映されない */
-export function insertText(editor: HTMLElement, text: string): void {
+/** paste が反映されるのを待つ時間 (ミリ秒) */
+const PASTE_SETTLE_MS = 100;
+
+/**
+ * 本文を入力する。contenteditable への代入では React の state に反映されない。
+ *
+ * 実機で execCommand が false を返して失敗したことがある。ページの
+ * コンテキストでは同じコードが成功するため、原因は content script の
+ * 実行環境かタイミングにあるが断定できていない。そのため対策を重ねている。
+ */
+export async function insertText(
+  editor: HTMLElement,
+  text: string,
+): Promise<void> {
   editor.focus();
-  const inserted = document.execCommand("insertText", false, text);
-  if (!inserted) {
-    throw new Error("本文を入力できませんでした");
+
+  // focus だけでは選択範囲が要素内に入らないことがあり、
+  // その場合 execCommand は対象を見つけられずに false を返す
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+
+  if (document.execCommand("insertText", false, text)) {
+    console.info("[yt-clip] 本文を execCommand で入力しました");
+    return;
   }
+
+  // Draft.js はペーストを自前で処理するので、そちらに乗せる
+  const transfer = new DataTransfer();
+  transfer.setData("text/plain", text);
+  editor.dispatchEvent(
+    new ClipboardEvent("paste", {
+      clipboardData: transfer,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, PASTE_SETTLE_MS));
+
+  // 入ったかどうかは戻り値では判断できない (preventDefault の有無しか分からない)。
+  // 実際に本文へ現れたかを見る
+  const head = text.slice(0, 20);
+  if ((editor.textContent ?? "").includes(head)) {
+    console.info("[yt-clip] 本文を paste で入力しました");
+    return;
+  }
+
+  throw new Error("本文を入力できませんでした");
 }
 
 function notify(message: Message): void {
@@ -100,6 +144,11 @@ if (typeof chrome !== "undefined") {
 
     void (async () => {
       try {
+        // 本文を先に入れる。ファイルを添付すると X が UI を作り直すため、
+        // その最中に入力すると焦点が定まらない
+        const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);
+        await insertText(editor, message.text);
+
         const input = await waitForElement<HTMLInputElement>(
           X_SELECTORS.fileInput,
         );
@@ -109,9 +158,6 @@ if (typeof chrome !== "undefined") {
           { type: message.mimeType },
         );
         attachFile(input, file);
-
-        const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);
-        insertText(editor, message.text);
 
         // 投稿ボタンは押さない。最終確認はユーザーに委ねる
         notify({ type: "x/attached" });
