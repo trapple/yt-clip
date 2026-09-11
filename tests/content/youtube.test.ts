@@ -443,6 +443,27 @@ describe("動画の入れ替わり", () => {
     expect(overlay()).toBeNull();
   });
 
+  test("別の動画のタブでは、状態機械の範囲を取り込まない", async () => {
+    // 動画 B のタブが読み込み時に問い合わせると、動画 A の範囲を持つ状態が
+    // 返ってくる。取り込むと、B のステータス行に A の範囲が出るうえ、
+    // 「範囲を再生」で B を A の開始位置へ飛ばしてしまう
+    history.pushState({}, "", "/watch?v=video-b");
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    await flush();
+
+    expect(statusText()).not.toContain("0:10");
+    expect(rangeBarElement().style.pointerEvents).toBe("none");
+    expect(overlay()).toBeNull();
+
+    // 「範囲を再生」を押しても、この動画は動かない
+    const beforeSec = video.element.currentTime;
+    clickButton("範囲を再生");
+    await flush();
+
+    expect(video.element.currentTime).toBe(beforeSec);
+    expect(video.pendingFrames()).toBe(0);
+  });
+
   test("別の動画へ移ると帯が消え、拡大バーも操作できなくなる", async () => {
     emit({ kind: "ready", range: RANGE, meta: META_A });
     expect(overlay()).not.toBeNull();
@@ -556,6 +577,25 @@ describe("読み込み時の復帰", () => {
     expect(restoredAtLoad.labels).toEqual(["開始 0:10", "終了 0:20"]);
     // ready なので操作もできる
     expect(restoredAtLoad.pointerEvents).not.toBe("none");
+  });
+});
+
+describe("失敗の提示", () => {
+  test("失敗の理由はバーにも出す", () => {
+    // 録画中にタブをリロードした場合、popup を開かない限り何が起きたのか
+    // 分からない。文言は popup と同じものを使う
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({
+      kind: "failed",
+      reason: "recording-aborted",
+      range: RANGE,
+      meta: META_A,
+    });
+
+    expect(statusText()).toBe(FAILURE_MESSAGES["recording-aborted"]);
+    // 失敗した範囲はもう操作できない。画面からも消す
+    expect(overlay()).toBeNull();
+    expect(rangeBarElement().style.pointerEvents).toBe("none");
   });
 });
 

@@ -230,6 +230,29 @@ describe("録画の開始", () => {
     expect(h.router.getState().kind).toBe("seeking");
   });
 
+  test("状態の通知が返ってこなくても、以降のメッセージを処理し続ける", async () => {
+    // 応答しないリスナー (sendResponse を呼ばず true も返さないと、送り手の
+    // Promise は settle しない)。publish がこれを待つと、queue に積まれた
+    // 以降のメッセージが 1 つも処理されず、拡張の再読み込みまで復帰できない
+    const h = makeHarness({
+      sendToTab: (_tabId, message) =>
+        message.type === "state/changed"
+          ? new Promise<void>(() => undefined)
+          : Promise.resolve(),
+    });
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    expect(h.router.getState().kind).toBe("seeking");
+
+    // 通知を待っていないので、続きも処理できる
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    expect(h.router.getState().kind).toBe("recording");
+  });
+
   test("録画対象のタブが閉じられたら失敗として提示する", async () => {
     const h = makeHarness();
     await markRange(h.router);
