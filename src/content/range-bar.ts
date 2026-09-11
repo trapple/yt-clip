@@ -110,7 +110,24 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
       event.preventDefault();
       handle.setPointerCapture(event.pointerId);
 
+      /** ドラッグを終わらせる。捕捉とリスナをまとめて解く */
+      const finish = (pointerId: number): void => {
+        handle.releasePointerCapture(pointerId);
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointercancel", onUp);
+      };
+
       const onMove = (moveEvent: PointerEvent): void => {
+        // 録画が始まったら進行中のドラッグも打ち切る。
+        // ポインタを捕捉している間はヒットテストを飛ばしてイベントが届くので、
+        // pointer-events を切っただけでは止まらない。止めないと録画中に
+        // 動画がシークし、録画された映像に意図しない飛びが入る
+        if (!enabled) {
+          finish(moveEvent.pointerId);
+          return;
+        }
+
         range = clampHandle(kind, pointerToSec(moveEvent.clientX), range, window_);
         paint();
         // 動かしている側の位置を見せる。反対側は動いていない
@@ -118,10 +135,9 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
       };
 
       const onUp = (upEvent: PointerEvent): void => {
-        handle.releasePointerCapture(upEvent.pointerId);
-        handle.removeEventListener("pointermove", onMove);
-        handle.removeEventListener("pointerup", onUp);
-        handle.removeEventListener("pointercancel", onUp);
+        finish(upEvent.pointerId);
+        // 無効化された後に指を離した場合、その範囲は送らない
+        if (!enabled) return;
         // 往復を増やさないため、確定はここで 1 度だけ
         callbacks.onCommit(range);
       };
