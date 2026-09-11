@@ -128,20 +128,41 @@ function onMarkOut(): void {
   send({ type: "MARK_OUT", sec: next.endSec });
 }
 
-/** 拡大バーでのドラッグが確定したとき */
+/**
+ * 拡大バーでのドラッグが確定したとき。
+ *
+ * 拡大バーから直接呼ばれるので click 用の guard を通らない。ここで落とすと
+ * 範囲が service worker へ送られず、画面の見た目だけが新しい範囲になって
+ * 実際の状態と食い違う
+ */
 function onRangeCommitted(range: ClipRange): void {
   if (busy) return;
-  currentRange = range;
-  paintOverlay(range, getVideo().duration);
-  setStatus(rangeLabel(range));
-  send({ type: "ADJUST_RANGE", range });
+
+  try {
+    currentRange = range;
+    paintOverlay(range, getVideo().duration);
+    setStatus(rangeLabel(range));
+    send({ type: "ADJUST_RANGE", range });
+  } catch (error) {
+    setStatus(`範囲を確定できませんでした: ${String(error)}`);
+  }
 }
 
-/** ドラッグ中の追従。動かしている側の位置を見せる */
+/**
+ * ドラッグ中の追従。動かしている側の位置を見せる。
+ *
+ * 追従できなくてもドラッグは続けさせる。ここで投げるとフレームごとに
+ * 例外が出るうえ、ハンドルまで動かせなくなる。範囲の指定という本来の
+ * 目的は追従なしでも達成できる
+ */
 function onScrub(sec: number): void {
-  const video = getVideo();
-  video.pause();
-  video.currentTime = sec;
+  try {
+    const video = getVideo();
+    video.pause();
+    video.currentTime = sec;
+  } catch {
+    // 動画が一瞬取れないだけ。次のフレームで拾い直せる
+  }
 }
 
 /** YouTube のシークバーに範囲を帯で重ねて、動画全体のどこかを示す */
