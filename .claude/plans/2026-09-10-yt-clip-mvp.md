@@ -3145,6 +3145,59 @@ describe("投稿待ちから離れたらタイマーを始末する", () => {
 
     expect(h.router.getState().kind).toBe("ready");
   });
+
+  // brief 記載のテストに加えて追加した回帰テスト。上のテストは RETAKE 直後の
+  // "ready" でタイマーを発火させるが、"ready" は DEGRADE を受理しないため
+  // 拒まれる遷移になり、タイマーを取り消していなくても偶然通ってしまう
+  // (実際に確認済み)。実害が出るのは "preview" (DEGRADE を受理する) まで
+  // 進んでから発火した場合なので、そこまで再現してから検証する。
+  test("取り直しで抜けた後、録り直した preview を古いタイマーが壊さない", async () => {
+    const h = makeHarness({}, clip);
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+    await h.router.handle({ type: "clip/event", event: { type: "RETAKE" } });
+
+    // 30 秒以内に録り直して preview まで進む。ここで古いタイマーが残っていると、
+    // 全く無関係なこの場面が「X の画面構成が変わった」という誤った理由で
+    // downloadable に落ちてしまう
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-2",
+      mimeType: "video/mp4",
+    });
+    expect(h.router.getState().kind).toBe("preview");
+
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState().kind).toBe("preview");
+  });
+});
 });
 
 describe("受け付けられないメッセージで状態を壊さない", () => {
