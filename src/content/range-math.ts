@@ -21,20 +21,30 @@ function assertSeconds(value: number, label: string): void {
   }
 }
 
-/** 範囲として筋が通っているか。値そのものだけでなく順序も見る */
-function assertRange(range: ClipRange): void {
-  assertSeconds(range.startSec, "開始位置");
-  assertSeconds(range.endSec, "終了位置");
-  if (range.endSec < range.startSec) {
+/**
+ * 時間の区間として筋が通っているか。値そのものだけでなく順序も見る。
+ * `ClipRange` と `TimeWindow` は同じ形なので、同じ規則を同じ場所で適用する。
+ * 片方にだけ順序チェックを入れると、もう片方から無意味な値が入り込む
+ */
+function assertInterval(
+  interval: { startSec: number; endSec: number },
+  label: string,
+): void {
+  assertSeconds(interval.startSec, `${label}の開始`);
+  assertSeconds(interval.endSec, `${label}の終了`);
+  if (interval.endSec < interval.startSec) {
     throw new RangeError(
-      `終了位置が開始位置より前です: ${range.startSec} → ${range.endSec}`,
+      `${label}の終了が開始より前です: ${interval.startSec} → ${interval.endSec}`,
     );
   }
 }
 
+function assertRange(range: ClipRange): void {
+  assertInterval(range, "範囲");
+}
+
 function assertWindow(window: TimeWindow): void {
-  assertSeconds(window.startSec, "窓の開始");
-  assertSeconds(window.endSec, "窓の終了");
+  assertInterval(window, "窓");
 }
 
 /** 指定した幅の区間を、0 から duration の中に収める */

@@ -201,4 +201,15 @@ describe("clampHandle", () => {
       clampHandle("in", 125, { startSec: 150, endSec: 100 }, window),
     ).toThrow(RangeError);
   });
+
+  test("順序が逆転した窓も受け付けない", () => {
+    // 窓が壊れていると、制約の上限と下限が入れ替わって
+    // 「動かせるはずのない位置」に収まった結果が返る
+    expect(() =>
+      clampHandle("in", 125, range, { startSec: 160, endSec: 100 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      timeToRatio(130, { startSec: 160, endSec: 100 }),
+    ).toThrow(RangeError);
+  });
 });
