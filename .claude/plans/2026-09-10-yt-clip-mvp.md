@@ -3105,6 +3105,48 @@ describe("投稿画面が用意できないとき", () => {
   });
 });
 
+describe("投稿待ちから離れたらタイマーを始末する", () => {
+  const clip: StoredClip = {
+    id: "clip-1",
+    blob: new Blob(["動画データ"], { type: "video/mp4" }),
+    mimeType: "video/mp4",
+    range,
+    meta,
+    createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
+  };
+
+  test("取り直しで抜けた後は古いタイマーが発火しても影響しない", async () => {
+    const h = makeHarness({}, clip);
+    await markRange(h.router);
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "START_RECORDING" },
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "SEEK_DONE" } });
+    await h.router.handle({ type: "recorder/started" });
+    await h.router.handle({
+      type: "clip/event",
+      event: { type: "OUT_REACHED" },
+    });
+    await h.router.handle({
+      type: "recorder/done",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    await h.router.handle({ type: "clip/event", event: { type: "POST" } });
+
+    // 投稿画面が開かないので取り直しで抜ける
+    await h.router.handle({ type: "clip/event", event: { type: "RETAKE" } });
+    expect(h.router.getState().kind).toBe("ready");
+
+    // 残っていたタイマーが後から発火しても、関係ない場面を壊さない
+    h.fireTimers();
+    await Promise.resolve();
+
+    expect(h.router.getState().kind).toBe("ready");
+  });
+});
+
 describe("受け付けられないメッセージで状態を壊さない", () => {
   const clip: StoredClip = {
     id: "clip-1",
@@ -3543,6 +3585,14 @@ export function createRouter(
 
   /** 新しい状態を確定させ、関係者へ通知する */
   async function publish(next: ClipState): Promise<void> {
+    // 投稿待ちを離れたらタイマーは用済み。残すと、取り直して録り直した後の
+    // 関係ない場面で発火し、プレビューが勝手にダウンロード画面へ変わる。
+    // 離脱経路は今後も増えうるので、個別に消さずここでまとめて始末する
+    if (next.kind !== "composing") {
+      cancelComposeTimeout?.();
+      cancelComposeTimeout = null;
+    }
+
     state = next;
     await deps.persist({ state, captureTabId, composeTabId });
 
@@ -3762,13 +3812,10 @@ export function createRouter(
         await sendPayload();
         return;
       case "x/attached":
-        cancelComposeTimeout?.();
-        cancelComposeTimeout = null;
+        // タイマーの始末は publish がまとめて行う
         await apply({ type: "ATTACHED" });
         return;
       case "x/failed":
-        cancelComposeTimeout?.();
-        cancelComposeTimeout = null;
         console.error("X への添付に失敗しました", message.reason);
         await apply({ type: "DEGRADE", reason: "x-attach-failed" });
         return;
