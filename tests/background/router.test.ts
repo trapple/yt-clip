@@ -61,7 +61,10 @@ function makeHarness(
       sentToTab.push({ tabId, message });
     },
     openComposeTab: async () => 99,
-    loadTemplate: async () => "{title}\n\n{url}",
+    loadSettings: async () => ({
+      template: "{title}\n\n{url}{tags}",
+      hashtags: [],
+    }),
     now: () => Date.UTC(2026, 8, 10, 3, 0, 0),
     persist: async () => undefined,
     startTimer: (_ms, onFire) => {
@@ -951,6 +954,41 @@ describe("X への受け渡し", () => {
       (sent) => sent.message.type === "x/payload",
     );
     expect(payloads).toHaveLength(2);
+  });
+
+  test("設定したハッシュタグが本文に入る", async () => {
+    const h = makeHarness(
+      {
+        loadSettings: async () => ({
+          template: "{title}\n\n{url}{tags}",
+          hashtags: ["切り抜き", "VTuber"],
+        }),
+      },
+      clip,
+    );
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    const payload = h.sentToTab.find(
+      (sent) => sent.message.type === "x/payload",
+    );
+    expect(payload?.message).toMatchObject({
+      text: "テスト動画\n\nhttps://youtu.be/abc123?t=10\n\n#切り抜き #VTuber",
+    });
+  });
+
+  test("タグが無ければ本文が空行で終わらない", async () => {
+    // {tags} が自分で区切りを持つので、未設定でも末尾は URL のまま
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    const payload = h.sentToTab.find(
+      (sent) => sent.message.type === "x/payload",
+    );
+    expect(payload?.message).toMatchObject({
+      text: "テスト動画\n\nhttps://youtu.be/abc123?t=10",
+    });
   });
 
   test("添付完了で posted へ進み、使い回せる状態になる", async () => {

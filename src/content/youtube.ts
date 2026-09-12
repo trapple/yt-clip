@@ -16,6 +16,7 @@ import {
   type BarAction,
 } from "@/content/actions";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
+import { createSettingsPanel } from "@/content/settings-panel";
 import { BAR_STYLE, applyPalette, isDarkTheme } from "@/content/styles";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
 import { saveToDownloads } from "@/content/save";
@@ -663,13 +664,19 @@ function buildBar(): HTMLElement {
   actions.id = ACTIONS_ID;
   actions.style.cssText = BAR_STYLE.row;
 
-  row.append(inButton, outButton, playButton, actions, status);
+  const settingsPanel = createSettingsPanel();
+  const settingsButton = makeButton("⚙", false, () => settingsPanel.toggle());
+  settingsButton.title = "設定";
+  // 右端へ寄せる。操作の並びから外して、押し間違いを減らす
+  settingsButton.style.cssText += "margin-left:auto;";
+
+  row.append(inButton, outButton, playButton, actions, status, settingsButton);
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される
   rangeBar = createRangeBar({ onScrub, onCommit: onRangeCommitted });
   rangeBar.element.id = RANGE_ID;
   // 拡大バーを上、操作を下に置く。範囲を見ながらボタンへ手を伸ばす順番
-  bar.append(rangeBar.element, row);
+  bar.append(rangeBar.element, row, settingsPanel.element);
   return bar;
 }
 

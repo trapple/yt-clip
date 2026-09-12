@@ -1,0 +1,139 @@
+/**
+ * 設定。
+ *
+ * **`chrome.storage.sync` の `settings` キー 1 つに全部入れる。** キーを設定
+ * ごとに散らすと、読み出しが増えるたびに `get` の呼び出しと既定値の補完を
+ * 書き足すことになる。
+ *
+ * 設定を足すときに触るのは 2 箇所だけ: `Settings` に 1 行、
+ * `SETTINGS_FIELDS` に 1 要素。それだけで画面にも出る。
+ */
+
+export const SETTINGS_KEY = "settings";
+
+export type Settings = {
+  /** 投稿本文のテンプレート。いまは画面から編集できないが設定ではある */
+  template: string;
+  /** 本文の末尾に付けるハッシュタグ。**`#` は含めない** */
+  hashtags: string[];
+};
+
+/** 既定の投稿本文。`{tags}` は自分で区切りを持つ (下記 tagsVariable 参照) */
+export const DEFAULT_TEMPLATE = "{title}\n\n{url}{tags}";
+
+export const DEFAULT_SETTINGS: Settings = {
+  template: DEFAULT_TEMPLATE,
+  hashtags: [],
+};
+
+/** 区切りとして扱う文字。全角空白と読点も含める */
+const SEPARATORS = /[\s,、]+/u;
+
+/**
+ * 入力欄の文字列をハッシュタグの配列にする。
+ *
+ * **保存する値に `#` は含めない。** 表示や本文の組み立てで付ける方が、
+ * 二重に付く事故が起きない。同じタグが並んだら 1 つにまとめ、順序は入力のまま保つ
+ */
+export function normalizeHashtags(input: string): string[] {
+  const seen = new Set<string>();
+  const tags: string[] = [];
+
+  for (const piece of input.split(SEPARATORS)) {
+    // 先頭の # は何個付いていても落とす
+    const tag = piece.replace(/^#+/u, "").trim();
+    if (tag === "" || seen.has(tag)) continue;
+    seen.add(tag);
+    tags.push(tag);
+  }
+  return tags;
+}
+
+/** ハッシュタグを本文や入力欄に出す形にする */
+export function formatHashtags(tags: string[]): string {
+  return tags.map((tag) => `#${tag}`).join(" ");
+}
+
+/**
+ * テンプレートの `{tags}` に入る値。
+ *
+ * **自分で区切りを持つ。** テンプレート側に `\n\n{tags}` と書くと、タグが
+ * 未設定のときに本文が空行 2 つで終わってしまう
+ */
+export function tagsVariable(tags: string[]): string {
+  const formatted = formatHashtags(tags);
+  return formatted === "" ? "" : `\n\n${formatted}`;
+}
+
+/** 保存されている値が期待する型かどうか */
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
+}
+
+/**
+ * 保存されている値を既定値の上に重ねる。
+ *
+ * **型は保証されない。** 古いバージョンが書いたものや、同期で他の端末から
+ * 来たものでありうる。型の合う項目だけを採り、合わないものは既定値のまま
+ * 使う。握り潰さず理由は残す
+ */
+export function mergeSettings(stored: unknown): Settings {
+  if (stored === null || typeof stored !== "object") return DEFAULT_SETTINGS;
+
+  const source = stored as Record<string, unknown>;
+  const settings: Settings = { ...DEFAULT_SETTINGS };
+
+  if (typeof source.template === "string" && source.template !== "") {
+    settings.template = source.template;
+  } else if (source.template !== undefined) {
+    console.warn("[yt-clip] 保存された template が使えないため既定値を使います");
+  }
+
+  if (isStringArray(source.hashtags)) {
+    settings.hashtags = source.hashtags;
+  } else if (source.hashtags !== undefined) {
+    console.warn("[yt-clip] 保存された hashtags が使えないため既定値を使います");
+  }
+
+  return settings;
+}
+
+export async function loadSettings(): Promise<Settings> {
+  const stored = await chrome.storage.sync.get(SETTINGS_KEY);
+  return mergeSettings(stored[SETTINGS_KEY]);
+}
+
+/** 一部だけ差し替える。他の項目は保存されているものを残す */
+export async function saveSettings(patch: Partial<Settings>): Promise<void> {
+  const current = await loadSettings();
+  await chrome.storage.sync.set({ [SETTINGS_KEY]: { ...current, ...patch } });
+}
+
+/**
+ * 画面に出す設定項目。
+ *
+ * パネルはこれを並べるだけで、項目ごとの分岐を持たない
+ */
+export type SettingsField = {
+  /** 入力欄を識別する。DOM の id にも使う */
+  key: string;
+  label: string;
+  /** 入力欄の下に出す短い説明 */
+  hint: string;
+  /** 保存されている値を入力欄の文字列にする */
+  toText(settings: Settings): string;
+  /** 入力欄の文字列から、設定の一部を作る */
+  fromText(text: string): Partial<Settings>;
+};
+
+export const SETTINGS_FIELDS: readonly SettingsField[] = [
+  {
+    key: "hashtags",
+    label: "ハッシュタグ",
+    hint: "空白区切り。# は省略できます",
+    toText: (settings) => formatHashtags(settings.hashtags),
+    fromText: (text) => ({ hashtags: normalizeHashtags(text) }),
+  },
+];

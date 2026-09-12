@@ -807,3 +807,31 @@ describe("録画の中止", () => {
     expect(saved).toEqual([]);
   });
 });
+
+describe("設定", () => {
+  function settingsButton(): HTMLButtonElement {
+    const button = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button"),
+    ).find((candidate) => candidate.textContent === "⚙");
+    if (button === undefined) throw new Error("設定ボタンがありません");
+    return button;
+  }
+
+  test("バーに設定ボタンが出る", () => {
+    expect(settingsButton().title).toBe("設定");
+  });
+
+  test("押すとパネルが開き、もう一度押すと閉じる", () => {
+    const panel = document.querySelector<HTMLElement>(
+      "#yt-clip-setting-hashtags",
+    )?.closest("div[style]")?.parentElement;
+    if (panel == null) throw new Error("パネルがありません");
+    expect(panel.hidden).toBe(true);
+
+    settingsButton().click();
+    expect(panel.hidden).toBe(false);
+
+    settingsButton().click();
+    expect(panel.hidden).toBe(true);
+  });
+});

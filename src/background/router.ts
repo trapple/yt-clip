@@ -5,6 +5,7 @@ import { baseMimeType } from "@/content/codec";
 import { decodeBase64, encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message } from "@/shared/messages";
+import type { Settings } from "@/shared/settings";
 import { renderTemplate } from "@/shared/template";
 import {
   BUSY_KINDS,
@@ -26,7 +27,8 @@ export type RouterDeps = {
    */
   sendToTab(tabId: number, message: Message): Promise<void>;
   openComposeTab(): Promise<number>;
-  loadTemplate(): Promise<string>;
+  /** 設定は投稿のたびに読み直す。タグを変えて投稿し直せるようにするため */
+  loadSettings(): Promise<Settings>;
   /** UTC epoch ミリ秒 */
   now(): number;
   persist(snapshot: RouterSnapshot): Promise<void>;
@@ -324,7 +326,7 @@ export function createRouter(
     });
 
     const clip = await deps.getClip(state.clipId);
-    const template = await deps.loadTemplate();
+    const settings = await deps.loadSettings();
     const delivery = await commandTab(composeTabId, {
       type: "x/payload",
       base64: encodeBase64(new Uint8Array(await clip.blob.arrayBuffer())),
@@ -334,7 +336,12 @@ export function createRouter(
         clip.range.startSec,
         clip.mimeType,
       ),
-      text: renderTemplate(template, clip.meta, clip.range),
+      text: renderTemplate(
+        settings.template,
+        clip.meta,
+        clip.range,
+        settings.hashtags,
+      ),
     });
 
     // 投稿タブに受け手が居ないと分かった場合だけ退避する。応答が無いだけで

@@ -74,6 +74,16 @@ export const BAR_STYLE = {
   secondaryButton: `${BUTTON_BASE}border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);`,
 } as const;
 
+export const PANEL_STYLE = {
+  root: "display:flex;flex-direction:column;gap:12px;padding:12px;border:1px solid var(--ytc-border);border-radius:8px;background:var(--ytc-surface);",
+  field: "display:flex;flex-direction:column;gap:4px;",
+  label: "color:var(--ytc-text);font-size:13px;font-weight:500;",
+  input: `appearance:none;border:1px solid var(--ytc-border);border-radius:6px;height:36px;padding:0 10px;font-family:${FONT};font-size:14px;background:transparent;color:var(--ytc-text);`,
+  hint: "color:var(--ytc-text-sub);font-size:11px;",
+  footer: "display:flex;gap:8px;align-items:center;justify-content:flex-end;",
+  result: "color:var(--ytc-text-sub);font-size:12px;",
+} as const;
+
 export const RANGE_STYLE = {
   root: "display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ytc-text-sub);font-variant-numeric:tabular-nums;",
   track:
