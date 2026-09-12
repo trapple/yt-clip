@@ -146,12 +146,22 @@ export async function keepText(
     const editor = findEditor();
     // 作り直しの最中で入力欄が居ないことがある。次の周回で見直す
     if (editor === null) continue;
-    if (containsHead(editor.textContent ?? "", text)) continue;
+
+    // **「本文が見当たらない」ではなく「空」を条件にすること。** 守りたいのは
+    // 「作り直しで空になった」場面だけで、そのとき中身は必ず空になる。
+    // 本文の一致で判定すると、この 2 秒の間にユーザーが本文を書き換えたときに
+    // 手で書いた内容を消して元に戻してしまう
+    if ((editor.textContent ?? "").trim() !== "") continue;
 
     console.info("[yt-clip] 添付で消えた本文を入れ直します");
     // **入れる前に消すこと。** insertText は末尾に足すので、判定が一度でも
     // 滑ると本文が積み上がる (実機で URL が 3 回並んだ)
     clearEditor(editor);
+    if ((editor.textContent ?? "").trim() !== "") {
+      // 消せていないまま入れると末尾に足されて積み上がる。諦める方が害が小さい
+      console.warn("[yt-clip] 入力欄を空にできなかったので入れ直しをやめます");
+      return;
+    }
     await insertText(editor, text);
 
     // 入れた直後は反映が間に合わず「まだ無い」と読めることがある。
@@ -267,10 +277,16 @@ if (typeof chrome !== "undefined") {
         );
         attachFile(input, buildClipFile(message));
 
-        // 添付で入力欄が作り直されると本文が消える。消えたら入れ直す
-        await keepText(message.text, () =>
-          document.querySelector<HTMLElement>(X_SELECTORS.editor.join(",")),
-        );
+        // 添付で入力欄が作り直されると本文が消える。消えたら入れ直す。
+        // **ここの失敗で添付の成功を取り消さない。** 動画は既に X に載っており、
+        // 失敗として扱うと popup がダウンロード誘導に変わってしまう
+        try {
+          await keepText(message.text, () =>
+            document.querySelector<HTMLElement>(X_SELECTORS.editor.join(",")),
+          );
+        } catch (error) {
+          console.warn(`[yt-clip] 本文の入れ直しに失敗しました: ${String(error)}`);
+        }
 
         // 投稿ボタンは押さない。最終確認はユーザーに委ねる
         notify({ type: "x/attached" });

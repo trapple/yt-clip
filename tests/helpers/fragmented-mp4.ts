@@ -49,6 +49,11 @@ export type BuildOptions = {
   height?: number;
   /** 表示変換行列の最後の要素を 0 にする (Chromium が実際に踏むバグの再現) */
   brokenMatrix?: boolean;
+  /**
+   * tkhd の version。**実機の Chromium は 1 を書く**ので、既定も 1 にする。
+   * 0 は他の muxer が書いた場合の経路
+   */
+  tkhdVersion?: 0 | 1;
 };
 
 export function buildFragmentedMp4(
@@ -61,11 +66,12 @@ export function buildFragmentedMp4(
     width = 1280,
     height = 720,
     brokenMatrix = true,
+    tkhdVersion = 1,
   } = options;
   const allSamples = fragments.flat();
   const defaultDuration = useDefaultDuration ? (allSamples[0]?.duration ?? 0) : 0;
 
-  // stsd は remux がそのまま持ち越すだけなので、中身は識別できれば足りる
+  // stsd は誰も読み書きしないので、識別できる中身が入っていれば足りる
   const stsd = fullBox("stsd", 0, 0, u32(1), box("avc1", [0xaa, 0xbb, 0xcc, 0xdd]));
   const stbl = box("stbl", stsd);
   const minf = box("minf", fullBox("vmhd", 0, 1, [0, 0, 0, 0, 0, 0, 0, 0]), box("dinf"), stbl);
@@ -81,9 +87,14 @@ export function buildFragmentedMp4(
     ...u32(0), ...u32(0x00010000), ...u32(0),
     ...u32(0), ...u32(0), ...u32(brokenMatrix ? 0 : 0x40000000),
   ];
+  // version 1 は作成・更新・長さが 64bit になる
+  const tkhdHead =
+    tkhdVersion === 1
+      ? [...u32(0), ...u32(0), ...u32(0), ...u32(0), ...u32(1), ...u32(0), ...u32(0), ...u32(0)]
+      : [...u32(0), ...u32(0), ...u32(1), ...u32(0), ...u32(0)];
   const tkhd = fullBox(
-    "tkhd", 0, 7,
-    u32(0), u32(0), u32(1), u32(0), u32(0),
+    "tkhd", tkhdVersion, 7,
+    tkhdHead,
     new Array(16).fill(0),
     matrix,
     u32(width << 16), u32(height << 16),

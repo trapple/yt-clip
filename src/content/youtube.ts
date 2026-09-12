@@ -550,9 +550,21 @@ async function finishRecording(): Promise<void> {
     // captureStream で録ると、Chromium の muxer が映像トラックの表示行列の
     // 最後の要素を書き忘れる。そのままでは X の変換が落ちるので直す。
     // WebM はそもそも添付できずダウンロードへ退避するので、触らない
-    const bytes = blob.type.includes("mp4")
-      ? fixVideoDisplayMatrix(recorded)
-      : recorded;
+    //
+    // **ここで失敗しても録画は捨てない。** 録画は実時間のコストを払い終えて
+    // おり、壊れているのは飾りの 4 バイトを直す後処理だけ。未修正のまま渡せば
+    // X には弾かれるが、ダウンロードで回収する道は残る。Chromium が muxer の
+    // box 構成を変えたときに全録画が消える経路にしない
+    let bytes = recorded;
+    if (blob.type.includes("mp4")) {
+      try {
+        bytes = fixVideoDisplayMatrix(recorded);
+      } catch (error) {
+        console.error(
+          `表示行列を直せませんでした。X への添付は弾かれる見込みです: ${String(error)}`,
+        );
+      }
+    }
 
     notify({
       type: "recorder/done",

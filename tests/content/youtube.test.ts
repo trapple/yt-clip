@@ -2,6 +2,7 @@
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { Blob as NodeBlob } from "node:buffer";
 import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
+import { decodeBase64 } from "@/shared/base64";
 
 /** 録画結果として流す、最小限の断片化 MP4 */
 const RECORDED_BYTES = buildFragmentedMp4({
@@ -165,6 +166,28 @@ function installVideo(): FakeVideo {
   return fake;
 }
 
+/** 最初の tkhd の変換行列の 9 要素目を読む。0x40000000 でないと X が弾く */
+function readVideoMatrixW(data: Uint8Array): number {
+  for (let i = 0; i + 8 < data.length; i += 1) {
+    if (
+      data[i] === 0x74 &&
+      data[i + 1] === 0x6b &&
+      data[i + 2] === 0x68 &&
+      data[i + 3] === 0x64
+    ) {
+      const body = i + 4;
+      const version = data[body];
+      const matrixAt = body + (version === 1 ? 4 + 32 + 16 : 4 + 20 + 16);
+      return new DataView(
+        data.buffer,
+        data.byteOffset,
+        data.byteLength,
+      ).getUint32(matrixAt + 32);
+    }
+  }
+  throw new Error("tkhd が見つかりません");
+}
+
 function buildPage(): void {
   document.body.innerHTML = "";
 
@@ -202,8 +225,8 @@ function installGlobals(): void {
     }
     stop(): void {
       this.state = "inactive";
-      // remux を通る経路を実際に検証するため、MediaRecorder が出すものと
-      // 同じ断片化 MP4 を流す。中身が MP4 でないと remux が正しく弾く
+      // 表示行列を直す経路を実際に通すため、MediaRecorder が出すものと
+      // 同じ断片化 MP4 を流す。中身が MP4 でないと box の走査で弾かれる
       this.ondataavailable?.({ data: new Blob([RECORDED_BYTES]) });
       this.onstop?.();
     }
@@ -555,6 +578,15 @@ describe("録画の後始末", () => {
     await flush();
 
     expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+
+    // **送る前に表示行列を直していること。** ここが外れても他のテストは
+    // 全部通ってしまう (実際に外して確認した)。#6 はこの branch でいちばん
+    // 診断が困難だった不具合なので、配線そのものを固定する
+    const done = sent.find((message) => message.type === "recorder/done");
+    const delivered = decodeBase64(
+      (done as { base64: string }).base64,
+    );
+    expect(readVideoMatrixW(delivered)).toBe(0x40000000);
   });
 
   test("録画結果を送れなかったら失敗として知らせる", async () => {

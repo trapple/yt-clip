@@ -253,17 +253,51 @@ describe("keepText", () => {
   });
 
   test("入れ直す前に中身を消すので、本文が積み上がらない", async () => {
-    // insertText は末尾に足す。判定が一度でも滑ると、消さない限り
-    // 前の中身の後ろに足され続ける (実機で URL が 3 回並んだ)
+    // insertText は末尾に足す。空白だけが残った入力欄にそのまま入れると
+    // 前の残骸が頭に付く (実機で URL が並んだのと同じ形)
     const editor = document.createElement("div");
     document.body.append(editor);
-    editor.textContent = "作り直しで残った別の中身";
+    editor.textContent = "   ";
     stubInsert(editor);
 
     await keepText(text, () => editor, noWait);
 
-    // 残骸が前に付いていないこと
     expect(editor.textContent).toBe(text);
+  });
+
+  test("ユーザーが書き換えた本文には触らない", async () => {
+    // 添付の直後 2 秒は見張っているが、守りたいのは「作り直しで空になった」
+    // 場面だけ。本文の一致で判定すると、手で書き換えた内容を元に戻してしまう
+    const editor = document.createElement("div");
+    document.body.append(editor);
+    editor.textContent = "自分で書き直した本文";
+    const insert = stubInsert(editor);
+
+    await keepText(text, () => editor, noWait);
+
+    expect(editor.textContent).toBe("自分で書き直した本文");
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  test("入力欄を空にできなければ入れ直しをやめる", async () => {
+    // 消せていないまま入れると末尾に足されて積み上がる
+    const editor = document.createElement("div");
+    document.body.append(editor);
+    editor.textContent = "";
+    const insert = vi.fn((command: string, _ui?: boolean, value?: string) => {
+      // delete が効かない環境を模す
+      if (command === "insertText") {
+        editor.textContent = (editor.textContent ?? "") + String(value);
+      }
+      if (command === "delete") editor.textContent = "消えない残骸";
+      return true;
+    });
+    (document as unknown as { execCommand: unknown }).execCommand = insert;
+
+    await keepText(text, () => editor, noWait);
+
+    expect(editor.textContent).toBe("消えない残骸");
+    expect(insert.mock.calls.filter(([c]) => c === "insertText")).toHaveLength(0);
   });
 
   test("消されるたびに入れ直す", async () => {

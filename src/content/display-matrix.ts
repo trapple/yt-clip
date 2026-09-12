@@ -82,8 +82,8 @@ function childrenOf(data: Uint8Array, box: BoxRef): BoxRef[] {
  * そのまま有効なまま保たれる。直す必要が無ければ入力をそのまま返す。
  */
 export function fixVideoDisplayMatrix(
-  input: Uint8Array,
-): Uint8Array {
+  input: Uint8Array<ArrayBuffer>,
+): Uint8Array<ArrayBuffer> {
   const top = readBoxes(input, 0, input.length);
   const moov = top.find((box) => box.type === "moov");
   if (moov === undefined) throw new DisplayMatrixError("moov がありません");

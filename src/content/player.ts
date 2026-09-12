@@ -62,7 +62,11 @@ function findTitleInPage(): string | null {
 
 /**
  * タブのタイトルから動画タイトルを復元する。
- * 見出しの要素構成が変わっても、ここは同じ形で残りやすい
+ * 見出しの要素構成が変わっても、ここは同じ形で残りやすい。
+ *
+ * **最後の手段であり、古いタイトルが混じりうる。** 見出しが空になるのは
+ * SPA 遷移の途中で、`document.title` の更新はそれと同期していない。
+ * videoId と URL は正しいのでタイトルだけが前の動画のものになる
  */
 function titleFromDocument(): string | null {
   // 「(3) 動画名 - YouTube」のような未読件数と末尾を落とす

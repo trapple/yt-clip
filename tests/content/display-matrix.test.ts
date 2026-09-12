@@ -12,7 +12,7 @@ function sample(): FakeSample {
 }
 
 /** 最初の tkhd の行列の最後の要素を読む */
-function readMatrixW(data: Uint8Array): number {
+function readMatrixW(data: Uint8Array, version?: 0 | 1): number {
   const at = data.indexOf(0x74); // 't' から tkhd を探す
   let index = at;
   while (index + 4 < data.length) {
@@ -23,8 +23,8 @@ function readMatrixW(data: Uint8Array): number {
       data[index + 3] === 0x64
     ) {
       const body = index + 4;
-      const version = data[body];
-      const matrixAt = body + (version === 1 ? 4 + 32 + 16 : 4 + 20 + 16);
+      const actual = version ?? data[body];
+      const matrixAt = body + (actual === 1 ? 4 + 32 + 16 : 4 + 20 + 16);
       return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(
         matrixAt + 32,
       );
@@ -35,6 +35,14 @@ function readMatrixW(data: Uint8Array): number {
 }
 
 describe("fixVideoDisplayMatrix", () => {
+  test("実機と同じ version 1 の tkhd で直せる", () => {
+    // 実機の Chromium が書くのは version 1。ここが本番で通る経路
+    const input = buildFragmentedMp4({ fragments: [[sample()]] });
+    expect(readMatrixW(input, 1)).toBe(0);
+
+    expect(readMatrixW(fixVideoDisplayMatrix(input), 1)).toBe(FIXED_POINT_ONE);
+  });
+
   test("映像トラックの壊れた行列を直す", () => {
     // captureStream 由来のフレームでは Chromium の muxer が最後の要素を
     // 書き忘れる。0 のままだと表示サイズの計算が 0 除算になり、X の変換が落ちる
@@ -42,6 +50,18 @@ describe("fixVideoDisplayMatrix", () => {
     expect(readMatrixW(input)).toBe(0);
 
     expect(readMatrixW(fixVideoDisplayMatrix(input))).toBe(FIXED_POINT_ONE);
+  });
+
+  test("version 0 の tkhd でも直せる", () => {
+    // 実機の Chromium は version 1 を書くが、他の muxer が作った MP4 を
+    // 読むこともありうる。位置の計算が version ごとに違うので両方固める
+    const input = buildFragmentedMp4({
+      fragments: [[sample()]],
+      tkhdVersion: 0,
+    });
+    expect(readMatrixW(input, 0)).toBe(0);
+
+    expect(readMatrixW(fixVideoDisplayMatrix(input), 0)).toBe(FIXED_POINT_ONE);
   });
 
   test("長さを変えない", () => {
