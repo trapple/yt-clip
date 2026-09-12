@@ -113,16 +113,6 @@ export function containsHead(actual: string, expected: string): boolean {
  * コンテキストでは同じコードが成功するため、原因は content script の
  * 実行環境かタイミングにあるが断定できていない。そのため対策を重ねている。
  */
-/** 入力欄の中身を選択して消す */
-function clearEditor(editor: HTMLElement): void {
-  editor.focus();
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-  document.execCommand("delete");
-}
 
 /**
  * 添付した後も本文が残っているか確かめ、消えていたら入れ直す。
@@ -154,14 +144,7 @@ export async function keepText(
     if ((editor.textContent ?? "").trim() !== "") continue;
 
     console.info("[yt-clip] 添付で消えた本文を入れ直します");
-    // **入れる前に消すこと。** insertText は末尾に足すので、判定が一度でも
-    // 滑ると本文が積み上がる (実機で URL が 3 回並んだ)
-    clearEditor(editor);
-    if ((editor.textContent ?? "").trim() !== "") {
-      // 消せていないまま入れると末尾に足されて積み上がる。諦める方が害が小さい
-      console.warn("[yt-clip] 入力欄を空にできなかったので入れ直しをやめます");
-      return;
-    }
+    // insertText が全選択して置き換えるので、入れ直しても積み上がらない
     await insertText(editor, text);
 
     // 入れた直後は反映が間に合わず「まだ無い」と読めることがある。
@@ -176,11 +159,18 @@ export async function insertText(
 ): Promise<void> {
   editor.focus();
 
+  // **全選択したまま入れて「置き換え」にすること。** 消してから入れる
+  // (execCommand("delete") → insertText) と、Draft.js が持つ内部状態と DOM が
+  // ずれて、入力欄が編集を受け付けなくなる。置き換えなら Draft.js が普通の
+  // 編集として扱える。
+  //
+  // 全選択はもう 1 つ役目がある。X は前回の下書きを復元するので、末尾に
+  // 足す形にすると本文が二重になる (実機で URL が 2 つ並んだ)。
+  //
   // focus だけでは選択範囲が要素内に入らないことがあり、
   // その場合 execCommand は対象を見つけられずに false を返す
   const range = document.createRange();
   range.selectNodeContents(editor);
-  range.collapse(false);
   const selection = window.getSelection();
   selection?.removeAllRanges();
   selection?.addRange(range);
@@ -267,10 +257,7 @@ export async function attachPayload(message: {
 }): Promise<void> {
   try {
     const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);
-    // **入れる前に消すこと。** X は前回の下書きを復元するため、そのまま
-    // 入れると insertText が末尾に足して本文が二重になる (実機で URL が
-    // 2 つ並んだ)。下書きを残す判断は X の画面側でしてもらう
-    clearEditor(editor);
+    // insertText が全選択して置き換えるので、前回の下書きはここで消える
     await insertText(editor, message.text);
 
     const input = await waitForElement<HTMLInputElement>(
