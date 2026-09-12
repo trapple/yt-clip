@@ -5,6 +5,7 @@ import {
   attachFile,
   buildClipFile,
   containsHead,
+  keepText,
   findElement,
   waitForElement,
 } from "@/content/x";
@@ -181,5 +182,90 @@ describe("buildClipFile", () => {
     const file = buildClipFile(payload);
     expect(file.name).toBe("clip.mp4");
     expect(file.size).toBe(4);
+  });
+});
+
+describe("keepText", () => {
+  const text = "動画の題名\n\nhttps://youtu.be/abc123?t=10";
+
+  /** 待ち時間を消費しないので、テストは実時間を払わない */
+  const noWait = async (): Promise<void> => undefined;
+
+  /** jsdom は execCommand を持たないので、入力される中身を自分で再現する */
+  function stubInsert(editor: HTMLElement): ReturnType<typeof vi.fn> {
+    const fn = vi.fn((command: string, _ui?: boolean, value?: string) => {
+      if (command === "insertText") editor.textContent = String(value);
+      return true;
+    });
+    (document as unknown as { execCommand: unknown }).execCommand = fn;
+    return fn;
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  test("本文が残っていれば何もしない", async () => {
+    const editor = document.createElement("div");
+    editor.textContent = text;
+    const insert = stubInsert(editor);
+
+    await keepText(text, () => editor, noWait);
+
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  test("添付で消えた本文を入れ直す", async () => {
+    // 動画は「準備完了」なのに本文だけ空、という形で実機に出た
+    const editor = document.createElement("div");
+    document.body.append(editor);
+    const insert = stubInsert(editor);
+
+    await keepText(text, () => editor, noWait);
+
+    expect(editor.textContent).toBe(text);
+    expect(insert).toHaveBeenCalled();
+  });
+
+  test("入力欄が見つからない周回は飛ばす", async () => {
+    // 作り直しの最中は入力欄が居ないことがある。そこで諦めない
+    const editor = document.createElement("div");
+    document.body.append(editor);
+    stubInsert(editor);
+    let looks = 0;
+
+    await keepText(
+      text,
+      () => {
+        looks += 1;
+        return looks <= 3 ? null : editor;
+      },
+      noWait,
+    );
+
+    expect(editor.textContent).toBe(text);
+  });
+
+  test("消されるたびに入れ直す", async () => {
+    // 作り直しが一度だけとは限らない
+    const editor = document.createElement("div");
+    document.body.append(editor);
+    const insert = stubInsert(editor);
+    let wiped = 0;
+
+    await keepText(
+      text,
+      () => {
+        if (wiped < 2) {
+          wiped += 1;
+          editor.textContent = "";
+        }
+        return editor;
+      },
+      noWait,
+    );
+
+    expect(insert.mock.calls.filter(([c]) => c === "insertText")).toHaveLength(2);
+    expect(editor.textContent).toBe(text);
   });
 });

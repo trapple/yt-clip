@@ -84,6 +84,10 @@ const PASTE_SETTLE_MS = 100;
 /** 一致を確かめるために見る先頭の文字数 */
 const HEAD_LENGTH = 20;
 
+/** 添付後に本文が生き残ったか確かめる間隔と回数 */
+const SURVIVE_CHECK_MS = 250;
+const SURVIVE_CHECK_TIMES = 8;
+
 /**
  * 入力された本文に、渡したテキストの先頭が現れているかを見る。
  *
@@ -109,6 +113,35 @@ export function containsHead(actual: string, expected: string): boolean {
  * コンテキストでは同じコードが成功するため、原因は content script の
  * 実行環境かタイミングにあるが断定できていない。そのため対策を重ねている。
  */
+/**
+ * 添付した後も本文が残っているか確かめ、消えていたら入れ直す。
+ *
+ * **ファイルを添付すると X が入力欄を作り直すことがあり、先に入れた本文が
+ * 消える。** 実機で、動画は「準備完了」になっているのに本文だけが空、という
+ * 形で出た。二重入力を塞ぐまで表に出なかったのは、二回目の入力が添付の後に
+ * 走っていて結果的に入れ直しになっていたため。
+ *
+ * 作り直しは添付の直後に一度起きるだけとは限らないので、しばらく見張る。
+ */
+export async function keepText(
+  text: string,
+  findEditor: () => HTMLElement | null,
+  wait: (ms: number) => Promise<void> = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<void> {
+  for (let attempt = 0; attempt < SURVIVE_CHECK_TIMES; attempt += 1) {
+    await wait(SURVIVE_CHECK_MS);
+
+    const editor = findEditor();
+    // 作り直しの最中で入力欄が居ないことがある。次の周回で見直す
+    if (editor === null) continue;
+    if (containsHead(editor.textContent ?? "", text)) continue;
+
+    console.info("[yt-clip] 添付で消えた本文を入れ直します");
+    await insertText(editor, text);
+  }
+}
+
 export async function insertText(
   editor: HTMLElement,
   text: string,
@@ -215,6 +248,11 @@ if (typeof chrome !== "undefined") {
           X_SELECTORS.fileInput,
         );
         attachFile(input, buildClipFile(message));
+
+        // 添付で入力欄が作り直されると本文が消える。消えたら入れ直す
+        await keepText(message.text, () =>
+          document.querySelector<HTMLElement>(X_SELECTORS.editor.join(",")),
+        );
 
         // 投稿ボタンは押さない。最終確認はユーザーに委ねる
         notify({ type: "x/attached" });
