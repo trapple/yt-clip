@@ -191,10 +191,16 @@ describe("keepText", () => {
   /** 待ち時間を消費しないので、テストは実時間を払わない */
   const noWait = async (): Promise<void> => undefined;
 
-  /** jsdom は execCommand を持たないので、入力される中身を自分で再現する */
+  /**
+   * jsdom は execCommand を持たないので中身の変化を自分で再現する。
+   * **insertText は末尾に足す** (実物と同じ)。消さずに入れ直すと積み上がる
+   */
   function stubInsert(editor: HTMLElement): ReturnType<typeof vi.fn> {
     const fn = vi.fn((command: string, _ui?: boolean, value?: string) => {
-      if (command === "insertText") editor.textContent = String(value);
+      if (command === "insertText") {
+        editor.textContent = (editor.textContent ?? "") + String(value);
+      }
+      if (command === "delete") editor.textContent = "";
       return true;
     });
     (document as unknown as { execCommand: unknown }).execCommand = fn;
@@ -243,6 +249,20 @@ describe("keepText", () => {
       noWait,
     );
 
+    expect(editor.textContent).toBe(text);
+  });
+
+  test("入れ直す前に中身を消すので、本文が積み上がらない", async () => {
+    // insertText は末尾に足す。判定が一度でも滑ると、消さない限り
+    // 前の中身の後ろに足され続ける (実機で URL が 3 回並んだ)
+    const editor = document.createElement("div");
+    document.body.append(editor);
+    editor.textContent = "作り直しで残った別の中身";
+    stubInsert(editor);
+
+    await keepText(text, () => editor, noWait);
+
+    // 残骸が前に付いていないこと
     expect(editor.textContent).toBe(text);
   });
 

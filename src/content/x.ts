@@ -113,6 +113,17 @@ export function containsHead(actual: string, expected: string): boolean {
  * コンテキストでは同じコードが成功するため、原因は content script の
  * 実行環境かタイミングにあるが断定できていない。そのため対策を重ねている。
  */
+/** 入力欄の中身を選択して消す */
+function clearEditor(editor: HTMLElement): void {
+  editor.focus();
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  document.execCommand("delete");
+}
+
 /**
  * 添付した後も本文が残っているか確かめ、消えていたら入れ直す。
  *
@@ -138,7 +149,14 @@ export async function keepText(
     if (containsHead(editor.textContent ?? "", text)) continue;
 
     console.info("[yt-clip] 添付で消えた本文を入れ直します");
+    // **入れる前に消すこと。** insertText は末尾に足すので、判定が一度でも
+    // 滑ると本文が積み上がる (実機で URL が 3 回並んだ)
+    clearEditor(editor);
     await insertText(editor, text);
+
+    // 入れた直後は反映が間に合わず「まだ無い」と読めることがある。
+    // 一周ぶん待ってから次の確認に入る
+    await wait(SURVIVE_CHECK_MS);
   }
 }
 
