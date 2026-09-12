@@ -10,7 +10,7 @@ import type { StoredClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
 import type { ClipRange, VideoMeta } from "@/shared/types";
 
-const meta: VideoMeta = { videoId: "abc123", title: "テスト動画" };
+const meta: VideoMeta = { videoId: "abc123", title: "テスト動画", channelId: "UCchannel-a", channelName: "チャンネル A" };
 const range: ClipRange = { startSec: 10, endSec: 40 };
 
 /** 受け手が居ないときに Chrome が返す文言 */
@@ -957,13 +957,14 @@ describe("X への受け渡し", () => {
     expect(payloads).toHaveLength(2);
   });
 
-  test("設定したハッシュタグが本文に入る", async () => {
+  test("チャンネルに設定したハッシュタグが本文に入る", async () => {
     const h = makeHarness(
       {
         loadSettings: async () => ({
           ...DEFAULT_SETTINGS,
           template: "{title}\n\n{url}{tags}",
-          hashtags: ["切り抜き", "VTuber"],
+          // タグはチャンネルに紐づく。クリップの meta.channelId で引かれる
+          hashtagsByChannel: { [meta.channelId]: ["切り抜き", "VTuber"] },
         }),
       },
       clip,

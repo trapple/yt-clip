@@ -6,7 +6,7 @@ import {
 } from "@/shared/template";
 import type { ClipRange, VideoMeta } from "@/shared/types";
 
-const meta: VideoMeta = { videoId: "dQw4w9WgXcQ", title: "サンプル動画" };
+const meta: VideoMeta = { videoId: "dQw4w9WgXcQ", title: "サンプル動画", channelId: "UCchannel-a", channelName: "チャンネル A" };
 const range: ClipRange = { startSec: 75.4, endSec: 105.4 };
 
 describe("buildYouTubeUrl", () => {

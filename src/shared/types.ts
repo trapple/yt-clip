@@ -7,6 +7,16 @@ export type ClipRange = {
 export type VideoMeta = {
   videoId: string;
   title: string;
+  /**
+   * 設定 (チャンネル別のハッシュタグ) を引く鍵。
+   *
+   * `UC...` を優先し、取れなければハンドル (`@name`)。どちらも取れなければ
+   * 空文字。**タイトルと違って throw しない。** タグが無いだけで投稿本文は
+   * 成立するので、ここで止める理由がない
+   */
+  channelId: string;
+  /** 表示用。どのチャンネルの設定を触っているかを見せるため */
+  channelName: string;
 };
 
 /** 録画は成功したが通常の投稿フローに乗せられなかった理由 */

@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { describeState } from "@/popup/view";
 import type { ClipRange, ClipState, VideoMeta } from "@/shared/types";
 
-const meta: VideoMeta = { videoId: "abc123", title: "テスト動画" };
+const meta: VideoMeta = { videoId: "abc123", title: "テスト動画", channelId: "UCchannel-a", channelName: "チャンネル A" };
 const range: ClipRange = { startSec: 10, endSec: 40 };
 
 describe("マーク前後", () => {

@@ -34,7 +34,7 @@ import {
  * 二重に読み込むと、前のテストの observer が同じ DOM を触りに来る。
  */
 
-const META_A: VideoMeta = { videoId: "video-a", title: "動画 A" };
+const META_A: VideoMeta = { videoId: "video-a", title: "動画 A", channelId: "UCchannel-a", channelName: "チャンネル A" };
 const RANGE: ClipRange = { startSec: 10, endSec: 20 };
 
 /** content script が service worker へ送ったメッセージ */
@@ -200,11 +200,31 @@ function buildPage(): void {
   titleText.textContent = META_A.title;
   title.append(titleText);
 
+  // チャンネル。ハッシュタグ設定の鍵になる
+  const channelMeta = document.createElement("meta");
+  channelMeta.setAttribute("itemprop", "channelId");
+  channelMeta.setAttribute("content", META_A.channelId);
+  const owner = document.createElement("div");
+  owner.id = "owner";
+  const channelName = document.createElement("ytd-channel-name");
+  const channelLink = document.createElement("a");
+  channelLink.href = `/channel/${META_A.channelId}`;
+  channelLink.textContent = META_A.channelName;
+  channelName.append(channelLink);
+  owner.append(channelName);
+
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
   video = installVideo();
-  document.body.append(below, title, progressBar, video.element);
+  document.body.append(
+    below,
+    title,
+    channelMeta,
+    owner,
+    progressBar,
+    video.element,
+  );
 }
 
 type StorageListener = (
@@ -878,6 +898,26 @@ describe("最大秒数の設定", () => {
     if (message.event.type !== "MARK_IN") throw new Error("MARK_IN ではない");
     return message.event.range;
   }
+
+  test("IN で送る meta にチャンネルが入る", async () => {
+    // service worker はここで受け取った channelId でタグを引く
+    video.element.currentTime = 100;
+
+    clickButton("IN");
+    await flush();
+
+    const message = [...sent].find(
+      (item) => item.type === "clip/event" && item.event.type === "MARK_IN",
+    );
+    expect(message).toMatchObject({
+      event: {
+        meta: {
+          channelId: META_A.channelId,
+          channelName: META_A.channelName,
+        },
+      },
+    });
+  });
 
   test("既定では 15 秒の範囲ができる", async () => {
     video.element.currentTime = 100;

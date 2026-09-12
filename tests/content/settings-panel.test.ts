@@ -1,9 +1,20 @@
 // @vitest-environment jsdom
 import { describe, expect, test } from "vitest";
 import { createSettingsPanel } from "@/content/settings-panel";
-import { DEFAULT_SETTINGS, SETTINGS_FIELDS, type Settings } from "@/shared/settings";
+import {
+  DEFAULT_SETTINGS,
+  SETTINGS_FIELDS,
+  type Settings,
+  type SettingsContext,
+} from "@/shared/settings";
 
-function makeDeps(initial: Partial<Settings> = {}) {
+/** テストで使うチャンネル。ハッシュタグ設定の鍵になる */
+const CHANNEL = { id: "UCchannel-a", name: "チャンネル A" };
+
+function makeDeps(
+  initial: Partial<Settings> = {},
+  context: SettingsContext = { channel: CHANNEL },
+) {
   const store: Settings = { ...DEFAULT_SETTINGS, ...initial };
   const saved: Partial<Settings>[] = [];
   return {
@@ -16,6 +27,7 @@ function makeDeps(initial: Partial<Settings> = {}) {
         Object.assign(store, patch);
         return Promise.resolve();
       },
+      getContext: () => context,
     },
   };
 }
@@ -57,7 +69,9 @@ describe("createSettingsPanel", () => {
   });
 
   test("開くと保存済みの値が入る", async () => {
-    const { deps } = makeDeps({ hashtags: ["切り抜き", "VTuber"] });
+    const { deps } = makeDeps({
+      hashtagsByChannel: { [CHANNEL.id]: ["切り抜き", "VTuber"] },
+    });
     const panel = createSettingsPanel(deps);
 
     panel.toggle();
@@ -89,7 +103,9 @@ describe("createSettingsPanel", () => {
 
     // 保存は 1 回。すべての項目の差分がまとめて 1 つの patch に入る
     expect(saved).toHaveLength(1);
-    expect(saved[0]).toMatchObject({ hashtags: ["切り抜き", "VTuber"] });
+    expect(saved[0]).toMatchObject({
+      hashtagsByChannel: { [CHANNEL.id]: ["切り抜き", "VTuber"] },
+    });
   });
 
   test("保存した後は正規化された形が入力欄に出る", async () => {
@@ -114,7 +130,7 @@ describe("createSettingsPanel", () => {
     await flush();
 
     panel.toggle();
-    store.hashtags = ["あとで変えた"];
+    store.hashtagsByChannel = { [CHANNEL.id]: ["あとで変えた"] };
     panel.toggle();
     await flush();
 
@@ -188,5 +204,111 @@ describe("入力を受け付けないとき", () => {
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ maxClipSec: 30 });
     expect(panel.element.textContent).toContain("保存しました");
+  });
+});
+
+describe("チャンネルを特定できない画面", () => {
+  test("チャンネル別の項目は入力させない", async () => {
+    const { deps } = makeDeps(
+      { hashtagsByChannel: { [CHANNEL.id]: ["切り抜き"] } },
+      { channel: null },
+    );
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+
+    panel.toggle();
+    await flush();
+
+    expect(inputOf(panel, "hashtags").disabled).toBe(true);
+    // 理由を出す。無効なだけだと壊れているように見える
+    expect(panel.element.textContent).toContain("特定できない");
+  });
+
+  test("チャンネルに依らない項目は入力できる", async () => {
+    const { deps } = makeDeps({}, { channel: null });
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+
+    panel.toggle();
+    await flush();
+
+    expect(inputOf(panel, "maxClipSec").disabled).toBe(false);
+  });
+
+  test("保存してもタグが消えない", async () => {
+    // 入力させていない項目を空のまま送ると、開いただけでタグが消える
+    const { deps, store } = makeDeps(
+      { hashtagsByChannel: { [CHANNEL.id]: ["切り抜き"] } },
+      { channel: null },
+    );
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+    panel.toggle();
+    await flush();
+
+    inputOf(panel, "maxClipSec").value = "30";
+    saveButton(panel).click();
+    await flush();
+
+    expect(store.hashtagsByChannel).toEqual({ [CHANNEL.id]: ["切り抜き"] });
+    expect(store.maxClipSec).toBe(30);
+  });
+});
+
+describe("どのチャンネルの設定かを見せる", () => {
+  test("説明にチャンネル名が出る", async () => {
+    const { deps } = makeDeps();
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+
+    panel.toggle();
+    await flush();
+
+    expect(panel.element.textContent).toContain(CHANNEL.name);
+  });
+});
+
+describe("共通タグからの引き継ぎ", () => {
+  test("設定の無いチャンネルでは引き継いだタグが入力欄に出る", async () => {
+    // 捨てずに引き継ぐ。ログだけに出しても利用者は見ない
+    const { deps } = makeDeps({ legacyHashtags: ["クリ明透", "あすカット"] });
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+
+    panel.toggle();
+    await flush();
+
+    expect(inputOf(panel, "hashtags").value).toBe("#クリ明透 #あすカット");
+    expect(panel.element.textContent).toContain("引き継いでいます");
+  });
+
+  test("保存すると引き継ぎが終わる", async () => {
+    const { deps, store } = makeDeps({ legacyHashtags: ["クリ明透"] });
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+    panel.toggle();
+    await flush();
+
+    saveButton(panel).click();
+    await flush();
+
+    expect(store.hashtagsByChannel).toEqual({ [CHANNEL.id]: ["クリ明透"] });
+    expect(store.legacyHashtags).toEqual([]);
+    expect(panel.element.textContent).not.toContain("引き継いでいます");
+  });
+
+  test("設定済みのチャンネルには引き継ぎを出さない", async () => {
+    const { deps } = makeDeps({
+      hashtagsByChannel: { [CHANNEL.id]: ["切り抜き"] },
+      legacyHashtags: ["クリ明透"],
+    });
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+
+    panel.toggle();
+    await flush();
+
+    expect(inputOf(panel, "hashtags").value).toBe("#切り抜き");
+    expect(panel.element.textContent).not.toContain("引き継いでいます");
   });
 });

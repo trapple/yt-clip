@@ -20,10 +20,27 @@ export const SETTINGS_KEY = "settings";
 export type Settings = {
   /** 投稿本文のテンプレート。いまは画面から編集できないが設定ではある */
   template: string;
-  /** 本文の末尾に付けるハッシュタグ。**`#` は含めない** */
-  hashtags: string[];
+  /**
+   * チャンネルごとの、本文の末尾に付けるハッシュタグ。**`#` は含めない**
+   *
+   * 共通のタグは持たない。切り抜くチャンネルごとに付けるタグが違うため
+   */
+  hashtagsByChannel: Record<string, string[]>;
+  /**
+   * チャンネル別にする前の共通タグ。**移行のためだけにある。**
+   *
+   * 設定がまだ無いチャンネルではこれを使う (捨てずに引き継ぐ)。一度でも
+   * 保存すれば空になり、以降は素直にチャンネル別だけになる
+   */
+  legacyHashtags: string[];
   /** 1 クリップの最大長 (秒) */
   maxClipSec: number;
+};
+
+/** 設定を読み書きするときの文脈。チャンネル別の項目が要る */
+export type SettingsContext = {
+  /** いま開いている動画のチャンネル。特定できなければ null */
+  channel: { id: string; name: string } | null;
 };
 
 /** 既定の投稿本文。`{tags}` は自分で区切りを持つ (下記 tagsVariable 参照) */
@@ -31,7 +48,8 @@ export const DEFAULT_TEMPLATE = "{title}\n\n{url}{tags}";
 
 export const DEFAULT_SETTINGS: Settings = {
   template: DEFAULT_TEMPLATE,
-  hashtags: [],
+  hashtagsByChannel: {},
+  legacyHashtags: [],
   maxClipSec: DEFAULT_MAX_CLIP_SEC,
 };
 
@@ -101,6 +119,27 @@ export function parseMaxClipSec(
   return { ok: true, value };
 }
 
+/**
+ * そのチャンネルに付けるタグ。
+ *
+ * **`channelId` が欠けていることを許す。** IndexedDB に残っている古いクリップの
+ * `meta` には `channelId` が無い。型の上では `string` だが、保存済みの値は
+ * 型を保証しない。
+ *
+ * 設定がまだ無いチャンネルでは、移行前の共通タグを返す。ここを空にすると、
+ * 設定パネルには引き継がれたタグが出ているのに投稿本文には入らない、という
+ * 食い違いが起きる。**画面の表示と本文の組み立ては同じ関数から引くこと**
+ */
+export function hashtagsFor(
+  settings: Settings,
+  channelId: string | undefined,
+): string[] {
+  if (channelId === undefined || channelId === "") {
+    return settings.legacyHashtags;
+  }
+  return settings.hashtagsByChannel[channelId] ?? settings.legacyHashtags;
+}
+
 /** 設定として受け入れられる最大長かどうか。読み込みと入力の両方で使う */
 function isSettableClipSec(value: unknown): value is number {
   return (
@@ -116,6 +155,14 @@ function isStringArray(value: unknown): value is string[] {
   return (
     Array.isArray(value) && value.every((item) => typeof item === "string")
   );
+}
+
+/** チャンネル ID → タグ の対応表として読めるか */
+function isTagMap(value: unknown): value is Record<string, string[]> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(isStringArray);
 }
 
 /**
@@ -137,8 +184,25 @@ export function mergeSettings(stored: unknown): Settings {
     console.warn("[yt-clip] 保存された template が使えないため既定値を使います");
   }
 
-  if (isStringArray(source.hashtags)) {
-    settings.hashtags = source.hashtags;
+  if (isTagMap(source.hashtagsByChannel)) {
+    settings.hashtagsByChannel = source.hashtagsByChannel;
+  } else if (source.hashtagsByChannel !== undefined) {
+    console.warn(
+      "[yt-clip] 保存された hashtagsByChannel が使えないため既定値を使います",
+    );
+  }
+
+  // 共通タグからチャンネル別への移行。**捨てない。**
+  // 保存し直した後は legacyHashtags 側だけが残る (古い hashtags キーは消える)
+  if (isStringArray(source.legacyHashtags)) {
+    settings.legacyHashtags = source.legacyHashtags;
+  } else if (isStringArray(source.hashtags)) {
+    settings.legacyHashtags = source.hashtags;
+    if (source.hashtags.length > 0) {
+      console.info(
+        `[yt-clip] 共通のハッシュタグ (${formatHashtags(source.hashtags)}) をチャンネル別設定へ引き継ぎます。保存すると引き継ぎは終わります`,
+      );
+    }
   } else if (source.hashtags !== undefined) {
     console.warn("[yt-clip] 保存された hashtags が使えないため既定値を使います");
   }
@@ -179,12 +243,31 @@ export type SettingsField = {
   /** 入力欄を識別する。DOM の id にも使う */
   key: string;
   label: string;
-  /** 入力欄の下に出す短い説明 */
-  hint: string;
+  /**
+   * チャンネルが必要な項目かどうか。
+   * `channel` の項目は、チャンネルを特定できない画面では入力させない。
+   * **パネルが分岐するのはここだけ。** `key` を見て分岐してはいけない
+   */
+  scope: "global" | "channel";
+  /**
+   * 入力欄の下に出す短い説明。
+   * 文脈と設定の両方で変わるので関数にする (どのチャンネルのタグか、
+   * いま引き継ぎ中かどうか)
+   */
+  hint(settings: Settings, context: SettingsContext): string;
   /** 保存されている値を入力欄の文字列にする */
-  toText(settings: Settings): string;
-  /** 入力欄の文字列から、設定の一部を作る */
-  fromText(text: string): FieldResult;
+  toText(settings: Settings, context: SettingsContext): string;
+  /**
+   * 入力欄の文字列から、設定の一部を作る。
+   *
+   * **現在の設定を受け取る。** チャンネル別の項目は、他のチャンネル分を
+   * 残したまま 1 件だけ差し替える必要がある
+   */
+  fromText(
+    text: string,
+    settings: Settings,
+    context: SettingsContext,
+  ): FieldResult;
 };
 
 /**
@@ -196,14 +279,52 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   {
     key: "hashtags",
     label: "ハッシュタグ",
-    hint: "空白区切り。# は省略できます",
-    toText: (settings) => formatHashtags(settings.hashtags),
-    fromText: (text) => ({ ok: true, patch: { hashtags: normalizeHashtags(text) } }),
+    scope: "channel",
+    hint: (settings, context) => {
+      if (context.channel === null) {
+        return "チャンネルを特定できないため設定できません";
+      }
+      const base = `空白区切り。# は省略できます (${context.channel.name} のタグ)`;
+      // 引き継ぎ中であることを画面に出す。ログだけでは利用者は見ない
+      const inherited =
+        settings.hashtagsByChannel[context.channel.id] === undefined &&
+        settings.legacyHashtags.length > 0;
+      return inherited
+        ? `${base}。以前の共通設定から引き継いでいます。保存すると引き継ぎは終わります`
+        : base;
+    },
+    toText: (settings, context) =>
+      formatHashtags(hashtagsFor(settings, context.channel?.id)),
+    fromText: (text, settings, context) => {
+      if (context.channel === null) {
+        return {
+          ok: false,
+          message: "チャンネルを特定できないため保存できません",
+        };
+      }
+      return {
+        ok: true,
+        patch: {
+          // 他のチャンネル分は残す。丸ごと差し替えると、別のチャンネルで
+          // 設定したタグが消える
+          hashtagsByChannel: {
+            ...settings.hashtagsByChannel,
+            [context.channel.id]: normalizeHashtags(text),
+          },
+          // 一度保存すれば引き継ぎは終わり。残すと新しいチャンネルを開くたびに
+          // 同じタグが出続け、「チャンネル別のみ」という決定と食い違う
+          legacyHashtags: [],
+        },
+      };
+    },
   },
   {
     key: "maxClipSec",
     label: "最大秒数",
-    hint: `${MIN_CLIP_SEC}〜${MAX_SETTABLE_CLIP_SEC} 秒。X の動画の上限が ${MAX_SETTABLE_CLIP_SEC} 秒です`,
+    scope: "global",
+    hint: () =>
+      `${MIN_CLIP_SEC}〜${MAX_SETTABLE_CLIP_SEC} 秒。X の動画の上限が ${MAX_SETTABLE_CLIP_SEC} 秒です`,
+
     toText: (settings) => String(settings.maxClipSec),
     fromText: (text) => {
       const parsed = parseMaxClipSec(text);

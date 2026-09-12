@@ -22,6 +22,31 @@ export const YT_SELECTORS = {
     "h1.title yt-formatted-string",
     'meta[itemprop="name"]',
   ],
+  /**
+   * チャンネル ID (`UC...`)。**候補を順に試す。**
+   *
+   * meta 要素は表示されないので構成変更の影響を受けにくいが、確実ではない。
+   * リンクからは href の `/channel/UC...` を取り出す
+   */
+  channelId: [
+    'meta[itemprop="channelId"]',
+    'span[itemprop="author"] meta[itemprop="identifier"]',
+    '#owner a[href*="/channel/"]',
+    'ytd-channel-name a[href*="/channel/"]',
+  ],
+  /**
+   * チャンネル ID が取れなかったときの鍵。ハンドル (`@name`)。
+   *
+   * **ハンドルは変更されうる。** 変わるとそのチャンネルのタグが引けなくなるので、
+   * `UC...` を先に試す
+   */
+  channelHandle: ['#owner a[href^="/@"]', 'ytd-channel-name a[href^="/@"]'],
+  /** チャンネル名。表示にしか使わない */
+  channelName: [
+    "#owner ytd-channel-name a",
+    "ytd-channel-name #text",
+    'span[itemprop="author"] link[itemprop="name"]',
+  ],
   /** 範囲を帯で重ねる対象。プレイヤーのシークバー */
   progressBar: ".ytp-progress-bar",
 } as const;

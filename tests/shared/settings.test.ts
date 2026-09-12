@@ -6,11 +6,18 @@ import {
   loadSettings,
   mergeSettings,
   normalizeHashtags,
+  hashtagsFor,
   parseMaxClipSec,
   saveSettings,
   tagsVariable,
+  type Settings,
+  type SettingsContext,
 } from "@/shared/settings";
 import { DEFAULT_MAX_CLIP_SEC, MAX_SETTABLE_CLIP_SEC } from "@/shared/time";
+
+/** テストで使うチャンネル。設定の鍵になる */
+const CHANNEL = { id: "UCchannel-a", name: "チャンネル A" };
+const CONTEXT: SettingsContext = { channel: CHANNEL };
 
 describe("normalizeHashtags", () => {
   test("空白区切りで受け取る", () => {
@@ -76,11 +83,16 @@ describe("mergeSettings", () => {
   });
 
   test("保存されている値を採る", () => {
+    // hashtags は移行用の引き継ぎとして読まれる (共通タグは持たなくなった)
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
     expect(mergeSettings({ hashtags: ["a"], template: "{url}" })).toEqual({
       ...DEFAULT_SETTINGS,
-      hashtags: ["a"],
+      legacyHashtags: ["a"],
       template: "{url}",
     });
+
+    info.mockRestore();
   });
 
   test("型が合わない値は既定値に倒す", () => {
@@ -96,16 +108,19 @@ describe("mergeSettings", () => {
 
   test("配列の中身が文字列でなければ既定値に倒す", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeSettings({ hashtags: ["a", 1] }).hashtags).toEqual([]);
+    expect(mergeSettings({ hashtagsByChannel: { a: ["x", 1] } })
+      .hashtagsByChannel).toEqual({});
     warn.mockRestore();
   });
 
   test("片方だけ壊れていても、もう片方は採る", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     expect(mergeSettings({ hashtags: ["a"], template: 42 })).toEqual({
       ...DEFAULT_SETTINGS,
-      hashtags: ["a"],
+      legacyHashtags: ["a"],
     });
+    info.mockRestore();
     warn.mockRestore();
   });
 
@@ -142,21 +157,21 @@ describe("読み書き", () => {
   });
 
   test("保存したものを読み出せる", async () => {
-    await saveSettings({ hashtags: ["切り抜き"] });
+    await saveSettings({ hashtagsByChannel: { UC1: ["切り抜き"] } });
     await expect(loadSettings()).resolves.toEqual({
       ...DEFAULT_SETTINGS,
-      hashtags: ["切り抜き"],
+      hashtagsByChannel: { UC1: ["切り抜き"] },
     });
   });
 
   test("一部だけ変えても他の項目は残る", async () => {
     await saveSettings({ template: "{url}" });
-    await saveSettings({ hashtags: ["a"] });
+    await saveSettings({ maxClipSec: 30 });
 
     await expect(loadSettings()).resolves.toEqual({
       ...DEFAULT_SETTINGS,
       template: "{url}",
-      hashtags: ["a"],
+      maxClipSec: 30,
     });
   });
 });
@@ -165,7 +180,9 @@ describe("画面に出す項目", () => {
   test("すべての項目に文言と変換がある", () => {
     for (const field of SETTINGS_FIELDS) {
       expect(field.label).toBeTruthy();
-      expect(field.hint).toBeTruthy();
+      expect(field.hint(DEFAULT_SETTINGS, CONTEXT)).toBeTruthy();
+      // チャンネルを特定できない画面でも文言は出す。空だと理由が伝わらない
+      expect(field.hint(DEFAULT_SETTINGS, { channel: null })).toBeTruthy();
       expect(typeof field.toText).toBe("function");
       expect(typeof field.fromText).toBe("function");
     }
@@ -174,11 +191,18 @@ describe("画面に出す項目", () => {
   test("入力欄の文字列と設定を往復できる", () => {
     // 保存した値を入力欄に出し、そのまま保存し直しても変わらないこと
     for (const field of SETTINGS_FIELDS) {
-      const settings = { ...DEFAULT_SETTINGS, hashtags: ["切り抜き", "VTuber"] };
-      const text = field.toText(settings);
-      const back = { ...settings, ...field.fromText(text) };
+      const settings: Settings = {
+        ...DEFAULT_SETTINGS,
+        hashtagsByChannel: { [CHANNEL.id]: ["切り抜き", "VTuber"] },
+        maxClipSec: 30,
+      };
+      const text = field.toText(settings, CONTEXT);
+      const converted = field.fromText(text, settings, CONTEXT);
+      expect(converted.ok).toBe(true);
+      if (!converted.ok) throw new Error(converted.message);
 
-      expect(field.toText(back)).toBe(text);
+      const back = { ...settings, ...converted.patch };
+      expect(field.toText(back, CONTEXT)).toBe(text);
     }
   });
 
@@ -256,18 +280,127 @@ describe("SETTINGS_FIELDS の最大秒数", () => {
 
   test("保存された値が入力欄の文字列になる", () => {
     const field = fieldOf("maxClipSec");
-    expect(field.toText({ ...DEFAULT_SETTINGS, maxClipSec: 45 })).toBe("45");
+    expect(
+      field.toText({ ...DEFAULT_SETTINGS, maxClipSec: 45 }, CONTEXT),
+    ).toBe("45");
   });
 
   test("通る入力は patch になる", () => {
-    expect(fieldOf("maxClipSec").fromText("45")).toEqual({
-      ok: true,
-      patch: { maxClipSec: 45 },
-    });
+    expect(
+      fieldOf("maxClipSec").fromText("45", DEFAULT_SETTINGS, CONTEXT),
+    ).toEqual({ ok: true, patch: { maxClipSec: 45 } });
   });
 
   test("通らない入力は理由を返す", () => {
-    const result = fieldOf("maxClipSec").fromText("0");
+    const result = fieldOf("maxClipSec").fromText("0", DEFAULT_SETTINGS, CONTEXT);
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("hashtagsFor", () => {
+  const settings: Settings = {
+    ...DEFAULT_SETTINGS,
+    hashtagsByChannel: { UC1: ["切り抜き"], UC2: ["歌枠"] },
+  };
+
+  test("そのチャンネルのタグを返す", () => {
+    expect(hashtagsFor(settings, "UC1")).toEqual(["切り抜き"]);
+    expect(hashtagsFor(settings, "UC2")).toEqual(["歌枠"]);
+  });
+
+  test("設定の無いチャンネルには他のチャンネルのタグを混ぜない", () => {
+    expect(hashtagsFor(settings, "UC3")).toEqual([]);
+  });
+
+  test("channelId が欠けていても落ちない", () => {
+    // IndexedDB に残っている古いクリップの meta には channelId が無い
+    expect(hashtagsFor(settings, undefined)).toEqual([]);
+    expect(hashtagsFor(settings, "")).toEqual([]);
+  });
+
+  test("設定がまだ無いチャンネルには引き継いだ共通タグを使う", () => {
+    // 画面 (toText) と本文の組み立てが同じ関数を通るので、
+    // 「パネルには出ているのに本文に入らない」食い違いが起きない
+    const migrating: Settings = {
+      ...DEFAULT_SETTINGS,
+      hashtagsByChannel: { UC1: ["切り抜き"] },
+      legacyHashtags: ["クリ明透"],
+    };
+
+    expect(hashtagsFor(migrating, "UC9")).toEqual(["クリ明透"]);
+    // 設定済みのチャンネルは引き継ぎに触れない
+    expect(hashtagsFor(migrating, "UC1")).toEqual(["切り抜き"]);
+  });
+});
+
+describe("共通タグからチャンネル別への移行", () => {
+  test("古い hashtags を引き継ぎとして読む", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const settings = mergeSettings({ hashtags: ["クリ明透", "あすカット"] });
+
+    expect(settings.legacyHashtags).toEqual(["クリ明透", "あすカット"]);
+    expect(settings.hashtagsByChannel).toEqual({});
+    // 黙って移すと、利用者は消えたと思う
+    expect(info).toHaveBeenCalled();
+
+    info.mockRestore();
+  });
+
+  test("保存し直された legacyHashtags を優先する", () => {
+    // 一度保存した後は空。古い hashtags キーが残っていても復活させない
+    const settings = mergeSettings({
+      hashtags: ["クリ明透"],
+      legacyHashtags: [],
+    });
+
+    expect(settings.legacyHashtags).toEqual([]);
+  });
+
+  test("保存すると引き継ぎが終わる", () => {
+    const field = SETTINGS_FIELDS.find((item) => item.key === "hashtags");
+    if (field === undefined) throw new Error("項目がありません");
+    const before: Settings = {
+      ...DEFAULT_SETTINGS,
+      legacyHashtags: ["クリ明透"],
+    };
+
+    const result = field.fromText("切り抜き", before, CONTEXT);
+
+    expect(result).toEqual({
+      ok: true,
+      patch: {
+        hashtagsByChannel: { [CHANNEL.id]: ["切り抜き"] },
+        legacyHashtags: [],
+      },
+    });
+  });
+
+  test("他のチャンネルの設定は残る", () => {
+    const field = SETTINGS_FIELDS.find((item) => item.key === "hashtags");
+    if (field === undefined) throw new Error("項目がありません");
+    const before: Settings = {
+      ...DEFAULT_SETTINGS,
+      hashtagsByChannel: { UCother: ["歌枠"] },
+    };
+
+    const result = field.fromText("切り抜き", before, CONTEXT);
+
+    expect(result).toMatchObject({
+      patch: {
+        hashtagsByChannel: { UCother: ["歌枠"], [CHANNEL.id]: ["切り抜き"] },
+      },
+    });
+  });
+
+  test("チャンネルを特定できなければ保存しない", () => {
+    const field = SETTINGS_FIELDS.find((item) => item.key === "hashtags");
+    if (field === undefined) throw new Error("項目がありません");
+
+    const result = field.fromText("切り抜き", DEFAULT_SETTINGS, {
+      channel: null,
+    });
+
     expect(result.ok).toBe(false);
   });
 });

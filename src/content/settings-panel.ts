@@ -4,6 +4,7 @@ import {
   loadSettings,
   saveSettings,
   type Settings,
+  type SettingsContext,
 } from "@/shared/settings";
 
 /**
@@ -21,18 +22,29 @@ export type SettingsPanel = {
 export type PanelDeps = {
   load(): Promise<Settings>;
   save(patch: Partial<Settings>): Promise<void>;
+  /**
+   * いま開いている動画の文脈。**開くたびに読む。**
+   * SPA 遷移で別のチャンネルの動画に移っていることがある
+   */
+  getContext(): SettingsContext;
 };
 
-const defaultDeps: PanelDeps = { load: loadSettings, save: saveSettings };
+const defaultDeps: PanelDeps = {
+  load: loadSettings,
+  save: saveSettings,
+  getContext: () => ({ channel: null }),
+};
 
 export function createSettingsPanel(
-  deps: PanelDeps = defaultDeps,
+  overrides: Partial<PanelDeps> = {},
 ): SettingsPanel {
+  const deps: PanelDeps = { ...defaultDeps, ...overrides };
   const element = document.createElement("div");
   element.style.cssText = PANEL_STYLE.root;
   element.hidden = true;
 
   const inputs = new Map<string, HTMLInputElement>();
+  const hints = new Map<string, HTMLElement>();
 
   for (const field of SETTINGS_FIELDS) {
     const wrapper = document.createElement("div");
@@ -48,13 +60,14 @@ export function createSettingsPanel(
     input.type = "text";
     input.style.cssText = PANEL_STYLE.input;
 
+    // 文言は文脈で変わる (どのチャンネルのタグか)。中身は開くときに入れる
     const hint = document.createElement("div");
     hint.style.cssText = PANEL_STYLE.hint;
-    hint.textContent = field.hint;
 
     wrapper.append(label, input, hint);
     element.append(wrapper);
     inputs.set(field.key, input);
+    hints.set(field.key, hint);
   }
 
   const result = document.createElement("span");
@@ -71,22 +84,39 @@ export function createSettingsPanel(
 
   async function fill(): Promise<void> {
     const settings = await deps.load();
+    const context = deps.getContext();
+
     for (const field of SETTINGS_FIELDS) {
       const input = inputs.get(field.key);
-      if (input !== undefined) input.value = field.toText(settings);
+      const hint = hints.get(field.key);
+      if (input === undefined || hint === undefined) continue;
+
+      // **分岐するのは scope だけ。** key を見て分岐すると、項目を足すたびに
+      // ここへ戻ってくることになる
+      const unavailable = field.scope === "channel" && context.channel === null;
+      input.disabled = unavailable;
+      input.value = unavailable ? "" : field.toText(settings, context);
+      hint.textContent = field.hint(settings, context);
     }
   }
 
   save.addEventListener("click", () => {
     void (async () => {
       try {
+        // 差分の土台は**保存されている現在の設定**。チャンネル別の項目は
+        // 他のチャンネル分を残したまま 1 件だけ差し替える必要がある
+        const settings = await deps.load();
+        const context = deps.getContext();
+
         // 項目ごとの差分をまとめて 1 回で書く
         let patch: Partial<Settings> = {};
         for (const field of SETTINGS_FIELDS) {
           const input = inputs.get(field.key);
-          if (input === undefined) continue;
+          // 入力させていない項目は保存の対象にしない。空のまま送ると、
+          // チャンネルを特定できない画面を開いただけでタグが消える
+          if (input === undefined || input.disabled) continue;
 
-          const converted = field.fromText(input.value);
+          const converted = field.fromText(input.value, settings, context);
           // **1 つでも通らなければ何も保存しない。** 一部だけ書き込むと、
           // エラーを見た利用者が「何が保存されて何が保存されなかったか」を
           // 画面から判断できない

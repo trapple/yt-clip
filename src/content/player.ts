@@ -38,6 +38,53 @@ export function isAdPlaying(): boolean {
 }
 
 /**
+ * 要素が指している**識別子**を取り出す。
+ *
+ * リンクは `href`、meta は `content`。**リンクの表示文字列は使わない。**
+ * `<a href="/channel/UC...">チャンネル名</a>` から名前を拾ってしまうと、
+ * 設定の鍵に名前が入り、チャンネル名が変わった瞬間にタグが引けなくなる
+ */
+function identityOf(element: Element): string {
+  if (element instanceof HTMLMetaElement) return element.content.trim();
+  if (element instanceof HTMLAnchorElement) {
+    return element.getAttribute("href")?.trim() ?? "";
+  }
+  if (element instanceof HTMLLinkElement) {
+    return element.getAttribute("href")?.trim() ?? "";
+  }
+  return (element.textContent ?? "").trim();
+}
+
+/**
+ * 要素が示す**表示名**を取り出す。
+ * `link[itemprop=name]` は表示されないので `content` に名前を持つ
+ */
+function labelOf(element: Element): string {
+  const text = (element.textContent ?? "").trim();
+  if (text !== "") return text;
+  return element.getAttribute("content")?.trim() ?? "";
+}
+
+/**
+ * 候補を順に試し、中身が空でない最初のものを採る。
+ *
+ * **要素に一致するだけでは足りない。** 実機に、先頭の候補に一致はするが
+ * 中身が空になる画面構成があった (タイトルで実際に起きた)
+ */
+function firstValue(
+  selectors: readonly string[],
+  read: (element: Element) => string,
+): string | null {
+  for (const selector of selectors) {
+    for (const element of document.querySelectorAll(selector)) {
+      const value = read(element);
+      if (value !== "") return value;
+    }
+  }
+  return null;
+}
+
+/**
  * ページ見出しから動画タイトルを拾う。
  *
  * 候補を順に試し、**中身が空でない最初のもの**を採る。要素に一致するだけでは
@@ -76,13 +123,59 @@ function titleFromDocument(): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
+/** URL や文字列から `UC...` を取り出す。href そのままでは鍵にできない */
+function extractChannelId(value: string): string | null {
+  const fromPath = /\/channel\/(UC[\w-]+)/u.exec(value);
+  if (fromPath !== null && fromPath[1] !== undefined) return fromPath[1];
+  // meta の content は ID がそのまま入っている
+  if (/^UC[\w-]+$/u.test(value)) return value;
+  return null;
+}
+
+/** href から `@handle` を取り出す */
+function extractHandle(value: string): string | null {
+  const matched = /\/(@[\w.-]+)/u.exec(value);
+  return matched?.[1] ?? null;
+}
+
+/**
+ * チャンネルを特定する。
+ *
+ * **見つからなくても throw しない。** タイトルと違い、チャンネルが分からなくても
+ * 投稿本文は成立する (タグが付かないだけ)。ここで止めると、画面構成が
+ * 少し変わっただけで録画そのものができなくなる
+ */
+export function getChannel(): { id: string; name: string } {
+  const rawId = firstValue(YT_SELECTORS.channelId, identityOf);
+  const id =
+    (rawId === null ? null : extractChannelId(rawId)) ??
+    // ID が取れなければハンドルを鍵にする。無いよりは引ける方がよい
+    (() => {
+      const rawHandle = firstValue(YT_SELECTORS.channelHandle, identityOf);
+      return rawHandle === null ? null : extractHandle(rawHandle);
+    })();
+
+  const name = firstValue(YT_SELECTORS.channelName, labelOf);
+
+  if (id === null) {
+    console.warn("[yt-clip] チャンネルを特定できませんでした");
+  }
+  return { id: id ?? "", name: name ?? id ?? "" };
+}
+
 export function getVideoMeta(): VideoMeta {
   const title = findTitleInPage() ?? titleFromDocument();
   if (title === null) {
     // 空のまま進むと、投稿本文が改行だけで始まる不可解な形になる
     throw new ElementNotFoundError(YT_SELECTORS.title.join(" / "));
   }
-  return { videoId: parseVideoId(location.href), title };
+  const channel = getChannel();
+  return {
+    videoId: parseVideoId(location.href),
+    title,
+    channelId: channel.id,
+    channelName: channel.name,
+  };
 }
 
 /**

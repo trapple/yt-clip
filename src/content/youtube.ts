@@ -1,5 +1,6 @@
 import { pickMimeType } from "@/content/codec";
 import {
+  getChannel,
   getVideo,
   getVideoMeta,
   isAdPlaying,
@@ -696,7 +697,19 @@ function buildBar(): HTMLElement {
   actions.id = ACTIONS_ID;
   actions.style.cssText = BAR_STYLE.row;
 
-  const settingsPanel = createSettingsPanel();
+  // 文脈は**開くたびに**読む。SPA 遷移で別のチャンネルの動画に移っている
+  const settingsPanel = createSettingsPanel({
+    getContext: () => {
+      try {
+        const channel = getChannel();
+        // ID が取れないチャンネルは設定の鍵にできない。入力させない
+        return { channel: channel.id === "" ? null : channel };
+      } catch (error) {
+        console.warn(`チャンネルを読めませんでした: ${String(error)}`);
+        return { channel: null };
+      }
+    },
+  });
   const settingsButton = makeButton("⚙", false, () => settingsPanel.toggle());
   settingsButton.title = "設定";
   // 右端へ寄せる。操作の並びから外して、押し間違いを減らす

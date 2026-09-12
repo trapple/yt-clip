@@ -6,6 +6,7 @@ import { decodeBase64, encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message } from "@/shared/messages";
 import type { Settings } from "@/shared/settings";
+import { hashtagsFor } from "@/shared/settings";
 import { renderTemplate } from "@/shared/template";
 import {
   BUSY_KINDS,
@@ -340,7 +341,9 @@ export function createRouter(
         settings.template,
         clip.meta,
         clip.range,
-        settings.hashtags,
+        // 保存済みのクリップには channelId が無いことがある。
+        // hashtagsFor が欠けを許す
+        hashtagsFor(settings, clip.meta.channelId),
       ),
     });
 

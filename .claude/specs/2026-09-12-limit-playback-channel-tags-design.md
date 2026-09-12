@@ -206,7 +206,12 @@ export function hashtagsFor(
 
 **`undefined` を受けること。** IndexedDB に残っている古いクリップの `meta` には
 `channelId` が無い。型の上では `string` だが、保存済みの値は型を保証しない
-(設定と同じ理屈)。読み出し側で欠けを許し、タグ無しとして扱う。
+(設定と同じ理屈)。読み出し側で欠けを許す。
+
+**設定がまだ無いチャンネルでは、移行前の共通タグ (`legacyHashtags`) を返す。**
+ここを空にすると、設定パネルには引き継がれたタグが出ているのに投稿本文には
+入らない、という食い違いが起きる。パネルの表示 (`toText`) と本文の組み立ては
+**同じ関数**から引く。
 
 ### C.4 設定パネルが「今どのチャンネルか」を知る
 
@@ -221,8 +226,11 @@ export type SettingsContext = {
 export type SettingsField = {
   key: string;
   label: string;
-  /** 文脈によって変わる (「@foo のタグ」) ので関数にする */
-  hint(context: SettingsContext): string;
+  /**
+   * 文脈と設定の両方で変わるので関数にする。
+   * 「どのチャンネルのタグか」と「引き継ぎ中かどうか」(C.5) を出す
+   */
+  hint(settings: Settings, context: SettingsContext): string;
   /** チャンネルが必要な項目。特定できないときは入力させない */
   scope: "global" | "channel";
   toText(settings: Settings, context: SettingsContext): string;
@@ -278,7 +286,7 @@ export type FieldResult =
 | 拡大バー | `setMaxClipSec` した値がドラッグのクランプに効くこと (計算だけでなく繋ぎ込みを見る) |
 | 設定の検証 | 0 / 141 / 数値でない入力が保存されず理由が出ること |
 | `createRangeBar` | トラックの `pointerdown` で `onSeekPlay` が呼ばれ、`onCommit` が呼ばれないこと。ハンドル上では呼ばれないこと。`enabled` が false なら呼ばれないこと |
-| `hashtagsFor` | 該当チャンネル / 未設定のチャンネル / `channelId` が `undefined` |
+| `hashtagsFor` | 該当チャンネル / 未設定のチャンネル (引き継ぎが出る) / `channelId` が `undefined` や空文字 |
 | `mergeSettings` | 古い `hashtags` が `legacyHashtags` に移ること |
 | 設定パネル | チャンネルが null のとき入力させないこと。保存が他チャンネルの設定を消さないこと |
 | チャンネル抽出 | 候補の順、空要素の読み飛ばし、どちらも無いとき空文字 |
