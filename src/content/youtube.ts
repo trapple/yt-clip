@@ -16,7 +16,7 @@ import {
   type BarAction,
 } from "@/content/actions";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
-import { BAR_STYLE } from "@/content/styles";
+import { BAR_STYLE, applyPalette, isDarkTheme } from "@/content/styles";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
 import { saveToDownloads } from "@/content/save";
 import { makeDefaultRange } from "@/content/range-math";
@@ -642,6 +642,8 @@ function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
   bar.style.cssText = BAR_STYLE.root;
+  // 配色は自前で持つ。YouTube の CSS 変数はここでは解決しない
+  applyPalette(bar, isDarkTheme());
 
   const row = document.createElement("div");
   row.style.cssText = BAR_STYLE.row;
@@ -817,6 +819,17 @@ function recoverFromState(): void {
 
 /** 直前に見ていた URL。SPA 遷移の検出に使う */
 let lastHref = location.href;
+
+// テーマの切り替えに追従する。YouTube は <html dark> を付け外しするだけで
+// 画面を作り直さないため、DOM 変化の監視では拾えない
+const themeObserver = new MutationObserver(() => {
+  const bar = document.getElementById(BAR_ID);
+  if (bar !== null) applyPalette(bar, isDarkTheme());
+});
+themeObserver.observe(document.documentElement, {
+  attributes: true,
+  attributeFilter: ["dark"],
+});
 
 // YouTube は SPA 遷移するため DOM 変化を監視して再マウントする
 const observer = new MutationObserver(() => {
