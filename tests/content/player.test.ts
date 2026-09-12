@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   ElementNotFoundError,
+  getChannel,
   getVideoMeta,
   getVideo,
   onReachTime,
@@ -134,7 +135,12 @@ describe("getVideoMeta", () => {
   test("見出しからタイトルを拾う", () => {
     document.body.innerHTML =
       '<h1 class="ytd-watch-metadata"><yt-formatted-string>動画の題名</yt-formatted-string></h1>';
-    expect(getVideoMeta()).toEqual({ videoId: "abc123", title: "動画の題名" });
+    expect(getVideoMeta()).toEqual({
+      videoId: "abc123",
+      title: "動画の題名",
+      // チャンネルの手がかりが無いページ。タグが引けないだけで本文は成立する
+      channelId: "",
+    });
   });
 
   test("先頭の候補が空なら次の候補へ進む", () => {
@@ -165,5 +171,99 @@ describe("getVideoMeta", () => {
     // 空のまま進むと、本文が改行だけで始まる不可解な形になる
     document.title = "";
     expect(() => getVideoMeta()).toThrow(ElementNotFoundError);
+  });
+});
+
+describe("getChannel", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  test("ハンドルが取れなければ meta の UC を使う", () => {
+    document.body.innerHTML = '<meta itemprop="channelId" content="UCabc123">';
+
+    expect(getChannel().id).toBe("UCabc123");
+  });
+
+  test("構造化データから拾う", () => {
+    // 実機の watch ページはこの形。見た目のレイアウトより変わりにくい
+    document.body.innerHTML =
+      '<span itemprop="author">' +
+      '<link itemprop="url" href="https://www.youtube.com/@jawed">' +
+      '<link itemprop="name" content="jawed">' +
+      "</span>";
+
+    expect(getChannel()).toEqual({ id: "@jawed", name: "jawed" });
+  });
+
+  test("相対 URL でも絶対 URL でも同じ鍵になる", () => {
+    // 属性はページによってどちらでも来る。href プロパティで絶対に揃える
+    document.body.innerHTML =
+      '<div id="owner"><a href="/@foo">チャンネル A</a></div>';
+    const relative = getChannel().id;
+
+    document.body.innerHTML =
+      '<div id="owner"><a href="https://www.youtube.com/@foo">チャンネル A</a></div>';
+
+    expect(getChannel().id).toBe(relative);
+    expect(relative).toBe("@foo");
+  });
+
+  test("UC のリンクが先にあってもハンドルを優先する", () => {
+    // メンバーシップのあるチャンネルだけ /channel/UC.../join が出る、
+    // といった差が実際にありうる。UC を優先すると、同じチャンネルなのに
+    // 動画によって鍵が変わり、設定したタグが別の動画で出てこなくなる
+    document.body.innerHTML =
+      '<meta itemprop="channelId" content="UCreal">' +
+      '<div id="owner"><ytd-channel-name><a href="/@foo">チャンネル A</a>' +
+      "</ytd-channel-name></div>";
+
+    expect(getChannel().id).toBe("@foo");
+  });
+
+  test("中身が空の候補は読み飛ばす", () => {
+    document.body.innerHTML =
+      '<meta itemprop="channelId" content="">' +
+      '<div id="owner"><a href="/@foo">チャンネル A</a></div>';
+
+    expect(getChannel().id).toBe("@foo");
+  });
+
+  test("ID が取れなければハンドルを鍵にする", () => {
+    document.body.innerHTML =
+      '<div id="owner"><ytd-channel-name><a href="/@foo.bar">チャンネル A</a>' +
+      "</ytd-channel-name></div>";
+
+    expect(getChannel()).toEqual({ id: "@foo.bar", name: "チャンネル A" });
+  });
+
+  test("どちらも取れなければ空文字を返す。throw はしない", () => {
+    // タイトルと違い、チャンネルが分からなくても投稿本文は成立する。
+    // ここで止めると、画面構成が少し変わっただけで録画ができなくなる
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    expect(getChannel()).toEqual({ id: "", name: "" });
+    // 握り潰さず理由は残す
+    expect(warn).toHaveBeenCalled();
+
+    warn.mockRestore();
+  });
+
+  test("特定できなかったときは集まった候補もログに出す", () => {
+    // 「特定できません」だけでは、次に何を直せばよいか分からない
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    document.body.innerHTML =
+      '<div id="owner"><a href="/results">関係ないリンク</a></div>';
+
+    getChannel();
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("/results"));
+    warn.mockRestore();
+  });
+
+  test("名前が取れなくても ID があれば設定は引ける", () => {
+    document.body.innerHTML = '<meta itemprop="channelId" content="UCabc123">';
+
+    expect(getChannel()).toEqual({ id: "UCabc123", name: "UCabc123" });
   });
 });

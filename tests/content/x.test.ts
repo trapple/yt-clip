@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   SelectorMissingError,
   attachFile,
+  attachPayload,
   buildClipFile,
-  containsHead,
-  keepText,
+  insertText,
+  readBlocks,
   findElement,
   waitForElement,
 } from "@/content/x";
@@ -128,37 +129,6 @@ describe("attachFile", () => {
   });
 });
 
-describe("containsHead", () => {
-  /** 本文テンプレートの既定値と同じ形。タイトル + 空行 + URL */
-  const body = (title: string) => `${title}\n\nhttps://youtu.be/abc123?t=10`;
-
-  test("入力された本文に先頭が現れていれば一致とみなす", () => {
-    const text = body("とても長いタイトルの動画です");
-    expect(containsHead(text, text)).toBe(true);
-  });
-
-  test("Draft.js が改行を落としても一致とみなす", () => {
-    // Draft.js は改行をブロックの境目として表し、テキストノードには
-    // 改行文字を置かない。改行を含んだまま比べると必ず一致しなくなる
-    const text = body("短い");
-    const asRendered = text.replace(/\n/g, "");
-    expect(containsHead(asRendered, text)).toBe(true);
-  });
-
-  test("タイトルが 1 文字でも、改行のせいで失敗と判定しない", () => {
-    // 先頭 20 文字に改行が入るのは、まさにタイトルが短いとき
-    const text = body("あ");
-    expect(containsHead(text.replace(/\n/g, ""), text)).toBe(true);
-  });
-
-  test("本文が入っていなければ一致しない", () => {
-    expect(containsHead("", body("タイトル"))).toBe(false);
-    expect(containsHead("別の本文が入っています", body("タイトル"))).toBe(
-      false,
-    );
-  });
-});
-
 describe("buildClipFile", () => {
   const payload = {
     base64: "AAECAw==",
@@ -185,141 +155,167 @@ describe("buildClipFile", () => {
   });
 });
 
-describe("keepText", () => {
-  const text = "動画の題名\n\nhttps://youtu.be/abc123?t=10";
-
-  /** 待ち時間を消費しないので、テストは実時間を払わない */
-  const noWait = async (): Promise<void> => undefined;
+describe("attachPayload", () => {
+  const payload = {
+    base64: "AAECAw==",
+    fileName: "yt-clip-abc123-10s.mp4",
+    mimeType: "video/mp4",
+    text: "動画の題名\n\nhttps://youtu.be/abc123?t=10",
+  };
 
   /**
-   * jsdom は execCommand を持たないので中身の変化を自分で再現する。
-   * **insertText は末尾に足す** (実物と同じ)。消さずに入れ直すと積み上がる
+   * 投稿画面を模す。**paste を受けてブロックを作る**ところだけ Draft.js に
+   * 似せる。本物の Draft.js での検証は e2e が持つ (jsdom には Draft.js が無い)
    */
-  function stubInsert(editor: HTMLElement): ReturnType<typeof vi.fn> {
-    const fn = vi.fn((command: string, _ui?: boolean, value?: string) => {
-      if (command === "insertText") {
-        editor.textContent = (editor.textContent ?? "") + String(value);
-      }
-      if (command === "delete") editor.textContent = "";
-      return true;
+  function buildComposePage(draft: string): HTMLElement {
+    document.body.innerHTML =
+      '<div data-testid="tweetTextarea_0"></div>' +
+      '<input data-testid="fileInput" type="file">';
+    const editor = document.querySelector<HTMLElement>(
+      '[data-testid="tweetTextarea_0"]',
+    );
+    if (editor === null) throw new Error("入力欄を作れませんでした");
+
+    const render = (text: string): void => {
+      editor.replaceChildren(
+        ...text.split("\n").map((line) => {
+          const block = document.createElement("div");
+          block.dataset.block = "true";
+          block.textContent = line;
+          return block;
+        }),
+      );
+    };
+    render(draft);
+
+    // Draft.js は paste を自前で処理し、選択範囲を差し替える。
+    // ここでは常に全選択されている前提で、まるごと置き換える
+    editor.addEventListener("paste", (event) => {
+      const text = (event as ClipboardEvent).clipboardData?.getData(
+        "text/plain",
+      );
+      if (text !== undefined) render(text);
     });
-    (document as unknown as { execCommand: unknown }).execCommand = fn;
-    return fn;
+    return editor;
   }
 
   beforeEach(() => {
-    document.body.innerHTML = "";
-  });
-
-  test("本文が残っていれば何もしない", async () => {
-    const editor = document.createElement("div");
-    editor.textContent = text;
-    const insert = stubInsert(editor);
-
-    await keepText(text, () => editor, noWait);
-
-    expect(insert).not.toHaveBeenCalled();
-  });
-
-  test("添付で消えた本文を入れ直す", async () => {
-    // 動画は「準備完了」なのに本文だけ空、という形で実機に出た
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    const insert = stubInsert(editor);
-
-    await keepText(text, () => editor, noWait);
-
-    expect(editor.textContent).toBe(text);
-    expect(insert).toHaveBeenCalled();
-  });
-
-  test("入力欄が見つからない周回は飛ばす", async () => {
-    // 作り直しの最中は入力欄が居ないことがある。そこで諦めない
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    stubInsert(editor);
-    let looks = 0;
-
-    await keepText(
-      text,
-      () => {
-        looks += 1;
-        return looks <= 3 ? null : editor;
-      },
-      noWait,
-    );
-
-    expect(editor.textContent).toBe(text);
-  });
-
-  test("入れ直す前に中身を消すので、本文が積み上がらない", async () => {
-    // insertText は末尾に足す。空白だけが残った入力欄にそのまま入れると
-    // 前の残骸が頭に付く (実機で URL が並んだのと同じ形)
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    editor.textContent = "   ";
-    stubInsert(editor);
-
-    await keepText(text, () => editor, noWait);
-
-    expect(editor.textContent).toBe(text);
-  });
-
-  test("ユーザーが書き換えた本文には触らない", async () => {
-    // 添付の直後 2 秒は見張っているが、守りたいのは「作り直しで空になった」
-    // 場面だけ。本文の一致で判定すると、手で書き換えた内容を元に戻してしまう
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    editor.textContent = "自分で書き直した本文";
-    const insert = stubInsert(editor);
-
-    await keepText(text, () => editor, noWait);
-
-    expect(editor.textContent).toBe("自分で書き直した本文");
-    expect(insert).not.toHaveBeenCalled();
-  });
-
-  test("入力欄を空にできなければ入れ直しをやめる", async () => {
-    // 消せていないまま入れると末尾に足されて積み上がる
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    editor.textContent = "";
-    const insert = vi.fn((command: string, _ui?: boolean, value?: string) => {
-      // delete が効かない環境を模す
-      if (command === "insertText") {
-        editor.textContent = (editor.textContent ?? "") + String(value);
-      }
-      if (command === "delete") editor.textContent = "消えない残骸";
-      return true;
+    vi.stubGlobal("chrome", {
+      runtime: { sendMessage: () => Promise.resolve() },
     });
-    (document as unknown as { execCommand: unknown }).execCommand = insert;
 
-    await keepText(text, () => editor, noWait);
-
-    expect(editor.textContent).toBe("消えない残骸");
-    expect(insert.mock.calls.filter(([c]) => c === "insertText")).toHaveLength(0);
-  });
-
-  test("消されるたびに入れ直す", async () => {
-    // 作り直しが一度だけとは限らない
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    const insert = stubInsert(editor);
-    let wiped = 0;
-
-    await keepText(
-      text,
-      () => {
-        if (wiped < 2) {
-          wiped += 1;
-          editor.textContent = "";
-        }
-        return editor;
+    // jsdom の input.files は読み取り専用で、代入すると strict mode で投げる
+    Object.defineProperty(HTMLInputElement.prototype, "files", {
+      configurable: true,
+      get(): FileList | null {
+        return (this as { __files?: FileList }).__files ?? null;
       },
-      noWait,
+      set(value: FileList) {
+        (this as { __files?: FileList }).__files = value;
+      },
+    });
+
+    // jsdom は ClipboardEvent を持たない。paste に載せる分だけ用意する
+    vi.stubGlobal(
+      "ClipboardEvent",
+      class extends Event {
+        readonly clipboardData: DataTransfer | null;
+        constructor(type: string, init?: { clipboardData?: DataTransfer } & EventInit) {
+          super(type, init);
+          this.clipboardData = init?.clipboardData ?? null;
+        }
+      },
     );
 
-    expect(insert.mock.calls.filter(([c]) => c === "insertText")).toHaveLength(2);
-    expect(editor.textContent).toBe(text);
+    // jsdom は DataTransfer を持たない。使う分だけ用意する
+    vi.stubGlobal(
+      "DataTransfer",
+      class {
+        private readonly list: File[] = [];
+        private readonly data = new Map<string, string>();
+        readonly items = {
+          add: (file: File): void => void this.list.push(file),
+        };
+        setData(type: string, value: string): void {
+          this.data.set(type, value);
+        }
+        getData(type: string): string {
+          return this.data.get(type) ?? "";
+        }
+        get files(): FileList {
+          const list = this.list;
+          return {
+            ...list,
+            length: list.length,
+            item: (index: number) => list[index] ?? null,
+          } as unknown as FileList;
+        }
+      },
+    );
+  });
+
+  test("前の下書きを上書きする", async () => {
+    // X は前回の下書きを復元する。残したまま入れると本文が二重になる
+    const editor = buildComposePage("https://youtu.be/abc123?t=10");
+
+    await attachPayload(payload);
+
+    expect(readBlocks(editor)).toBe(payload.text);
+  });
+
+  test("execCommand を使わない", () => {
+    // Draft.js に対して execCommand は壊れた入り方をする。画面には入って
+    // 見えるのにモデルには一部しか入らず、X が投稿するのはモデル側。
+    // 実装から消えたことを、ここで固定する
+    const source = insertText.toString() + readBlocks.toString();
+    expect(source).not.toContain("execCommand");
+  });
+
+  test("本文を入れてからファイルを添付する", async () => {
+    // 添付すると X が UI を作り直すため、順番が逆だと焦点が定まらない。
+    // jsdom では input.files を差し替えられないので、添付を知らせる change が
+    // 飛んだ時点で本文が入っているかを見る
+    const editor = buildComposePage("");
+    const input = document.querySelector<HTMLInputElement>(
+      '[data-testid="fileInput"]',
+    );
+    let textAtAttach: string | null = null;
+    input?.addEventListener("change", () => {
+      textAtAttach = readBlocks(editor);
+    });
+
+    await attachPayload(payload);
+
+    expect(textAtAttach).toBe(payload.text);
+    expect(input?.files?.[0]?.name).toBe("yt-clip-abc123-10s.mp4");
+    expect(input?.files?.[0]?.type).toBe("video/mp4");
+  });
+
+  test("二度呼んでも積み上がらない", async () => {
+    const editor = buildComposePage("");
+
+    await attachPayload(payload);
+    await attachPayload(payload);
+
+    expect(readBlocks(editor)).toBe(payload.text);
+  });
+});
+
+describe("readBlocks", () => {
+  test("ブロックを改行で繋ぐ", () => {
+    // **textContent を見てはいけない。** 壊れた入り方をしたときに残る
+    // 幽霊 DOM が混ざり、入っていないものが入って見える
+    const editor = document.createElement("div");
+    editor.innerHTML =
+      '<div data-block="true">一行目</div><div data-block="true">二行目</div>' +
+      "<div>幽霊</div>";
+
+    expect(readBlocks(editor)).toBe("一行目\n二行目");
+  });
+
+  test("ブロックが無ければ空", () => {
+    const editor = document.createElement("div");
+    editor.textContent = "まだ描き直されていない";
+    expect(readBlocks(editor)).toBe("");
   });
 });

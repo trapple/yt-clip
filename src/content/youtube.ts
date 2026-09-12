@@ -1,5 +1,6 @@
 import { pickMimeType } from "@/content/codec";
 import {
+  getChannel,
   getVideo,
   getVideoMeta,
   isAdPlaying,
@@ -8,8 +9,18 @@ import {
   seekTo,
   startPlayback,
 } from "@/content/player";
+import {
+  ACTION_EVENTS,
+  ACTION_LABELS,
+  PRIMARY_ACTIONS,
+  actionsFor,
+  type BarAction,
+} from "@/content/actions";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
+import { createSettingsPanel } from "@/content/settings-panel";
+import { BAR_STYLE, applyPalette, isDarkTheme } from "@/content/styles";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
+import { saveToDownloads } from "@/content/save";
 import { makeDefaultRange } from "@/content/range-math";
 import {
   DrmProtectedError,
@@ -19,8 +30,15 @@ import {
 } from "@/content/recorder";
 import { YT_SELECTORS } from "@/content/selectors";
 import { encodeBase64 } from "@/shared/base64";
+import { buildClipFileName } from "@/shared/filename";
 import type { Message, MessageResponse } from "@/shared/messages";
-import { formatTime, validateRange } from "@/shared/time";
+import {
+  loadSettings,
+  mergeSettings,
+  SETTINGS_KEY,
+  type SettingsContext,
+} from "@/shared/settings";
+import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
   BUSY_KINDS,
@@ -32,6 +50,7 @@ import {
 
 const BAR_ID = "yt-clip-bar";
 /** 拡大バーの要素。位置ではなく id で辿れるようにする */
+const ACTIONS_ID = `${BAR_ID}-actions`;
 const RANGE_ID = "yt-clip-range";
 const OVERLAY_ID = "yt-clip-overlay";
 
@@ -52,6 +71,17 @@ let rangeEditable = false;
 let cancelWatch: (() => void) | null = null;
 let cancelPreview: (() => void) | null = null;
 let rangeBar: RangeBar | null = null;
+/** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
+let playheadWatched = false;
+/**
+ * 1 クリップの最大長 (秒)。設定から読む。
+ *
+ * **読む場所が 3 つある** (`makeDefaultRange` / `validateRange` / 拡大バーの
+ * `clampHandle`) ので、必ずこの 1 つの変数から配ること。ばらばらに読むと、
+ * ドラッグでは伸ばせるのに OUT では弾かれる食い違いが生まれる。
+ * 拡大バーへは値を渡さず引かせる (流し込み忘れが起きないようにするため)
+ */
+let maxClipSec = DEFAULT_MAX_CLIP_SEC;
 let handle: RecorderHandle | null = null;
 
 /**
@@ -220,7 +250,7 @@ function onMarkIn(): void {
   const video = getVideo();
   const meta = getVideoMeta();
   // 既定の長さの範囲をここで作る。状態機械は長さの決め方を知らない
-  const range = makeDefaultRange(video.currentTime, video.duration);
+  const range = makeDefaultRange(video.currentTime, video.duration, maxClipSec);
 
   rangeVideoId = meta.videoId;
   applyRange(range, video.duration);
@@ -254,7 +284,7 @@ function onMarkOut(): void {
 
   const video = getVideo();
   const next = { startSec: currentRange.startSec, endSec: video.currentTime };
-  const validation = validateRange(next.startSec, next.endSec);
+  const validation = validateRange(next.startSec, next.endSec, maxClipSec);
   if (!validation.ok) {
     setStatus(validation.message);
     return;
@@ -315,6 +345,40 @@ function onScrub(sec: number): void {
   }
 }
 
+/**
+ * 拡大バーのトラックを押されたとき。その位置から再生する。
+ *
+ * **範囲は変えない。** 切り抜く場所を決める操作ではなく、内容を見るための操作。
+ *
+ * 範囲再生の監視はここで解く。残すと、登録したときの OUT を通過した瞬間に
+ * `pause()` が飛び、押した場所からの再生が理由もなく止まる
+ */
+async function onSeekPlay(sec: number): Promise<void> {
+  cancelPreviewWatch();
+  if ((await seekAndPlay(sec)) === null) return;
+  setStatus(`${formatTime(sec)} から再生中…`);
+}
+
+/**
+ * その位置へ飛んで再生する。成功したら動画を返し、失敗したらバーに理由を出す。
+ *
+ * seek と再生を分けてあるのは player.ts 側の事情 (録画の冒頭が欠けるため)。
+ * その手順はここ 1 箇所に置く
+ */
+async function seekAndPlay(sec: number): Promise<HTMLVideoElement | null> {
+  try {
+    // getVideo() を try の外に置くと、同期的な throw が Promise の拒否になり、
+    // 呼び出し元の `void ...` で握り潰されてボタンが無反応に見える
+    const video = getVideo();
+    await seekTo(video, sec);
+    await startPlayback(video);
+    return video;
+  } catch (error) {
+    setStatus(`再生できませんでした: ${String(error)}`);
+    return null;
+  }
+}
+
 /** YouTube のシークバーに範囲を帯で重ねて、動画全体のどこかを示す */
 function paintOverlay(range: ClipRange, videoDurationSec: number): void {
   const bar = document.querySelector<HTMLElement>(YT_SELECTORS.progressBar);
@@ -356,6 +420,41 @@ function refreshOverlay(): void {
  * 状態機械が持つ範囲を画面へ反映する。**食い違ったときは状態機械が正。**
  * 表示だけを扱い、録画そのものには触れない。
  */
+/** バーのボタンを 1 箇所で作る。見た目の差は primary だけで表す */
+function makeButton(
+  label: string,
+  primary: boolean,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.textContent = label;
+  button.dataset.primary = primary ? "true" : "false";
+  button.style.cssText = primary
+    ? BAR_STYLE.primaryButton
+    : BAR_STYLE.secondaryButton;
+  button.addEventListener("click", guard(onClick));
+  return button;
+}
+
+/**
+ * 状態ごとの操作を描き直す。
+ *
+ * 押しても状態機械に拒まれるだけの操作は出さない。出して拒むより、
+ * 出さない方が「いま何ができるか」がそのまま画面に出る
+ */
+function renderActions(kind: ClipState["kind"]): void {
+  const box = document.getElementById(ACTIONS_ID);
+  if (box === null) return;
+
+  box.replaceChildren(
+    ...actionsFor(kind).map((action: BarAction) =>
+      makeButton(ACTION_LABELS[action], PRIMARY_ACTIONS.has(action), () => {
+        send(ACTION_EVENTS[action]);
+      }),
+    ),
+  );
+}
+
 function applyStateToDisplay(state: ClipState): void {
   const stateRange = "range" in state ? state.range : null;
   const stateMeta = "meta" in state ? state.meta : null;
@@ -378,7 +477,9 @@ function applyStateToDisplay(state: ClipState): void {
       : !sameRange(currentRange, liveRange);
 
   busy = BUSY_KINDS.has(state.kind);
-  rangeEditable = state.kind === "ready";
+  // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
+  // 古い範囲のクリップは外れる
+  rangeEditable = state.kind === "ready" || state.kind === "posted";
   currentRange = liveRange;
   // どの動画の範囲かも状態機械が持っている。content script が読み込み
   // 直された後でも、これで取り戻せる
@@ -386,6 +487,7 @@ function applyStateToDisplay(state: ClipState): void {
 
   rangeBar?.setEnabled(canAdjustRange());
   refreshOverlay();
+  renderActions(state.kind);
 
   // 失敗はバーにも出す。録画中にタブをリロードした場合、このバーが
   // 唯一の手がかりになる (popup を開かない限り理由が分からない)
@@ -416,14 +518,10 @@ async function playRange(): Promise<void> {
   cancelPreviewWatch();
 
   const range = currentRange;
-  try {
-    // getVideo() を try の外に置くと、この関数は async なので同期的な throw が
-    // Promise の拒否になり、呼び出し元の `void playRange()` で握り潰されて
-    // ボタンが無反応に見える。onReachTime の登録まで含めて 1 つの try で拾う
-    const video = getVideo();
-    await seekTo(video, range.startSec);
-    await startPlayback(video);
+  const video = await seekAndPlay(range.startSec);
+  if (video === null) return;
 
+  try {
     setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
     cancelPreview = onReachTime(video, range.endSec, () => {
       cancelPreview = null;
@@ -566,6 +664,17 @@ async function finishRecording(): Promise<void> {
       }
     }
 
+    // 投稿の成否に関わらず手元に残す。添付が失敗しても録り直さずに済む。
+    // 範囲を作った動画が分からなければファイル名を組み立てられないので、
+    // 揃わないまま保存はしない
+    if (currentRange !== null && rangeVideoId !== null) {
+      saveToDownloads(
+        bytes,
+        buildClipFileName(rangeVideoId, currentRange.startSec, blob.type),
+        blob.type,
+      );
+    }
+
     notify({
       type: "recorder/done",
       base64: encodeBase64(bytes),
@@ -576,38 +685,83 @@ async function finishRecording(): Promise<void> {
   }
 }
 
+/**
+ * 設定パネルに渡す文脈。**開くたびに読む** (SPA 遷移で別のチャンネルへ移る)。
+ *
+ * `getChannel` は見つからなくても throw しないので、ここに try/catch は要らない。
+ * `buildBar` の中に閉じ込めないのは、同じスコープの他のクロージャがパネルを
+ * 捕捉しているため、`buildBar` のスコープごと生き残ることになるから
+ */
+function readChannelContext(): SettingsContext {
+  const channel = getChannel();
+  // ID が取れないチャンネルは設定の鍵にできない。入力させない
+  return { channel: channel.id === "" ? null : channel };
+}
+
 function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
-  bar.style.cssText =
-    "display:flex;flex-direction:column;gap:4px;padding:8px 0;color:var(--yt-spec-text-primary,#fff);font-size:13px;";
+  bar.style.cssText = BAR_STYLE.root;
+  // 配色は自前で持つ。YouTube の CSS 変数はここでは解決しない
+  applyPalette(bar, isDarkTheme());
 
   const row = document.createElement("div");
-  row.style.cssText = "display:flex;gap:8px;align-items:center;";
+  row.style.cssText = BAR_STYLE.row;
 
-  const inButton = document.createElement("button");
-  inButton.textContent = "IN";
-  inButton.addEventListener("click", guard(onMarkIn));
-
-  const outButton = document.createElement("button");
-  outButton.textContent = "OUT";
-  outButton.addEventListener("click", guard(onMarkOut));
-
-  const playButton = document.createElement("button");
-  playButton.textContent = "範囲を再生";
-  playButton.addEventListener("click", guard(() => void playRange()));
+  // 常に出ている操作。主操作は状態ごとに変わる側 (renderActions) が持つ
+  const inButton = makeButton("IN", false, onMarkIn);
+  const outButton = makeButton("OUT", false, onMarkOut);
+  const playButton = makeButton("▶ 範囲を見る", false, () => void playRange());
 
   const status = document.createElement("span");
   status.id = `${BAR_ID}-status`;
+  status.style.cssText = BAR_STYLE.status;
   status.textContent = "IN を押して開始位置を指定";
 
-  row.append(inButton, outButton, playButton, status);
+  // 状態ごとに中身を入れ替える箱。押しても拒まれるだけの操作は出さない
+  const actions = document.createElement("div");
+  actions.id = ACTIONS_ID;
+  actions.style.cssText = BAR_STYLE.row;
+
+  const settingsPanel = createSettingsPanel({ getContext: readChannelContext });
+  const settingsButton = makeButton("⚙", false, () => settingsPanel.toggle());
+  settingsButton.title = "設定";
+  // 右端へ寄せる。操作の並びから外して、押し間違いを減らす
+  settingsButton.style.cssText += "margin-left:auto;";
+
+  row.append(inButton, outButton, playButton, actions, status, settingsButton);
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される
-  rangeBar = createRangeBar({ onScrub, onCommit: onRangeCommitted });
+  rangeBar = createRangeBar({
+    onScrub,
+    onCommit: onRangeCommitted,
+    onSeekPlay: (sec) => void onSeekPlay(sec),
+    maxClipSec: () => maxClipSec,
+  });
   rangeBar.element.id = RANGE_ID;
-  bar.append(row, rangeBar.element);
+  // 拡大バーを上、操作を下に置く。範囲を見ながらボタンへ手を伸ばす順番
+  bar.append(rangeBar.element, row, settingsPanel.element);
   return bar;
+}
+
+/**
+ * 再生位置を拡大バーへ流し続ける。
+ *
+ * 動画要素は SPA 遷移で差し替わるため、掴んだ参照を持ち回らず毎回取り直す。
+ * 取れないときは目印を消すだけにして、次のフレームで見直す
+ */
+function watchPlayhead(): void {
+  const step = (): void => {
+    try {
+      rangeBar?.setPlayhead(getVideo().currentTime);
+    } catch {
+      // 動画要素がまだ無いか差し替えの最中。位置を示しようがないので消す。
+      // ここで投げると監視が止まり、以降ずっと更新されなくなる
+      rangeBar?.setPlayhead(null);
+    }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function mount(): void {
@@ -626,6 +780,13 @@ function mount(): void {
   // 先頭に入れてプレイヤーのすぐ下に置く。タイトルより下だと、操作するたびに
   // 画面をスクロールして動画と往復することになる
   anchor.insertBefore(bar, anchor.firstChild);
+
+  // 監視は 1 度だけ張る。mount は DOM 変化のたびに呼ばれるので、
+  // ここで毎回張ると同じ更新が何本も走る
+  if (!playheadWatched) {
+    playheadWatched = true;
+    watchPlayhead();
+  }
 
   // 作り直したバーは空で無効の状態。確定済みの範囲があれば載せ直す
   rangeBar?.setEnabled(canAdjustRange());
@@ -727,8 +888,47 @@ function recoverFromState(): void {
     });
 }
 
+/**
+ * 起動時に設定を読む。
+ *
+ * 読めなくても操作は続けさせる。既定値のまま動く方が、バーごと出ないより
+ * ましで、上限の食い違いも起きない (全員が既定値を見る)
+ */
+function loadInitialSettings(): void {
+  void loadSettings()
+    .then((settings) => {
+      maxClipSec = settings.maxClipSec;
+    })
+    .catch((error: unknown) => {
+      console.warn(`設定を読めませんでした: ${String(error)}`);
+    });
+}
+
+// 設定は**別のタブで変えられる**。保存ボタンに繋ぐだけでは、開いたままの
+// タブが古い上限のまま残り、そのタブでだけ録画の長さが違うことになる。
+//
+// **通知が新しい値を持っているので読み直さない。** ここで loadSettings すると、
+// 設定を 1 回保存するたびに、開いている YouTube タブの数だけ storage を
+// 往復することになる (書いた当のタブでも発火する)
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  const change = areaName === "sync" ? changes[SETTINGS_KEY] : undefined;
+  if (change === undefined) return;
+  maxClipSec = mergeSettings(change.newValue).maxClipSec;
+});
+
 /** 直前に見ていた URL。SPA 遷移の検出に使う */
 let lastHref = location.href;
+
+// テーマの切り替えに追従する。YouTube は <html dark> を付け外しするだけで
+// 画面を作り直さないため、DOM 変化の監視では拾えない
+const themeObserver = new MutationObserver(() => {
+  const bar = document.getElementById(BAR_ID);
+  if (bar !== null) applyPalette(bar, isDarkTheme());
+});
+themeObserver.observe(document.documentElement, {
+  attributes: true,
+  attributeFilter: ["dark"],
+});
 
 // YouTube は SPA 遷移するため DOM 変化を監視して再マウントする
 const observer = new MutationObserver(() => {
@@ -744,4 +944,5 @@ const observer = new MutationObserver(() => {
 });
 observer.observe(document.body, { childList: true, subtree: true });
 mount();
+loadInitialSettings();
 recoverFromState();

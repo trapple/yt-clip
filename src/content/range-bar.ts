@@ -6,6 +6,7 @@ import {
   type HandleKind,
   type TimeWindow,
 } from "@/content/range-math";
+import { RANGE_STYLE } from "@/content/styles";
 import { formatTime } from "@/shared/time";
 import type { ClipRange } from "@/shared/types";
 
@@ -14,6 +15,20 @@ export type RangeBarCallbacks = {
   onScrub(sec: number): void;
   /** 指を離した。確定した範囲を送る */
   onCommit(range: ClipRange): void;
+  /**
+   * トラックが押された。その位置から再生する。
+   * **範囲は変えない。** 見るための操作であって、切り抜く場所を決める操作ではない
+   */
+  onSeekPlay(sec: number): void;
+  /**
+   * 1 クリップの最大長 (秒)。**ドラッグのたびに引く。**
+   *
+   * 値を渡す形 (setter) にすると、設定が変わったときと**バーを作り直したとき**の
+   * 2 回、呼び出し側が流し込み直す義務を負う。バーは YouTube の再描画のたびに
+   * 作り直されるので、流し込み忘れるとそのバーでだけ上限が既定値に戻り、
+   * OUT ボタン側 (`validateRange`) と食い違う
+   */
+  maxClipSec(): number;
 };
 
 export type RangeBar = {
@@ -26,43 +41,56 @@ export type RangeBar = {
    * 状態 (録画中・録画後のプレビュー待ち) では操作させない
    */
   setEnabled(enabled: boolean): void;
+  /** 現在の再生位置を示す。窓の外や位置が分からないときは null */
+  setPlayhead(sec: number | null): void;
   destroy(): void;
 };
 
-const STYLE = {
-  root: "display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;color:var(--yt-spec-text-secondary,#aaa);",
-  track:
-    "position:relative;flex:1;height:24px;background:var(--yt-spec-badge-chip-background,#272727);border-radius:4px;cursor:pointer;",
-  selection:
-    "position:absolute;top:0;bottom:0;background:var(--yt-spec-call-to-action,#3ea6ff);opacity:0.35;pointer-events:none;",
-  handle:
-    "position:absolute;top:-2px;bottom:-2px;width:12px;margin-left:-6px;background:var(--yt-spec-call-to-action,#3ea6ff);border-radius:3px;cursor:ew-resize;touch-action:none;",
-  disabled: "opacity:0.4;pointer-events:none;",
-} as const;
 
 export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   const element = document.createElement("div");
   // 初期状態は無効。見た目 (薄さ) と実際の操作可否を最初から一致させる
-  element.style.cssText = `${STYLE.root}${STYLE.disabled}`;
+  element.style.cssText = `${RANGE_STYLE.root}${RANGE_STYLE.disabled}`;
 
   const startLabel = document.createElement("span");
   const endLabel = document.createElement("span");
 
   const track = document.createElement("div");
-  track.style.cssText = STYLE.track;
+  // テストから掴むための目印。子要素の構成が変わっても位置で数えずに済む
+  track.dataset.role = "track";
+  track.style.cssText = RANGE_STYLE.track;
 
   const selection = document.createElement("div");
-  selection.style.cssText = STYLE.selection;
+  selection.style.cssText = RANGE_STYLE.selection;
 
   const inHandle = document.createElement("div");
-  inHandle.style.cssText = STYLE.handle;
+  inHandle.style.cssText = RANGE_STYLE.handle;
   inHandle.title = "開始位置";
 
   const outHandle = document.createElement("div");
-  outHandle.style.cssText = STYLE.handle;
+  outHandle.style.cssText = RANGE_STYLE.handle;
   outHandle.title = "終了位置";
 
-  track.append(selection, inHandle, outHandle);
+  // 選択範囲の外側を暗くして、どこを切り抜くのかを際立たせる
+  const shadeBefore = document.createElement("div");
+  shadeBefore.style.cssText = RANGE_STYLE.shade;
+  const shadeAfter = document.createElement("div");
+  shadeAfter.style.cssText = RANGE_STYLE.shade;
+
+  const playhead = document.createElement("div");
+  playhead.dataset.role = "playhead";
+  playhead.style.cssText = RANGE_STYLE.playhead;
+  playhead.hidden = true;
+
+  // ハンドルは細い芯の周りに透明な余白を持つ。狙わなくても掴めるように
+  for (const handle of [inHandle, outHandle]) {
+    const grip = document.createElement("div");
+    grip.style.cssText = RANGE_STYLE.handleGrip;
+    handle.append(grip);
+  }
+
+  // 暗幕はハンドルより先に置く。後だとハンドルが隠れる
+  track.append(selection, shadeBefore, shadeAfter, playhead, inHandle, outHandle);
   element.append(startLabel, track, endLabel);
 
   /** 現在の範囲と窓。update で更新される */
@@ -87,6 +115,11 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
     outHandle.style.left = `${outRatio * 100}%`;
     selection.style.left = `${inRatio * 100}%`;
     selection.style.width = `${(outRatio - inRatio) * 100}%`;
+
+    shadeBefore.style.left = "0";
+    shadeBefore.style.width = `${inRatio * 100}%`;
+    shadeAfter.style.left = `${outRatio * 100}%`;
+    shadeAfter.style.width = `${(1 - outRatio) * 100}%`;
 
     startLabel.textContent = formatTime(window_.startSec);
     endLabel.textContent = formatTime(window_.endSec);
@@ -142,7 +175,13 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
           return;
         }
 
-        range = clampHandle(kind, pointerToSec(moveEvent.clientX), range, window_);
+        range = clampHandle(
+          kind,
+          pointerToSec(moveEvent.clientX),
+          range,
+          window_,
+          callbacks.maxClipSec(),
+        );
         paint();
         // 動かしている側の位置を見せる。反対側は動いていない
         requestScrub(kind === "in" ? range.startSec : range.endSec);
@@ -165,6 +204,27 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   beginDrag("in", inHandle);
   beginDrag("out", outHandle);
 
+  /**
+   * トラックを押したらそこから再生する。
+   *
+   * **ハンドルはトラックの子**なので、掴んだときの pointerdown はここにも
+   * 伝わる。発生元がハンドルなら何もしない。ハンドル側に stopPropagation を
+   * 足す案は採らない。ハンドルの責務が「自分を動かす」から「親に伝えない」
+   * まで広がり、親を足すたびにそちらを直すことになる。
+   *
+   * 受け付ける条件はドラッグと同じ (`enabled`)。false なのは「範囲が未確定」と
+   * 「録画が進行中」で、後者でシークすると録画された映像に飛びが入る
+   */
+  track.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (!enabled) return;
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (inHandle.contains(target) || outHandle.contains(target)) return;
+
+    event.preventDefault();
+    callbacks.onSeekPlay(pointerToSec(event.clientX));
+  });
+
   return {
     element,
 
@@ -174,11 +234,26 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
       paint();
     },
 
+    setPlayhead(sec: number | null): void {
+      if (sec === null) {
+        playhead.hidden = true;
+        return;
+      }
+      // **時刻そのもので判定すること。** timeToRatio は 0〜1 に丸めるので、
+      // 比率を見ると窓の外が端に貼り付いた状態で表示されてしまう
+      if (sec < window_.startSec || sec > window_.endSec) {
+        playhead.hidden = true;
+        return;
+      }
+      playhead.hidden = false;
+      playhead.style.left = `${timeToRatio(sec, window_) * 100}%`;
+    },
+
     setEnabled(next: boolean): void {
       enabled = next;
       element.style.cssText = next
-        ? STYLE.root
-        : `${STYLE.root}${STYLE.disabled}`;
+        ? RANGE_STYLE.root
+        : `${RANGE_STYLE.root}${RANGE_STYLE.disabled}`;
     },
 
     destroy(): void {

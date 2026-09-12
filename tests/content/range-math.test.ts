@@ -8,7 +8,7 @@ import {
   ratioToTime,
   timeToRatio,
 } from "@/content/range-math";
-import { MAX_CLIP_SEC, MIN_CLIP_SEC } from "@/shared/time";
+import { DEFAULT_MAX_CLIP_SEC, MIN_CLIP_SEC } from "@/shared/time";
 
 describe("makeDefaultRange", () => {
   test("押した位置から既定の長さの範囲を作る", () => {
@@ -174,10 +174,10 @@ describe("clampHandle", () => {
     const from = { startSec: 100, endSec: 120 };
     expect(clampHandle("out", 280, from, wide)).toEqual({
       startSec: 100,
-      endSec: 100 + MAX_CLIP_SEC,
+      endSec: 100 + DEFAULT_MAX_CLIP_SEC,
     });
     expect(clampHandle("in", 10, from, wide)).toEqual({
-      startSec: 120 - MAX_CLIP_SEC,
+      startSec: 120 - DEFAULT_MAX_CLIP_SEC,
       endSec: 120,
     });
   });
@@ -247,5 +247,43 @@ describe("clampHandle", () => {
     expect(() =>
       timeToRatio(130, { startSec: 160, endSec: 100 }),
     ).toThrow(RangeError);
+  });
+});
+
+describe("最大秒数を差し替える", () => {
+  const window = { startSec: 0, endSec: 300 };
+
+  test("OUT 側は渡した上限までしか伸びない", () => {
+    const range = { startSec: 100, endSec: 110 };
+
+    expect(clampHandle("out", 290, range, window, 20)).toEqual({
+      startSec: 100,
+      endSec: 120,
+    });
+  });
+
+  test("IN 側も渡した上限までしか下がらない", () => {
+    const range = { startSec: 100, endSec: 110 };
+
+    expect(clampHandle("in", 0, range, window, 20)).toEqual({
+      startSec: 90,
+      endSec: 110,
+    });
+  });
+
+  test("既定の範囲も上限で頭打ちになる", () => {
+    // IN を押しただけで上限を超えた範囲ができると、validateRange を
+    // 通らないまま (OUT ボタンを押さずに) 録画できてしまう
+    expect(makeDefaultRange(100, 600, 10)).toEqual({
+      startSec: 100,
+      endSec: 110,
+    });
+  });
+
+  test("上限が既定の長さより長ければ既定の長さのまま", () => {
+    expect(makeDefaultRange(100, 600, 120)).toEqual({
+      startSec: 100,
+      endSec: 115,
+    });
   });
 });

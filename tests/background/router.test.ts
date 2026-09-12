@@ -1,4 +1,6 @@
 import { describe, expect, test } from "vitest";
+import { makeVideoMeta } from "../helpers/fixtures";
+import { DEFAULT_SETTINGS } from "@/shared/settings";
 import {
   createRouter,
   isTabUnreachable,
@@ -7,9 +9,9 @@ import {
 } from "@/background/router";
 import type { StoredClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
-import type { ClipRange, VideoMeta } from "@/shared/types";
+import type { ClipRange } from "@/shared/types";
 
-const meta: VideoMeta = { videoId: "abc123", title: "テスト動画" };
+const meta = makeVideoMeta();
 const range: ClipRange = { startSec: 10, endSec: 40 };
 
 /** 受け手が居ないときに Chrome が返す文言 */
@@ -61,7 +63,10 @@ function makeHarness(
       sentToTab.push({ tabId, message });
     },
     openComposeTab: async () => 99,
-    loadTemplate: async () => "{title}\n\n{url}",
+    loadSettings: async () => ({
+      ...DEFAULT_SETTINGS,
+      template: "{title}\n\n{url}{tags}",
+    }),
     now: () => Date.UTC(2026, 8, 10, 3, 0, 0),
     persist: async () => undefined,
     startTimer: (_ms, onFire) => {
@@ -391,7 +396,7 @@ describe("投稿画面が用意できないとき", () => {
     // 取り消し忘れても fireTimers で状態は動かない。だからこそタイマーが
     // 実際に片付いていることを直接確認する
     expect(h.pendingTimerCount()).toBe(0);
-    expect(h.router.getState()).toEqual({ kind: "idle" });
+    expect(h.router.getState().kind).toBe("posted");
   });
 });
 
@@ -953,12 +958,49 @@ describe("X への受け渡し", () => {
     expect(payloads).toHaveLength(2);
   });
 
-  test("添付完了で idle に戻る", async () => {
+  test("チャンネルに設定したハッシュタグが本文に入る", async () => {
+    const h = makeHarness(
+      {
+        loadSettings: async () => ({
+          ...DEFAULT_SETTINGS,
+          template: "{title}\n\n{url}{tags}",
+          // タグはチャンネルに紐づく。クリップの meta.channelId で引かれる
+          hashtagsByChannel: { [meta.channelId]: ["切り抜き", "VTuber"] },
+        }),
+      },
+      clip,
+    );
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    const payload = h.sentToTab.find(
+      (sent) => sent.message.type === "x/payload",
+    );
+    expect(payload?.message).toMatchObject({
+      text: "テスト動画\n\nhttps://youtu.be/abc123?t=10\n\n#切り抜き #VTuber",
+    });
+  });
+
+  test("タグが無ければ本文が空行で終わらない", async () => {
+    // {tags} が自分で区切りを持つので、未設定でも末尾は URL のまま
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    const payload = h.sentToTab.find(
+      (sent) => sent.message.type === "x/payload",
+    );
+    expect(payload?.message).toMatchObject({
+      text: "テスト動画\n\nhttps://youtu.be/abc123?t=10",
+    });
+  });
+
+  test("添付完了で posted へ進み、使い回せる状態になる", async () => {
     const h = makeHarness({}, clip);
     await reachComposing(h);
     await h.router.handle({ type: "x/attached" });
 
-    expect(h.router.getState()).toEqual({ kind: "idle" });
+    expect(h.router.getState().kind).toBe("posted");
   });
 
   test("投稿タブの応答が無いだけなら composing のまま添付の結果を待つ", async () => {
@@ -980,7 +1022,7 @@ describe("X への受け渡し", () => {
 
     // 添付の完了は後から届く
     await h.router.handle({ type: "x/attached" });
-    expect(h.router.getState()).toEqual({ kind: "idle" });
+    expect(h.router.getState().kind).toBe("posted");
   });
 
   test("投稿タブに受け手が居なければダウンロードへ退避する", async () => {

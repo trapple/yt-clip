@@ -7,6 +7,17 @@ export type ClipRange = {
 export type VideoMeta = {
   videoId: string;
   title: string;
+  /**
+   * 設定 (チャンネル別のハッシュタグ) を引く鍵。
+   *
+   * ハンドル (`@name`) を優先し、取れなければ `UC...`。どちらも取れなければ
+   * 空文字。**タイトルと違って throw しない。** タグが無いだけで投稿本文は
+   * 成立するので、ここで止める理由がない。
+   *
+   * **表示名は持たない。** 設定パネルが出すチャンネル名はその場で画面から
+   * 引く。保存すると改名で古くなるうえ、読む人が誰もいなかった
+   */
+  channelId: string;
 };
 
 /** 録画は成功したが通常の投稿フローに乗せられなかった理由 */
@@ -60,6 +71,20 @@ export type ClipState =
       meta: VideoMeta;
       mimeType: string;
     }
+  /**
+   * X へ添付し終えた状態。
+   *
+   * 範囲とクリップを残して**使い回せる**ようにする。同じ動画から続けて
+   * 切り抜きを作る / 同じクリップを投稿し直す、どちらも日常的に起きる。
+   * かつては `idle` に戻しており、範囲もクリップ参照も失われていた
+   */
+  | {
+      kind: "posted";
+      range: ClipRange;
+      meta: VideoMeta;
+      clipId: string;
+      mimeType: string;
+    }
   | {
       kind: "composing";
       clipId: string;
@@ -104,6 +129,8 @@ export type ClipEvent =
   | { type: "START_RECORDING" }
   | { type: "SEEK_DONE" }
   | { type: "OUT_REACHED" }
+  /** 録り始めてから戻る。範囲は残すので、そのまま録り直せる */
+  | { type: "CANCEL_RECORDING" }
   | { type: "BLOB_READY"; clipId: string; mimeType: string }
   | { type: "RETAKE" }
   | { type: "POST" }

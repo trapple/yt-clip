@@ -78,119 +78,110 @@ export function attachFile(
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-/** paste が反映されるのを待つ時間 (ミリ秒) */
-const PASTE_SETTLE_MS = 100;
-
-/** 一致を確かめるために見る先頭の文字数 */
-const HEAD_LENGTH = 20;
-
-/** 添付後に本文が生き残ったか確かめる間隔と回数 */
-const SURVIVE_CHECK_MS = 250;
-const SURVIVE_CHECK_TIMES = 8;
 
 /**
- * 入力された本文に、渡したテキストの先頭が現れているかを見る。
+ * 投稿画面の入力欄に本文を入れる。
  *
- * 改行を落としてから比べる。Draft.js は貼り付けたテキストの改行を
- * ブロック要素の境目として表し、テキストノードには改行文字を置かない。
- * そのため本文が正しく入っていても `textContent` に改行は現れず、
- * 改行を含んだまま比較すると必ず一致しない。本文テンプレートは
- * 「タイトル + 空行 + URL」なので、タイトルが短いと先頭 20 文字に
- * 改行が入り、成功しているのに失敗と判定してしまう。
+ * **paste しか使ってはいけない。** `document.execCommand("insertText")` は
+ * Draft.js に対して壊れた入り方をする。実機で測って確かめた内訳:
+ *
+ * 1. Chromium の `ExecuteInsertText` は `TypingCommand` を直接呼ぶので
+ *    `textInput` が出ず、Draft.js の `beforeinput` ハンドラが**一度も走らない**
+ * 2. Chromium が改行ごとに挿入を分割し、`input` を複数回発火させる
+ * 3. Draft.js は `input` を「スペルチェックの突合」として扱い、キャレットのある
+ *    **1 つの leaf だけ**をモデルへ書き戻す。分割で複製された要素は元と同じ
+ *    `data-offset-key` を持つため、後続の断片が先頭ブロックを上書きする
+ *
+ * 結果、**画面には全部入っているのにモデルにはタグだけが繰り返し入る**という
+ * 形で壊れた。X が投稿するのはモデル側なので、見えているものは当てにならない。
+ *
+ * `editOnPaste` は違う。clipboard のテキストを自分で改行分割し、内部の
+ * SelectionState を使ってモデルを差し替え、React が描き直す。**DOM を自分で
+ * 触らないので、モデルと DOM がずれない。**
  */
-export function containsHead(actual: string, expected: string): boolean {
-  const withoutBreaks = (value: string): string =>
-    value.replace(/[\r\n]/g, "");
-  return withoutBreaks(actual).includes(
-    withoutBreaks(expected).slice(0, HEAD_LENGTH),
-  );
+
+/** 貼り付けた結果が画面に出るまで待つ上限 */
+const PASTE_RENDER_TIMEOUT_MS = 2000;
+/** 選択が Draft.js へ届くまで待つ上限 */
+const SELECTION_TIMEOUT_MS = 300;
+
+/**
+ * Draft.js が管理しているブロックから、モデルの中身を組み立てる。
+ *
+ * **`textContent` を見てはいけない。** 壊れた入り方をしたときに残る幽霊 DOM が
+ * 混ざり、入っていないものが入って見える
+ */
+export function readBlocks(editor: HTMLElement): string {
+  const blocks = editor.querySelectorAll<HTMLElement>("[data-block]");
+  if (blocks.length === 0) return "";
+  return Array.from(blocks)
+    .map((block) => block.textContent ?? "")
+    .join("\n");
 }
 
-/**
- * 本文を入力する。contenteditable への代入では React の state に反映されない。
- *
- * 実機で execCommand が false を返して失敗したことがある。ページの
- * コンテキストでは同じコードが成功するため、原因は content script の
- * 実行環境かタイミングにあるが断定できていない。そのため対策を重ねている。
- */
-/** 入力欄の中身を選択して消す */
-function clearEditor(editor: HTMLElement): void {
+/** 指定の出来事を待つ。来なければ時間切れで戻る */
+function waitFor(
+  target: EventTarget,
+  type: string,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      target.removeEventListener(type, done);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    target.addEventListener(type, done, { once: true });
+  });
+}
+
+/** 入力欄の中身を全部選ぶ。Draft.js に選択が届くまで待つ */
+async function selectAll(editor: HTMLElement): Promise<void> {
   editor.focus();
+  // **focusin を自分で出すこと。** React は focusin で activeElement を追う。
+  // ウィンドウが OS のフォーカスを持たないと focus() では出ず、選択が
+  // Draft.js へ届かないまま貼り付けが末尾に足される
+  editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+
   const range = document.createRange();
   range.selectNodeContents(editor);
   const selection = window.getSelection();
   selection?.removeAllRanges();
   selection?.addRange(range);
-  document.execCommand("delete");
+
+  // Draft.js は DOM の選択ではなく内部の SelectionState を使う。
+  // selectionchange を経由して届くので、それを待つ
+  await waitFor(document, "selectionchange", SELECTION_TIMEOUT_MS);
 }
 
-/**
- * 添付した後も本文が残っているか確かめ、消えていたら入れ直す。
- *
- * **ファイルを添付すると X が入力欄を作り直すことがあり、先に入れた本文が
- * 消える。** 実機で、動画は「準備完了」になっているのに本文だけが空、という
- * 形で出た。二重入力を塞ぐまで表に出なかったのは、二回目の入力が添付の後に
- * 走っていて結果的に入れ直しになっていたため。
- *
- * 作り直しは添付の直後に一度起きるだけとは限らないので、しばらく見張る。
- */
-export async function keepText(
-  text: string,
-  findEditor: () => HTMLElement | null,
-  wait: (ms: number) => Promise<void> = (ms) =>
-    new Promise((resolve) => setTimeout(resolve, ms)),
-): Promise<void> {
-  for (let attempt = 0; attempt < SURVIVE_CHECK_TIMES; attempt += 1) {
-    await wait(SURVIVE_CHECK_MS);
+/** 貼り付けた結果が画面に出るまで待つ */
+function waitForRender(editor: HTMLElement, expected: string): Promise<boolean> {
+  if (readBlocks(editor) === expected) return Promise.resolve(true);
 
-    const editor = findEditor();
-    // 作り直しの最中で入力欄が居ないことがある。次の周回で見直す
-    if (editor === null) continue;
-
-    // **「本文が見当たらない」ではなく「空」を条件にすること。** 守りたいのは
-    // 「作り直しで空になった」場面だけで、そのとき中身は必ず空になる。
-    // 本文の一致で判定すると、この 2 秒の間にユーザーが本文を書き換えたときに
-    // 手で書いた内容を消して元に戻してしまう
-    if ((editor.textContent ?? "").trim() !== "") continue;
-
-    console.info("[yt-clip] 添付で消えた本文を入れ直します");
-    // **入れる前に消すこと。** insertText は末尾に足すので、判定が一度でも
-    // 滑ると本文が積み上がる (実機で URL が 3 回並んだ)
-    clearEditor(editor);
-    if ((editor.textContent ?? "").trim() !== "") {
-      // 消せていないまま入れると末尾に足されて積み上がる。諦める方が害が小さい
-      console.warn("[yt-clip] 入力欄を空にできなかったので入れ直しをやめます");
-      return;
-    }
-    await insertText(editor, text);
-
-    // 入れた直後は反映が間に合わず「まだ無い」と読めることがある。
-    // 一周ぶん待ってから次の確認に入る
-    await wait(SURVIVE_CHECK_MS);
-  }
+  return new Promise((resolve) => {
+    const observer = new MutationObserver(() => {
+      if (readBlocks(editor) !== expected) return;
+      observer.disconnect();
+      clearTimeout(timer);
+      resolve(true);
+    });
+    const timer = setTimeout(() => {
+      observer.disconnect();
+      resolve(readBlocks(editor) === expected);
+    }, PASTE_RENDER_TIMEOUT_MS);
+    observer.observe(editor, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
 }
 
-export async function insertText(
-  editor: HTMLElement,
-  text: string,
-): Promise<void> {
-  editor.focus();
+/** 1 回分の貼り付け。入ったかどうかを返す */
+async function pasteOnce(editor: HTMLElement, text: string): Promise<boolean> {
+  await selectAll(editor);
 
-  // focus だけでは選択範囲が要素内に入らないことがあり、
-  // その場合 execCommand は対象を見つけられずに false を返す
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  range.collapse(false);
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-
-  if (document.execCommand("insertText", false, text)) {
-    console.info("[yt-clip] 本文を execCommand で入力しました");
-    return;
-  }
-
-  // Draft.js はペーストを自前で処理するので、そちらに乗せる
   const transfer = new DataTransfer();
   transfer.setData("text/plain", text);
   editor.dispatchEvent(
@@ -200,17 +191,34 @@ export async function insertText(
       cancelable: true,
     }),
   );
-  await new Promise((resolve) => setTimeout(resolve, PASTE_SETTLE_MS));
 
-  // 入ったかどうかは戻り値では判断できない (preventDefault の有無しか分からない)。
-  // 実際に本文へ現れたかを見る
-  if (containsHead(editor.textContent ?? "", text)) {
-    console.info("[yt-clip] 本文を paste で入力しました");
+  return waitForRender(editor, text);
+}
+
+export async function insertText(
+  editor: HTMLElement,
+  text: string,
+): Promise<void> {
+  // **中身の一致で判定すること。** 先頭だけを見ると、モデルに一部しか
+  // 入っていない壊れ方を見逃す
+  if (await pasteOnce(editor, text)) {
+    console.info(`[yt-clip] 本文を paste で入力しました (${text.length} 文字)`);
     return;
   }
 
-  throw new Error("本文を入力できませんでした");
+  // 一度だけやり直す。選択が届かず末尾に足された場合はここで直る
+  if (await pasteOnce(editor, text)) {
+    console.info(
+      `[yt-clip] 本文を paste で入力しました (2 回目、${text.length} 文字)`,
+    );
+    return;
+  }
+
+  throw new Error(
+    `本文を入力できませんでした (入力欄: ${readBlocks(editor).slice(0, 40)})`,
+  );
 }
+
 
 /**
  * service worker へ添付の結果を伝える。
@@ -251,7 +259,42 @@ function notify(message: Message): void {
 // 単体テスト (jsdom) は chrome グローバルを持たないため import 時点の副作用が
 // ReferenceError で落ちる。テストのために振る舞いを変えるのではなく、
 // 拡張コンテキスト外で読み込まれた場合に安全側へ倒すガードとして扱う。
+/**
+ * 受け取った本文と動画を投稿画面へ載せる。
+ *
+ * **本文が先、添付が後。** ファイルを添付すると X が UI を作り直すため、
+ * その最中に入力すると焦点が定まらない。
+ *
+ * 投稿ボタンは押さない。最終確認はユーザーに委ねる。
+ */
+export async function attachPayload(message: {
+  base64: string;
+  fileName: string;
+  mimeType: string;
+  text: string;
+}): Promise<void> {
+  try {
+    const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);
+    // insertText が全選択して置き換えるので、前回の下書きはここで消える
+    await insertText(editor, message.text);
+
+    const input = await waitForElement<HTMLInputElement>(
+      X_SELECTORS.fileInput,
+    );
+    attachFile(input, buildClipFile(message));
+
+    // 入れ直しの見張りは持たない。「添付で本文が消える」と見えていたのは、
+    // execCommand が作った幽霊 DOM が再描画で消えていただけ。paste なら
+    // モデルに入るので消えない
+
+    notify({ type: "x/attached" });
+  } catch (error) {
+    notify({ type: "x/failed", reason: String(error) });
+  }
+}
+
 if (typeof chrome !== "undefined") {
+
   /**
    * **同期で `sendResponse()` を返すこと。** 応答しないと送り手の Promise は
    * `The message port closed before a response was received.` で reject し、
@@ -265,35 +308,7 @@ if (typeof chrome !== "undefined") {
     if (message.type !== "x/payload") return;
     sendResponse();
 
-    void (async () => {
-      try {
-        // 本文を先に入れる。ファイルを添付すると X が UI を作り直すため、
-        // その最中に入力すると焦点が定まらない
-        const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);
-        await insertText(editor, message.text);
-
-        const input = await waitForElement<HTMLInputElement>(
-          X_SELECTORS.fileInput,
-        );
-        attachFile(input, buildClipFile(message));
-
-        // 添付で入力欄が作り直されると本文が消える。消えたら入れ直す。
-        // **ここの失敗で添付の成功を取り消さない。** 動画は既に X に載っており、
-        // 失敗として扱うと popup がダウンロード誘導に変わってしまう
-        try {
-          await keepText(message.text, () =>
-            document.querySelector<HTMLElement>(X_SELECTORS.editor.join(",")),
-          );
-        } catch (error) {
-          console.warn(`[yt-clip] 本文の入れ直しに失敗しました: ${String(error)}`);
-        }
-
-        // 投稿ボタンは押さない。最終確認はユーザーに委ねる
-        notify({ type: "x/attached" });
-      } catch (error) {
-        notify({ type: "x/failed", reason: String(error) });
-      }
-    })();
+    void attachPayload(message);
   });
 
   // 投稿画面が開かれたことを service worker に知らせる

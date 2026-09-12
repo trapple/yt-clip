@@ -1,12 +1,13 @@
 import { describe, expect, test } from "vitest";
+import { makeVideoMeta } from "../helpers/fixtures";
 import {
   DEFAULT_TEMPLATE,
   buildYouTubeUrl,
   renderTemplate,
 } from "@/shared/template";
-import type { ClipRange, VideoMeta } from "@/shared/types";
+import type { ClipRange } from "@/shared/types";
 
-const meta: VideoMeta = { videoId: "dQw4w9WgXcQ", title: "サンプル動画" };
+const meta = makeVideoMeta({ videoId: "dQw4w9WgXcQ", title: "サンプル動画" });
 const range: ClipRange = { startSec: 75.4, endSec: 105.4 };
 
 describe("buildYouTubeUrl", () => {

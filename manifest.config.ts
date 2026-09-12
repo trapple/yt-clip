@@ -6,7 +6,8 @@ export default defineManifest({
   name: "yt-clip",
   version: "0.1.0",
   description: "YouTube の切り抜きを作って X に投稿する",
-  permissions: ["storage", "tabs", "downloads"],
+  // ダウンロードは content script がアンカー要素で行うため権限は要らない
+  permissions: ["storage", "tabs"],
   host_permissions: ["https://www.youtube.com/*", "https://x.com/*"],
   background: {
     service_worker: "src/background/sw.ts",

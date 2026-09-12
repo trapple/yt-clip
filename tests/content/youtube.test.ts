@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { Blob as NodeBlob } from "node:buffer";
+import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
 import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
 import { decodeBase64 } from "@/shared/base64";
 
@@ -23,7 +24,6 @@ import {
   FAILURE_MESSAGES,
   type ClipRange,
   type ClipState,
-  type VideoMeta,
 } from "@/shared/types";
 
 /**
@@ -34,7 +34,7 @@ import {
  * 二重に読み込むと、前のテストの observer が同じ DOM を触りに来る。
  */
 
-const META_A: VideoMeta = { videoId: "video-a", title: "動画 A" };
+const META_A = makeVideoMeta({ videoId: "video-a", title: "動画 A" });
 const RANGE: ClipRange = { startSec: 10, endSec: 20 };
 
 /** content script が service worker へ送ったメッセージ */
@@ -200,11 +200,37 @@ function buildPage(): void {
   titleText.textContent = META_A.title;
   title.append(titleText);
 
+  // チャンネル。実機の watch ページと同じく、構造化データにハンドルが入る
+  const author = document.createElement("span");
+  author.setAttribute("itemprop", "author");
+  const authorUrl = document.createElement("link");
+  authorUrl.setAttribute("itemprop", "url");
+  authorUrl.setAttribute("href", `/${META_A.channelId}`);
+  const authorName = document.createElement("link");
+  authorName.setAttribute("itemprop", "name");
+  authorName.setAttribute("content", CHANNEL.name);
+  author.append(authorUrl, authorName);
+
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
   video = installVideo();
-  document.body.append(below, title, progressBar, video.element);
+  document.body.append(below, title, author, progressBar, video.element);
+}
+
+type StorageListener = (
+  changes: Record<string, { newValue?: unknown }>,
+  areaName: string,
+) => void;
+
+/** chrome.storage.sync が返す設定。テストごとに差し替える */
+let storedSettings: Record<string, unknown> = {};
+let storageListener: StorageListener | null = null;
+
+/** 別のタブで設定が変わったことを届ける */
+function changeSettings(next: Record<string, unknown>): void {
+  storedSettings = next;
+  storageListener?.({ settings: { newValue: next } }, "sync");
 }
 
 function installGlobals(): void {
@@ -237,6 +263,19 @@ function installGlobals(): void {
   vi.stubGlobal("Blob", NodeBlob);
   vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
   vi.stubGlobal("chrome", {
+    storage: {
+      sync: {
+        get: (): Promise<Record<string, unknown>> =>
+          Promise.resolve({ settings: storedSettings }),
+        set: (): Promise<void> => Promise.resolve(),
+      },
+      // 別のタブで設定を変えられたときに拾う経路
+      onChanged: {
+        addListener: (fn: StorageListener): void => {
+          storageListener = fn;
+        },
+      },
+    },
     runtime: {
       onMessage: {
         addListener: (fn: TabListener): void => {
@@ -382,6 +421,9 @@ beforeAll(async () => {
   };
 });
 
+/** 自動保存でダウンロードされたファイル名 */
+let saved: string[] = [];
+
 beforeEach(async () => {
   history.pushState({}, "", "/watch?v=video-a");
   buildPage();
@@ -389,6 +431,17 @@ beforeEach(async () => {
   recorders = [];
   stoppedTracks = 0;
   rejectMessageType = null;
+  saved = [];
+  storedSettings = {};
+
+  // jsdom は Blob の URL を作れない。自動保存の経路を実際に通すため補う
+  URL.createObjectURL = (): string => "blob:fake";
+  URL.revokeObjectURL = (): void => undefined;
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    saved.push(this.download);
+  });
 
   // DOM を作り直したので、observer に拾わせて操作 UI を載せ直す
   document.body.append(document.createElement("div"));
@@ -412,7 +465,7 @@ describe("範囲再生の監視", () => {
     emit({ kind: "ready", range: RANGE, meta: META_A });
 
     // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
-    clickButton("範囲を再生");
+    clickButton("▶ 範囲を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
@@ -447,7 +500,7 @@ describe("範囲再生の監視", () => {
 
   test("録画に入ると範囲再生の監視は解除される", async () => {
     emit({ kind: "ready", range: RANGE, meta: META_A });
-    clickButton("範囲を再生");
+    clickButton("▶ 範囲を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
@@ -496,7 +549,7 @@ describe("動画の入れ替わり", () => {
 
     // 「範囲を再生」を押しても、この動画は動かない
     const beforeSec = video.element.currentTime;
-    clickButton("範囲を再生");
+    clickButton("▶ 範囲を見る");
     await flush();
 
     expect(video.element.currentTime).toBe(beforeSec);
@@ -578,6 +631,10 @@ describe("録画の後始末", () => {
     await flush();
 
     expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+
+    // **送る前に自動保存していること。** ここが外れても他のテストは通る。
+    // 投稿の成否に関わらず手元に残すのが目的なので、配線そのものを固定する
+    expect(saved).toEqual(["yt-clip-video-a-10s.mp4"]);
 
     // **送る前に表示行列を直していること。** ここが外れても他のテストは
     // 全部通ってしまう (実際に外して確認した)。#6 はこの branch でいちばん
@@ -706,5 +763,227 @@ describe("拡大バーを操作できる状態", () => {
     expect(statusText()).toContain("受け付けられませんでした");
     // 送っていない範囲 (0:50) ではなく、状態機械が持つ範囲に戻る
     expect(handleLabels()).toEqual(["開始 0:10", "終了 0:20"]);
+  });
+});
+
+describe("状態ごとの操作", () => {
+  const labels = (): string[] =>
+    Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        "#yt-clip-bar-actions button",
+      ),
+    ).map((button) => button.textContent ?? "");
+
+  test("状態が変わると出る操作も変わる", () => {
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    expect(labels()).toEqual(["● 録画"]);
+
+    // 録り始めてからでも戻れる
+    emit({ kind: "recording", range: RANGE, meta: META_A });
+    expect(labels()).toEqual(["■ 中止"]);
+
+    emit({
+      kind: "posted",
+      range: RANGE,
+      meta: META_A,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    expect(labels()).toEqual(["X にもう一度投稿", "取り直す"]);
+  });
+
+  test("操作を押すと状態機械へイベントが飛ぶ", () => {
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+
+    document
+      .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
+      ?.click();
+
+    expect(clipEvents()).toContainEqual({ type: "START_RECORDING" });
+  });
+
+  test("投稿した後も拡大バーを触れる", () => {
+    // 投稿のたびに範囲を作り直すのは使い方に合っていない
+    emit({
+      kind: "posted",
+      range: RANGE,
+      meta: META_A,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+
+    expect(rangeBarElement().style.pointerEvents).not.toBe("none");
+  });
+});
+
+describe("録画の中止", () => {
+  test("中止を押すと状態機械へ伝わる", () => {
+    emit({ kind: "recording", range: RANGE, meta: META_A });
+
+    document
+      .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
+      ?.click();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+  });
+
+  test("録画から離れると録画も監視も止まる", async () => {
+    // 中止の停止処理は「recording から外れた」ことを見て走る。
+    // 中止のためだけの後始末は足していないので、ここが唯一の担保になる
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "recording", range: RANGE, meta: META_A });
+    command("recorder/start");
+    await flush();
+    const recorder = startedRecorder();
+    expect(recorder.state).toBe("recording");
+
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    await flush();
+
+    expect(recorder.state).toBe("inactive");
+    expect(stoppedTracks).toBe(1);
+    // 中止した分は送らない = 保存もされない
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(false);
+    expect(saved).toEqual([]);
+  });
+});
+
+describe("設定", () => {
+  function settingsButton(): HTMLButtonElement {
+    const button = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button"),
+    ).find((candidate) => candidate.textContent === "⚙");
+    if (button === undefined) throw new Error("設定ボタンがありません");
+    return button;
+  }
+
+  test("バーに設定ボタンが出る", () => {
+    expect(settingsButton().title).toBe("設定");
+  });
+
+  test("押すとパネルが開き、もう一度押すと閉じる", () => {
+    const panel = document.querySelector<HTMLElement>(
+      "#yt-clip-setting-hashtags",
+    )?.closest("div[style]")?.parentElement;
+    if (panel == null) throw new Error("パネルがありません");
+    expect(panel.hidden).toBe(true);
+
+    settingsButton().click();
+    expect(panel.hidden).toBe(false);
+
+    settingsButton().click();
+    expect(panel.hidden).toBe(true);
+  });
+});
+
+describe("最大秒数の設定", () => {
+  /** 直近に送った MARK_IN の範囲 */
+  function markedRange(): ClipRange {
+    const message = [...sent]
+      .reverse()
+      .find(
+        (item): item is Extract<Message, { type: "clip/event" }> =>
+          item.type === "clip/event" && item.event.type === "MARK_IN",
+      );
+    if (message === undefined) throw new Error("MARK_IN が送られていません");
+    if (message.event.type !== "MARK_IN") throw new Error("MARK_IN ではない");
+    return message.event.range;
+  }
+
+  test("IN で送る meta にチャンネルが入る", async () => {
+    // service worker はここで受け取った channelId でタグを引く
+    video.element.currentTime = 100;
+
+    clickButton("IN");
+    await flush();
+
+    const message = [...sent].find(
+      (item) => item.type === "clip/event" && item.event.type === "MARK_IN",
+    );
+    expect(message).toMatchObject({
+      event: { meta: { channelId: META_A.channelId } },
+    });
+  });
+
+  test("既定では 15 秒の範囲ができる", async () => {
+    video.element.currentTime = 100;
+
+    clickButton("IN");
+    await flush();
+
+    expect(markedRange()).toEqual({ startSec: 100, endSec: 115 });
+  });
+
+  test("上限を既定の長さより短くすると、IN の範囲も短くなる", async () => {
+    // IN を押しただけで上限を超えた範囲ができると、validateRange を
+    // 通らないまま (OUT を押さずに) 録画できてしまう
+    changeSettings({ maxClipSec: 10 });
+    await flush();
+    video.element.currentTime = 100;
+
+    clickButton("IN");
+    await flush();
+
+    expect(markedRange()).toEqual({ startSec: 100, endSec: 110 });
+  });
+
+  /** 拡大バーの OUT ハンドルを窓の右端まで引っ張る */
+  function dragOutToEnd(): void {
+    const track = rangeBarElement().querySelector<HTMLElement>(
+      "[data-role=track]",
+    );
+    if (track === null) throw new Error("トラックがありません");
+    track.getBoundingClientRect = () => ({ left: 0, width: 100 }) as DOMRect;
+
+    const handles = [...rangeBarElement().querySelectorAll<HTMLElement>("[aria-label]")];
+    const outHandle = handles[1];
+    if (outHandle === undefined) throw new Error("終了ハンドルがありません");
+    outHandle.setPointerCapture = () => undefined;
+    outHandle.releasePointerCapture = () => undefined;
+
+    outHandle.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, clientX: 0 }),
+    );
+    outHandle.dispatchEvent(
+      new MouseEvent("pointermove", { bubbles: true, clientX: 1000 }),
+    );
+  }
+
+  test("作り直されたバーにも設定した上限が効く", async () => {
+    // YouTube の再描画でバーは作り直される。**新しいバーは既定値で始まる**ので、
+    // 作った直後に流し込まないと、そのバーでだけ上限が 60 秒に戻る
+    changeSettings({ maxClipSec: 20 });
+    await flush();
+
+    // 再描画を起こしてバーを作り直させる
+    buildPage();
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    video.element.currentTime = 100;
+    clickButton("IN");
+    await flush();
+    // 実機では service worker が state/changed を配る。それで拡大バーが有効になる
+    emit({ kind: "ready", range: { startSec: 100, endSec: 115 }, meta: META_A });
+    await flush();
+
+    dragOutToEnd();
+
+    expect(handleLabels()[1]).toBe("終了 2:00");
+  });
+
+  test("上限を超える OUT は理由を出して受け付けない", async () => {
+    changeSettings({ maxClipSec: 10 });
+    await flush();
+    video.element.currentTime = 100;
+    clickButton("IN");
+    await flush();
+
+    video.element.currentTime = 130;
+    clickButton("OUT");
+    await flush();
+
+    // 既定の 60 秒ではなく、設定した 10 秒が文言に出る
+    expect(statusText()).toContain("10 秒までです");
   });
 });

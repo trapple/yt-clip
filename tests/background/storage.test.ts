@@ -1,4 +1,5 @@
 import "fake-indexeddb/auto";
+import { makeVideoMeta } from "../helpers/fixtures";
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   ClipNotFoundError,
@@ -14,7 +15,7 @@ function makeClip(id: string): StoredClip {
     blob: new Blob(["ダミー動画データ"], { type: "video/mp4" }),
     mimeType: "video/mp4",
     range: { startSec: 10, endSec: 40 },
-    meta: { videoId: "abc123", title: "テスト動画" },
+    meta: makeVideoMeta(),
     createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
   };
 }
@@ -31,7 +32,7 @@ describe("クリップ保管", () => {
     expect(found.id).toBe("clip-1");
     expect(found.mimeType).toBe("video/mp4");
     expect(found.range).toEqual({ startSec: 10, endSec: 40 });
-    expect(found.meta).toEqual({ videoId: "abc123", title: "テスト動画" });
+    expect(found.meta).toEqual(makeVideoMeta());
     expect(found.createdAt).toBe(Date.UTC(2026, 8, 10, 3, 0, 0));
     expect(await found.blob.text()).toBe("ダミー動画データ");
   });

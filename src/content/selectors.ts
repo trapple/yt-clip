@@ -22,6 +22,32 @@ export const YT_SELECTORS = {
     "h1.title yt-formatted-string",
     'meta[itemprop="name"]',
   ],
+  /**
+   * チャンネルへのリンク。ここから `UC...` かハンドル (`@name`) を取り出す。
+   *
+   * **実機では `UC...` はもうページに出ていない** (2026-09 時点)。
+   * `meta[itemprop="channelId"]` は存在せず、オーナー欄のリンクもすべて
+   * ハンドルだった。**鍵にはハンドルを優先し**、`UC...` は保険として探す
+   * (理由は player.ts の getChannel を参照)。
+   *
+   * **構造化データ (schema.org) を先に置く。** 見た目のレイアウトは
+   * A/B テストで利用者ごとに違いうるが、こちらは変わりにくい
+   */
+  channelLink: [
+    'meta[itemprop="channelId"]',
+    'span[itemprop="author"] link[itemprop="url"]',
+    "#owner ytd-channel-name a",
+    "ytd-video-owner-renderer a",
+    "#upload-info a",
+    "#owner a",
+    "ytd-channel-name a",
+  ],
+  /** チャンネル名。表示にしか使わない */
+  channelName: [
+    'span[itemprop="author"] link[itemprop="name"]',
+    "#owner ytd-channel-name a",
+    "ytd-channel-name #text",
+  ],
   /** 範囲を帯で重ねる対象。プレイヤーのシークバー */
   progressBar: ".ytp-progress-bar",
 } as const;

@@ -1,7 +1,7 @@
 import { createRouter, type RouterSnapshot } from "@/background/router";
 import { getClip, saveClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
-import { DEFAULT_TEMPLATE } from "@/shared/template";
+import { loadSettings } from "@/shared/settings";
 
 const SESSION_KEY = "router-snapshot";
 const COMPOSE_URL = "https://x.com/compose/post";
@@ -34,13 +34,7 @@ const ready = loadSnapshot().then((snapshot) =>
         }
         return tab.id;
       },
-      loadTemplate: async () => {
-        const stored = await chrome.storage.sync.get("template");
-        const template: unknown = stored.template;
-        return typeof template === "string" && template !== ""
-          ? template
-          : DEFAULT_TEMPLATE;
-      },
+      loadSettings,
       now: () => Date.now(),
       persist: async (snapshot) => {
         await chrome.storage.session.set({ [SESSION_KEY]: snapshot });
