@@ -34,7 +34,7 @@
 | 登録料 5 USD (1 回きり) | 未 | [Developer Dashboard](https://chrome.google.com/webstore/devconsole) で支払う |
 | zip パッケージ | `npm run package` | `dist` を固めたもの |
 | アイコン 128x128 | 済 | `public/icons/icon-128.png` |
-| スクリーンショット 1280x800 (1〜5 枚) | **未** | 実機で撮る。手順は §4 |
+| スクリーンショット 1280x800 (1〜5 枚) | `npm run screenshots` | 2 枚は自動。X の投稿画面だけ手撮り (§4) |
 | プライバシーポリシーの URL | **未** | 本文は `docs/privacy-policy.md`。公開 URL が要る (§3) |
 | 権限の説明文 | 済 | §2 をそのまま貼る |
 | 単一用途の説明 | 済 | §2 |
@@ -87,16 +87,26 @@
 
 ## 4. スクリーンショット
 
-1280x800 (または 640x400) を 1〜5 枚。**実機で撮る。**
+```bash
+npm run screenshots   # release/screenshots/ に 1280x800 を 2 枚
+```
 
-撮るとよいもの:
+1. `1-range.png` — 再生画面の下に出た操作バーと拡大バー (IN/OUT を置いた状態)
+2. `2-settings.png` — 設定パネルを開いた状態
 
-1. 再生画面の下に出た操作バーと拡大バー (IN/OUT を置いた状態)
-2. 設定パネルを開いた状態
-3. X の投稿画面に本文と動画が入った状態
+**題材は Big Buck Bunny (Blender Foundation, Creative Commons)。** 掲載画像には
+動画の中身がそのまま写るので、権利関係で問題にならないものを使う。
+関連動画の欄は隠してある (他人の動画のサムネイルを写さないため)。
 
-**注意:** 他人の動画の画面がそのまま映る。自分の権利が及ぶ動画か、
-権利関係の問題が起きない動画を選ぶこと。
+**X の投稿画面はログインが要るので自動化していない。** 3 枚目が欲しければ
+手で撮ること。本文と動画が入った状態が分かりやすい。
+
+出力は 1280x800 / 24bit RGB / アルファ無しで、そのまま上げられる。
+アップローダに形式を拒まれたら JPEG へ変換する:
+
+```bash
+sips -s format jpeg -s formatOptions 90 release/screenshots/1-range.png --out release/screenshots/1-range.jpg
+```
 
 ## 5. 公開までの手順
 
