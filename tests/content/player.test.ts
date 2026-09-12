@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
+// @vitest-environment-options { "url": "https://www.youtube.com/watch?v=abc123" }
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   ElementNotFoundError,
+  getVideoMeta,
   getVideo,
   onReachTime,
   parseVideoId,
@@ -119,5 +121,49 @@ describe("onReachTime", () => {
     advanceTo(50);
 
     expect(onReach).not.toHaveBeenCalled();
+  });
+});
+
+describe("getVideoMeta", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    document.head.innerHTML = "";
+    document.title = "";
+  });
+
+  test("見出しからタイトルを拾う", () => {
+    document.body.innerHTML =
+      '<h1 class="ytd-watch-metadata"><yt-formatted-string>動画の題名</yt-formatted-string></h1>';
+    expect(getVideoMeta()).toEqual({ videoId: "abc123", title: "動画の題名" });
+  });
+
+  test("先頭の候補が空なら次の候補へ進む", () => {
+    // 要素に一致するだけでは足りない。実機に、一致はするが中身が空になる
+    // 画面構成があり、本文からタイトルだけが消えた
+    document.body.innerHTML =
+      '<h1 class="ytd-watch-metadata"><yt-formatted-string></yt-formatted-string></h1>' +
+      '<div id="title"><h1><yt-formatted-string>本当の題名</yt-formatted-string></h1></div>';
+    expect(getVideoMeta().title).toBe("本当の題名");
+  });
+
+  test("meta 要素からも拾える", () => {
+    document.head.innerHTML = '<meta itemprop="name" content="メタの題名">';
+    expect(getVideoMeta().title).toBe("メタの題名");
+  });
+
+  test("見出しが無ければタブのタイトルから復元する", () => {
+    document.title = "タブの題名 - YouTube";
+    expect(getVideoMeta().title).toBe("タブの題名");
+  });
+
+  test("タブのタイトルの未読件数を落とす", () => {
+    document.title = "(12) タブの題名 - YouTube";
+    expect(getVideoMeta().title).toBe("タブの題名");
+  });
+
+  test("どこからも取れなければ握り潰さず throw する", () => {
+    // 空のまま進むと、本文が改行だけで始まる不可解な形になる
+    document.title = "";
+    expect(() => getVideoMeta()).toThrow(ElementNotFoundError);
   });
 });

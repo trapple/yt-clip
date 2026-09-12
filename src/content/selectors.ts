@@ -11,7 +11,17 @@ export const YT_SELECTORS = {
    * さらにマウスを外したときプレイヤーの UI ごと隠れてしまう
    */
   mountAnchor: "#below",
-  title: "h1.ytd-watch-metadata yt-formatted-string",
+  /**
+   * 動画タイトル。画面構成によって当たる要素が変わるため候補を順に試す。
+   * 実機で、先頭の候補に一致はするが中身が空になる環境があった
+   * (本文にタイトルが入らない形で表に出た)
+   */
+  title: [
+    "h1.ytd-watch-metadata yt-formatted-string",
+    "#title h1 yt-formatted-string",
+    "h1.title yt-formatted-string",
+    'meta[itemprop="name"]',
+  ],
   /** 範囲を帯で重ねる対象。プレイヤーのシークバー */
   progressBar: ".ytp-progress-bar",
 } as const;

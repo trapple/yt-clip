@@ -37,15 +37,48 @@ export function isAdPlaying(): boolean {
   return player?.classList.contains("ad-showing") ?? false;
 }
 
-export function getVideoMeta(): VideoMeta {
-  const titleElement = document.querySelector(YT_SELECTORS.title);
-  if (titleElement === null) {
-    throw new ElementNotFoundError(YT_SELECTORS.title);
+/**
+ * ページ見出しから動画タイトルを拾う。
+ *
+ * 候補を順に試し、**中身が空でない最初のもの**を採る。要素に一致するだけでは
+ * 足りない: 実機に、先頭の候補に一致はするが中身が空になる画面構成があり、
+ * 投稿本文からタイトルだけが消える形で表に出た。
+ */
+function findTitleInPage(): string | null {
+  for (const selector of YT_SELECTORS.title) {
+    const element = document.querySelector(selector);
+    if (element === null) continue;
+
+    // meta 要素は表示されないので content 属性に入っている
+    const text =
+      element instanceof HTMLMetaElement
+        ? element.content
+        : (element.textContent ?? "");
+    const trimmed = text.trim();
+    if (trimmed !== "") return trimmed;
   }
-  return {
-    videoId: parseVideoId(location.href),
-    title: titleElement.textContent?.trim() ?? "",
-  };
+  return null;
+}
+
+/**
+ * タブのタイトルから動画タイトルを復元する。
+ * 見出しの要素構成が変わっても、ここは同じ形で残りやすい
+ */
+function titleFromDocument(): string | null {
+  // 「(3) 動画名 - YouTube」のような未読件数と末尾を落とす
+  const withoutCount = document.title.replace(/^\(\d+\)\s*/, "");
+  const withoutSuffix = withoutCount.replace(/\s*-\s*YouTube\s*$/, "");
+  const trimmed = withoutSuffix.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+export function getVideoMeta(): VideoMeta {
+  const title = findTitleInPage() ?? titleFromDocument();
+  if (title === null) {
+    // 空のまま進むと、投稿本文が改行だけで始まる不可解な形になる
+    throw new ElementNotFoundError(YT_SELECTORS.title.join(" / "));
+  }
+  return { videoId: parseVideoId(location.href), title };
 }
 
 /**
