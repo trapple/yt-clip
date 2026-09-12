@@ -57,8 +57,9 @@ describe("プレビューと投稿", () => {
     mimeType: "video/mp4",
   };
 
-  test("preview では投稿と取り直しができる", () => {
-    const view = describeState(preview);
+  test("録画できたことを伝える", () => {
+    // 操作はページ内バーが持つ。popup は何が起きたかだけを映す
+    expect(describeState(preview).message).toContain("録画");
   });
 
   test("composing は投稿画面側の操作を促しつつ抜け道を残す", () => {

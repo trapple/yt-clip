@@ -16,6 +16,7 @@ import {
   type BarAction,
 } from "@/content/actions";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
+import { BAR_STYLE } from "@/content/styles";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
 import { saveToDownloads } from "@/content/save";
 import { makeDefaultRange } from "@/content/range-math";
@@ -62,6 +63,8 @@ let rangeEditable = false;
 let cancelWatch: (() => void) | null = null;
 let cancelPreview: (() => void) | null = null;
 let rangeBar: RangeBar | null = null;
+/** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
+let playheadWatched = false;
 let handle: RecorderHandle | null = null;
 
 /**
@@ -375,6 +378,9 @@ function makeButton(
   const button = document.createElement("button");
   button.textContent = label;
   button.dataset.primary = primary ? "true" : "false";
+  button.style.cssText = primary
+    ? BAR_STYLE.primaryButton
+    : BAR_STYLE.secondaryButton;
   button.addEventListener("click", guard(onClick));
   return button;
 }
@@ -635,40 +641,54 @@ async function finishRecording(): Promise<void> {
 function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
-  bar.style.cssText =
-    "display:flex;flex-direction:column;gap:4px;padding:8px 0;color:var(--yt-spec-text-primary,#fff);font-size:13px;";
+  bar.style.cssText = BAR_STYLE.root;
 
   const row = document.createElement("div");
-  row.style.cssText = "display:flex;gap:8px;align-items:center;";
+  row.style.cssText = BAR_STYLE.row;
 
-  const inButton = document.createElement("button");
-  inButton.textContent = "IN";
-  inButton.addEventListener("click", guard(onMarkIn));
-
-  const outButton = document.createElement("button");
-  outButton.textContent = "OUT";
-  outButton.addEventListener("click", guard(onMarkOut));
-
-  const playButton = document.createElement("button");
-  playButton.textContent = "範囲を再生";
-  playButton.addEventListener("click", guard(() => void playRange()));
+  // 常に出ている操作。主操作は状態ごとに変わる側 (renderActions) が持つ
+  const inButton = makeButton("IN", false, onMarkIn);
+  const outButton = makeButton("OUT", false, onMarkOut);
+  const playButton = makeButton("▶ 範囲を見る", false, () => void playRange());
 
   const status = document.createElement("span");
   status.id = `${BAR_ID}-status`;
+  status.style.cssText = BAR_STYLE.status;
   status.textContent = "IN を押して開始位置を指定";
 
   // 状態ごとに中身を入れ替える箱。押しても拒まれるだけの操作は出さない
   const actions = document.createElement("div");
   actions.id = ACTIONS_ID;
-  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+  actions.style.cssText = BAR_STYLE.row;
 
   row.append(inButton, outButton, playButton, actions, status);
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される
   rangeBar = createRangeBar({ onScrub, onCommit: onRangeCommitted });
   rangeBar.element.id = RANGE_ID;
-  bar.append(row, rangeBar.element);
+  // 拡大バーを上、操作を下に置く。範囲を見ながらボタンへ手を伸ばす順番
+  bar.append(rangeBar.element, row);
   return bar;
+}
+
+/**
+ * 再生位置を拡大バーへ流し続ける。
+ *
+ * 動画要素は SPA 遷移で差し替わるため、掴んだ参照を持ち回らず毎回取り直す。
+ * 取れないときは目印を消すだけにして、次のフレームで見直す
+ */
+function watchPlayhead(): void {
+  const step = (): void => {
+    try {
+      rangeBar?.setPlayhead(getVideo().currentTime);
+    } catch {
+      // 動画要素がまだ無いか差し替えの最中。位置を示しようがないので消す。
+      // ここで投げると監視が止まり、以降ずっと更新されなくなる
+      rangeBar?.setPlayhead(null);
+    }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function mount(): void {
@@ -687,6 +707,13 @@ function mount(): void {
   // 先頭に入れてプレイヤーのすぐ下に置く。タイトルより下だと、操作するたびに
   // 画面をスクロールして動画と往復することになる
   anchor.insertBefore(bar, anchor.firstChild);
+
+  // 監視は 1 度だけ張る。mount は DOM 変化のたびに呼ばれるので、
+  // ここで毎回張ると同じ更新が何本も走る
+  if (!playheadWatched) {
+    playheadWatched = true;
+    watchPlayhead();
+  }
 
   // 作り直したバーは空で無効の状態。確定済みの範囲があれば載せ直す
   rangeBar?.setEnabled(canAdjustRange());

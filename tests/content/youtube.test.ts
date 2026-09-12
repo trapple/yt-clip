@@ -425,7 +425,7 @@ describe("範囲再生の監視", () => {
     emit({ kind: "ready", range: RANGE, meta: META_A });
 
     // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
-    clickButton("範囲を再生");
+    clickButton("▶ 範囲を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
@@ -460,7 +460,7 @@ describe("範囲再生の監視", () => {
 
   test("録画に入ると範囲再生の監視は解除される", async () => {
     emit({ kind: "ready", range: RANGE, meta: META_A });
-    clickButton("範囲を再生");
+    clickButton("▶ 範囲を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
@@ -509,7 +509,7 @@ describe("動画の入れ替わり", () => {
 
     // 「範囲を再生」を押しても、この動画は動かない
     const beforeSec = video.element.currentTime;
-    clickButton("範囲を再生");
+    clickButton("▶ 範囲を見る");
     await flush();
 
     expect(video.element.currentTime).toBe(beforeSec);

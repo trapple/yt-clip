@@ -53,7 +53,7 @@ test("YouTube の再生画面に IN/OUT UI が注入される", async () => {
   await page.close();
 });
 
-test("IN を指定すると popup が録画できる状態になる", async () => {
+test("IN を指定するとページ内で録画を始められる", async () => {
   const page = await context.newPage();
   await page.goto(TEST_VIDEO, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
@@ -85,11 +85,10 @@ test("IN を指定すると popup が録画できる状態になる", async () =
     "0:05 〜 0:20 (15秒)",
   );
 
-  // popup から範囲を確認する。
-  //
-  // ここから先 (実際の録画) は自動化していない。録画は実時間かかるうえ、
-  // 生成された動画の中身 (音声トラックの有無・解像度など) は目や耳で確認
-  // するしかない。録画以降は docs/manual-check.md の手動確認で担保する。
+  // 操作はページ内で完結する。録画はここから始められる
+  await expect(bar.getByRole("button", { name: "● 録画" })).toBeEnabled();
+
+  // popup は状態を映すだけ。YouTube 以外のタブにいるときの逃げ道として残す
   const popup = await context.newPage();
   await popup.goto(
     `chrome-extension://${extensionId}/src/popup/popup.html`,
@@ -98,7 +97,11 @@ test("IN を指定すると popup が録画できる状態になる", async () =
   await expect(popup.locator("#message")).toHaveText(
     "0:05 〜 0:20 (15秒) を録画できます",
   );
-  await expect(popup.getByRole("button", { name: "録画" })).toBeEnabled();
+  await expect(popup.getByRole("button")).toHaveCount(0);
+
+  // ここから先 (実際の録画) は自動化していない。録画は実時間かかるうえ、
+  // 生成された動画の中身 (音声トラックの有無・解像度など) は目や耳で確認
+  // するしかない。録画以降は docs/manual-check.md の手動確認で担保する。
 
   await popup.close();
   await page.close();

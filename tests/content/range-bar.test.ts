@@ -65,3 +65,50 @@ describe("createRangeBar", () => {
     expect(document.body.contains(bar.element)).toBe(false);
   });
 });
+
+describe("現在の再生位置", () => {
+  function playheadOf(bar: RangeBar): HTMLElement {
+    const element = bar.element.querySelector<HTMLElement>(
+      "[data-role=playhead]",
+    );
+    if (element === null) throw new Error("再生位置の目印がありません");
+    return element;
+  }
+
+  function makeBar(): RangeBar {
+    const bar = createRangeBar({
+      onScrub: () => undefined,
+      onCommit: () => undefined,
+    });
+    // 窓は範囲の 2 倍か 30 秒の広い方。ここでは 30 秒 (22.5〜52.5)
+    bar.update({ startSec: 30, endSec: 45 }, 600);
+    return bar;
+  }
+
+  test("窓の中なら位置を示す", () => {
+    const bar = makeBar();
+
+    bar.setPlayhead(37.5);
+
+    expect(playheadOf(bar).hidden).toBe(false);
+    expect(playheadOf(bar).style.left).toBe("50%");
+  });
+
+  test("窓の外なら隠す", () => {
+    // 潰れた目盛りを出すより、出さない方が正確
+    const bar = makeBar();
+
+    bar.setPlayhead(5);
+
+    expect(playheadOf(bar).hidden).toBe(true);
+  });
+
+  test("位置が分からないときは隠す", () => {
+    const bar = makeBar();
+    bar.setPlayhead(37.5);
+
+    bar.setPlayhead(null);
+
+    expect(playheadOf(bar).hidden).toBe(true);
+  });
+});
