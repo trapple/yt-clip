@@ -725,3 +725,53 @@ describe("拡大バーを操作できる状態", () => {
     expect(handleLabels()).toEqual(["開始 0:10", "終了 0:20"]);
   });
 });
+
+describe("状態ごとの操作", () => {
+  const labels = (): string[] =>
+    Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        "#yt-clip-bar-actions button",
+      ),
+    ).map((button) => button.textContent ?? "");
+
+  test("状態が変わると出る操作も変わる", () => {
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    expect(labels()).toEqual(["● 録画"]);
+
+    // 進行中は押しても拒まれるだけなので出さない
+    emit({ kind: "recording", range: RANGE, meta: META_A });
+    expect(labels()).toEqual([]);
+
+    emit({
+      kind: "posted",
+      range: RANGE,
+      meta: META_A,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+    expect(labels()).toEqual(["X にもう一度投稿", "取り直す"]);
+  });
+
+  test("操作を押すと状態機械へイベントが飛ぶ", () => {
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+
+    document
+      .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
+      ?.click();
+
+    expect(clipEvents()).toContainEqual({ type: "START_RECORDING" });
+  });
+
+  test("投稿した後も拡大バーを触れる", () => {
+    // 投稿のたびに範囲を作り直すのは使い方に合っていない
+    emit({
+      kind: "posted",
+      range: RANGE,
+      meta: META_A,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    });
+
+    expect(rangeBarElement().style.pointerEvents).not.toBe("none");
+  });
+});

@@ -8,6 +8,13 @@ import {
   seekTo,
   startPlayback,
 } from "@/content/player";
+import {
+  ACTION_EVENTS,
+  ACTION_LABELS,
+  PRIMARY_ACTIONS,
+  actionsFor,
+  type BarAction,
+} from "@/content/actions";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
 import { saveToDownloads } from "@/content/save";
@@ -34,6 +41,7 @@ import {
 
 const BAR_ID = "yt-clip-bar";
 /** 拡大バーの要素。位置ではなく id で辿れるようにする */
+const ACTIONS_ID = `${BAR_ID}-actions`;
 const RANGE_ID = "yt-clip-range";
 const OVERLAY_ID = "yt-clip-overlay";
 
@@ -358,6 +366,38 @@ function refreshOverlay(): void {
  * 状態機械が持つ範囲を画面へ反映する。**食い違ったときは状態機械が正。**
  * 表示だけを扱い、録画そのものには触れない。
  */
+/** バーのボタンを 1 箇所で作る。見た目の差は primary だけで表す */
+function makeButton(
+  label: string,
+  primary: boolean,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.textContent = label;
+  button.dataset.primary = primary ? "true" : "false";
+  button.addEventListener("click", guard(onClick));
+  return button;
+}
+
+/**
+ * 状態ごとの操作を描き直す。
+ *
+ * 押しても状態機械に拒まれるだけの操作は出さない。出して拒むより、
+ * 出さない方が「いま何ができるか」がそのまま画面に出る
+ */
+function renderActions(kind: ClipState["kind"]): void {
+  const box = document.getElementById(ACTIONS_ID);
+  if (box === null) return;
+
+  box.replaceChildren(
+    ...actionsFor(kind).map((action: BarAction) =>
+      makeButton(ACTION_LABELS[action], PRIMARY_ACTIONS.has(action), () => {
+        send(ACTION_EVENTS[action]);
+      }),
+    ),
+  );
+}
+
 function applyStateToDisplay(state: ClipState): void {
   const stateRange = "range" in state ? state.range : null;
   const stateMeta = "meta" in state ? state.meta : null;
@@ -380,7 +420,9 @@ function applyStateToDisplay(state: ClipState): void {
       : !sameRange(currentRange, liveRange);
 
   busy = BUSY_KINDS.has(state.kind);
-  rangeEditable = state.kind === "ready";
+  // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
+  // 古い範囲のクリップは外れる
+  rangeEditable = state.kind === "ready" || state.kind === "posted";
   currentRange = liveRange;
   // どの動画の範囲かも状態機械が持っている。content script が読み込み
   // 直された後でも、これで取り戻せる
@@ -388,6 +430,7 @@ function applyStateToDisplay(state: ClipState): void {
 
   rangeBar?.setEnabled(canAdjustRange());
   refreshOverlay();
+  renderActions(state.kind);
 
   // 失敗はバーにも出す。録画中にタブをリロードした場合、このバーが
   // 唯一の手がかりになる (popup を開かない限り理由が分からない)
@@ -614,7 +657,12 @@ function buildBar(): HTMLElement {
   status.id = `${BAR_ID}-status`;
   status.textContent = "IN を押して開始位置を指定";
 
-  row.append(inButton, outButton, playButton, status);
+  // 状態ごとに中身を入れ替える箱。押しても拒まれるだけの操作は出さない
+  const actions = document.createElement("div");
+  actions.id = ACTIONS_ID;
+  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+
+  row.append(inButton, outButton, playButton, actions, status);
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される
   rangeBar = createRangeBar({ onScrub, onCommit: onRangeCommitted });
