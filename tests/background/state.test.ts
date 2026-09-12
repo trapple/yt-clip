@@ -1,8 +1,9 @@
 import { describe, expect, test } from "vitest";
+import { makeVideoMeta } from "../helpers/fixtures";
 import { INITIAL_STATE, reduce } from "@/background/state";
-import type { ClipRange, ClipState, VideoMeta } from "@/shared/types";
+import type { ClipRange, ClipState } from "@/shared/types";
 
-const meta: VideoMeta = { videoId: "abc123", title: "テスト動画", channelId: "UCchannel-a", channelName: "チャンネル A" };
+const meta = makeVideoMeta();
 const range: ClipRange = { startSec: 10, endSec: 40 };
 
 const ready: ClipState = { kind: "ready", range, meta };

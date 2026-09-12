@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { Blob as NodeBlob } from "node:buffer";
+import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
 import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
 import { decodeBase64 } from "@/shared/base64";
 
@@ -23,7 +24,6 @@ import {
   FAILURE_MESSAGES,
   type ClipRange,
   type ClipState,
-  type VideoMeta,
 } from "@/shared/types";
 
 /**
@@ -34,7 +34,7 @@ import {
  * 二重に読み込むと、前のテストの observer が同じ DOM を触りに来る。
  */
 
-const META_A: VideoMeta = { videoId: "video-a", title: "動画 A", channelId: "@channel-a", channelName: "チャンネル A" };
+const META_A = makeVideoMeta({ videoId: "video-a", title: "動画 A" });
 const RANGE: ClipRange = { startSec: 10, endSec: 20 };
 
 /** content script が service worker へ送ったメッセージ */
@@ -208,7 +208,7 @@ function buildPage(): void {
   authorUrl.setAttribute("href", `/${META_A.channelId}`);
   const authorName = document.createElement("link");
   authorName.setAttribute("itemprop", "name");
-  authorName.setAttribute("content", META_A.channelName);
+  authorName.setAttribute("content", CHANNEL.name);
   author.append(authorUrl, authorName);
 
   const progressBar = document.createElement("div");
@@ -901,12 +901,7 @@ describe("最大秒数の設定", () => {
       (item) => item.type === "clip/event" && item.event.type === "MARK_IN",
     );
     expect(message).toMatchObject({
-      event: {
-        meta: {
-          channelId: META_A.channelId,
-          channelName: META_A.channelName,
-        },
-      },
+      event: { meta: { channelId: META_A.channelId } },
     });
   });
 

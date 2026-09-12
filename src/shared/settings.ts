@@ -30,10 +30,16 @@ export type Settings = {
   maxClipSec: number;
 };
 
+/** チャンネル。`id` が設定の鍵、`name` は表示用 */
+export type Channel = {
+  id: string;
+  name: string;
+};
+
 /** 設定を読み書きするときの文脈。チャンネル別の項目が要る */
 export type SettingsContext = {
   /** いま開いている動画のチャンネル。特定できなければ null */
-  channel: { id: string; name: string } | null;
+  channel: Channel | null;
 };
 
 /** 既定の投稿本文。`{tags}` は自分で区切りを持つ (下記 tagsVariable 参照) */
@@ -85,13 +91,13 @@ export function tagsVariable(tags: string[]): string {
 }
 
 /**
- * 入力欄の文字列を最大秒数にする。
+ * 入力欄の文字列を最大秒数の差分にする。
  *
- * **通らない理由を返す。** 黙って既定値に倒すと、設定したつもりで録画に進む
+ * **通らない理由を返す。** 黙って既定値に倒すと、設定したつもりで録画に進む。
+ * 結果の形は `FieldResult` に揃える。ここだけ別のユニオンにすると、
+ * 呼び出し側が中身を取り出して包み直すだけの層ができる
  */
-export function parseMaxClipSec(
-  input: string,
-): { ok: true; value: number } | { ok: false; message: string } {
+export function parseMaxClipSec(input: string): FieldResult {
   const text = input.trim();
   if (text === "") {
     return { ok: false, message: "最大秒数を入れてください" };
@@ -108,7 +114,7 @@ export function parseMaxClipSec(
       message: `最大秒数は ${MIN_CLIP_SEC}〜${MAX_SETTABLE_CLIP_SEC} 秒です: ${value}`,
     };
   }
-  return { ok: true, value };
+  return { ok: true, patch: { maxClipSec: value } };
 }
 
 /**
@@ -300,11 +306,6 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
       `${MIN_CLIP_SEC}〜${MAX_SETTABLE_CLIP_SEC} 秒。X の動画の上限が ${MAX_SETTABLE_CLIP_SEC} 秒です`,
 
     toText: (settings) => String(settings.maxClipSec),
-    fromText: (text) => {
-      const parsed = parseMaxClipSec(text);
-      return parsed.ok
-        ? { ok: true, patch: { maxClipSec: parsed.value } }
-        : { ok: false, message: parsed.message };
-    },
+    fromText: (text) => parseMaxClipSec(text),
   },
 ];

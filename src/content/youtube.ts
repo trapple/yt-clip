@@ -32,7 +32,12 @@ import { YT_SELECTORS } from "@/content/selectors";
 import { encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message, MessageResponse } from "@/shared/messages";
-import { loadSettings, SETTINGS_KEY } from "@/shared/settings";
+import {
+  loadSettings,
+  mergeSettings,
+  SETTINGS_KEY,
+  type SettingsContext,
+} from "@/shared/settings";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
@@ -69,11 +74,12 @@ let rangeBar: RangeBar | null = null;
 /** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
 let playheadWatched = false;
 /**
- * 1 クリップの最大長 (秒)。設定から流し込む。
+ * 1 クリップの最大長 (秒)。設定から読む。
  *
  * **読む場所が 3 つある** (`makeDefaultRange` / `validateRange` / 拡大バーの
  * `clampHandle`) ので、必ずこの 1 つの変数から配ること。ばらばらに読むと、
- * ドラッグでは伸ばせるのに OUT では弾かれる食い違いが生まれる
+ * ドラッグでは伸ばせるのに OUT では弾かれる食い違いが生まれる。
+ * 拡大バーへは値を渡さず引かせる (流し込み忘れが起きないようにするため)
  */
 let maxClipSec = DEFAULT_MAX_CLIP_SEC;
 let handle: RecorderHandle | null = null;
@@ -347,19 +353,30 @@ function onScrub(sec: number): void {
  * 範囲再生の監視はここで解く。残すと、登録したときの OUT を通過した瞬間に
  * `pause()` が飛び、押した場所からの再生が理由もなく止まる
  */
-function onSeekPlay(sec: number): void {
+async function onSeekPlay(sec: number): Promise<void> {
   cancelPreviewWatch();
+  if ((await seekAndPlay(sec)) === null) return;
+  setStatus(`${formatTime(sec)} から再生中…`);
+}
 
-  void (async () => {
-    try {
-      const video = getVideo();
-      await seekTo(video, sec);
-      await startPlayback(video);
-      setStatus(`${formatTime(sec)} から再生中…`);
-    } catch (error) {
-      setStatus(`再生できませんでした: ${String(error)}`);
-    }
-  })();
+/**
+ * その位置へ飛んで再生する。成功したら動画を返し、失敗したらバーに理由を出す。
+ *
+ * seek と再生を分けてあるのは player.ts 側の事情 (録画の冒頭が欠けるため)。
+ * その手順はここ 1 箇所に置く
+ */
+async function seekAndPlay(sec: number): Promise<HTMLVideoElement | null> {
+  try {
+    // getVideo() を try の外に置くと、同期的な throw が Promise の拒否になり、
+    // 呼び出し元の `void ...` で握り潰されてボタンが無反応に見える
+    const video = getVideo();
+    await seekTo(video, sec);
+    await startPlayback(video);
+    return video;
+  } catch (error) {
+    setStatus(`再生できませんでした: ${String(error)}`);
+    return null;
+  }
 }
 
 /** YouTube のシークバーに範囲を帯で重ねて、動画全体のどこかを示す */
@@ -501,14 +518,10 @@ async function playRange(): Promise<void> {
   cancelPreviewWatch();
 
   const range = currentRange;
-  try {
-    // getVideo() を try の外に置くと、この関数は async なので同期的な throw が
-    // Promise の拒否になり、呼び出し元の `void playRange()` で握り潰されて
-    // ボタンが無反応に見える。onReachTime の登録まで含めて 1 つの try で拾う
-    const video = getVideo();
-    await seekTo(video, range.startSec);
-    await startPlayback(video);
+  const video = await seekAndPlay(range.startSec);
+  if (video === null) return;
 
+  try {
     setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
     cancelPreview = onReachTime(video, range.endSec, () => {
       cancelPreview = null;
@@ -672,6 +685,19 @@ async function finishRecording(): Promise<void> {
   }
 }
 
+/**
+ * 設定パネルに渡す文脈。**開くたびに読む** (SPA 遷移で別のチャンネルへ移る)。
+ *
+ * `getChannel` は見つからなくても throw しないので、ここに try/catch は要らない。
+ * `buildBar` の中に閉じ込めないのは、同じスコープの他のクロージャがパネルを
+ * 捕捉しているため、`buildBar` のスコープごと生き残ることになるから
+ */
+function readChannelContext(): SettingsContext {
+  const channel = getChannel();
+  // ID が取れないチャンネルは設定の鍵にできない。入力させない
+  return { channel: channel.id === "" ? null : channel };
+}
+
 function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
@@ -697,19 +723,7 @@ function buildBar(): HTMLElement {
   actions.id = ACTIONS_ID;
   actions.style.cssText = BAR_STYLE.row;
 
-  // 文脈は**開くたびに**読む。SPA 遷移で別のチャンネルの動画に移っている
-  const settingsPanel = createSettingsPanel({
-    getContext: () => {
-      try {
-        const channel = getChannel();
-        // ID が取れないチャンネルは設定の鍵にできない。入力させない
-        return { channel: channel.id === "" ? null : channel };
-      } catch (error) {
-        console.warn(`チャンネルを読めませんでした: ${String(error)}`);
-        return { channel: null };
-      }
-    },
-  });
+  const settingsPanel = createSettingsPanel({ getContext: readChannelContext });
   const settingsButton = makeButton("⚙", false, () => settingsPanel.toggle());
   settingsButton.title = "設定";
   // 右端へ寄せる。操作の並びから外して、押し間違いを減らす
@@ -721,12 +735,9 @@ function buildBar(): HTMLElement {
   rangeBar = createRangeBar({
     onScrub,
     onCommit: onRangeCommitted,
-    onSeekPlay,
+    onSeekPlay: (sec) => void onSeekPlay(sec),
+    maxClipSec: () => maxClipSec,
   });
-  // **作った直後に流し込む。** バーは YouTube の再描画のたびに作り直され、
-  // 新しいバーは既定値で始まる。ここを抜かすと、そのバーでだけ上限が
-  // 60 秒に戻り、OUT ボタン側 (validateRange) と食い違う
-  rangeBar.setMaxClipSec(maxClipSec);
   rangeBar.element.id = RANGE_ID;
   // 拡大バーを上、操作を下に置く。範囲を見ながらボタンへ手を伸ばす順番
   bar.append(rangeBar.element, row, settingsPanel.element);
@@ -878,16 +889,15 @@ function recoverFromState(): void {
 }
 
 /**
- * 設定を読み直して、上限を使う側すべてに配る。
+ * 起動時に設定を読む。
  *
  * 読めなくても操作は続けさせる。既定値のまま動く方が、バーごと出ないより
  * ましで、上限の食い違いも起きない (全員が既定値を見る)
  */
-function refreshSettings(): void {
+function loadInitialSettings(): void {
   void loadSettings()
     .then((settings) => {
       maxClipSec = settings.maxClipSec;
-      rangeBar?.setMaxClipSec(maxClipSec);
     })
     .catch((error: unknown) => {
       console.warn(`設定を読めませんでした: ${String(error)}`);
@@ -895,10 +905,15 @@ function refreshSettings(): void {
 }
 
 // 設定は**別のタブで変えられる**。保存ボタンに繋ぐだけでは、開いたままの
-// タブが古い上限のまま残り、そのタブでだけ録画の長さが違うことになる
+// タブが古い上限のまま残り、そのタブでだけ録画の長さが違うことになる。
+//
+// **通知が新しい値を持っているので読み直さない。** ここで loadSettings すると、
+// 設定を 1 回保存するたびに、開いている YouTube タブの数だけ storage を
+// 往復することになる (書いた当のタブでも発火する)
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "sync" || !(SETTINGS_KEY in changes)) return;
-  refreshSettings();
+  const change = areaName === "sync" ? changes[SETTINGS_KEY] : undefined;
+  if (change === undefined) return;
+  maxClipSec = mergeSettings(change.newValue).maxClipSec;
 });
 
 /** 直前に見ていた URL。SPA 遷移の検出に使う */
@@ -929,5 +944,5 @@ const observer = new MutationObserver(() => {
 });
 observer.observe(document.body, { childList: true, subtree: true });
 mount();
-refreshSettings();
+loadInitialSettings();
 recoverFromState();

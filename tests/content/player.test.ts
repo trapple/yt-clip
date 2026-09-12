@@ -140,7 +140,6 @@ describe("getVideoMeta", () => {
       title: "動画の題名",
       // チャンネルの手がかりが無いページ。タグが引けないだけで本文は成立する
       channelId: "",
-      channelName: "",
     });
   });
 

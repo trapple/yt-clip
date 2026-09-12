@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { makeVideoMeta } from "../helpers/fixtures";
 import { DEFAULT_SETTINGS } from "@/shared/settings";
 import {
   createRouter,
@@ -8,9 +9,9 @@ import {
 } from "@/background/router";
 import type { StoredClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
-import type { ClipRange, VideoMeta } from "@/shared/types";
+import type { ClipRange } from "@/shared/types";
 
-const meta: VideoMeta = { videoId: "abc123", title: "テスト動画", channelId: "UCchannel-a", channelName: "チャンネル A" };
+const meta = makeVideoMeta();
 const range: ClipRange = { startSec: 10, endSec: 40 };
 
 /** 受け手が居ないときに Chrome が返す文言 */

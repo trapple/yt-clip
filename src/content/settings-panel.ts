@@ -43,10 +43,9 @@ export function createSettingsPanel(
   element.style.cssText = PANEL_STYLE.root;
   element.hidden = true;
 
-  const inputs = new Map<string, HTMLInputElement>();
-  const hints = new Map<string, HTMLElement>();
-
-  for (const field of SETTINGS_FIELDS) {
+  // 項目・入力欄・説明を組で持つ。鍵で引き直す形にすると、必ず存在するものに
+  // 対して undefined チェックが要るうえ、項目が増えるたびに Map が 1 本増える
+  const rows = SETTINGS_FIELDS.map((field) => {
     const wrapper = document.createElement("div");
     wrapper.style.cssText = PANEL_STYLE.field;
 
@@ -66,9 +65,8 @@ export function createSettingsPanel(
 
     wrapper.append(label, input, hint);
     element.append(wrapper);
-    inputs.set(field.key, input);
-    hints.set(field.key, hint);
-  }
+    return { field, input, hint };
+  });
 
   const result = document.createElement("span");
   result.style.cssText = PANEL_STYLE.result;
@@ -82,15 +80,20 @@ export function createSettingsPanel(
   footer.append(result, save);
   element.append(footer);
 
-  async function fill(): Promise<void> {
-    const settings = await deps.load();
-    const context = deps.getContext();
+  /**
+   * 保存済みの値を入力欄へ流し込む。
+   *
+   * 読んだばかりの設定と文脈があれば渡すこと。**保存の直後に読み直すと、
+   * 1 回の保存で storage を何度も往復する**
+   */
+  async function fill(
+    loaded?: Settings,
+    loadedContext?: SettingsContext,
+  ): Promise<void> {
+    const settings = loaded ?? (await deps.load());
+    const context = loadedContext ?? deps.getContext();
 
-    for (const field of SETTINGS_FIELDS) {
-      const input = inputs.get(field.key);
-      const hint = hints.get(field.key);
-      if (input === undefined || hint === undefined) continue;
-
+    for (const { field, input, hint } of rows) {
       // **分岐するのは scope だけ。** key を見て分岐すると、項目を足すたびに
       // ここへ戻ってくることになる
       const unavailable = field.scope === "channel" && context.channel === null;
@@ -110,11 +113,10 @@ export function createSettingsPanel(
 
         // 項目ごとの差分をまとめて 1 回で書く
         let patch: Partial<Settings> = {};
-        for (const field of SETTINGS_FIELDS) {
-          const input = inputs.get(field.key);
+        for (const { field, input } of rows) {
           // 入力させていない項目は保存の対象にしない。空のまま送ると、
           // チャンネルを特定できない画面を開いただけでタグが消える
-          if (input === undefined || input.disabled) continue;
+          if (input.disabled) continue;
 
           const converted = field.fromText(input.value, settings, context);
           // **1 つでも通らなければ何も保存しない。** 一部だけ書き込むと、
@@ -127,8 +129,9 @@ export function createSettingsPanel(
           patch = { ...patch, ...converted.patch };
         }
         await deps.save(patch);
-        // 正規化した結果を出す。何が保存されたかを見せる
-        await fill();
+        // 正規化した結果を出す。何が保存されたかを見せる。
+        // 読んだばかりのものを渡して、storage の往復とチャンネルの再取得を省く
+        await fill({ ...settings, ...patch }, context);
         result.textContent = "保存しました";
       } catch (error) {
         // 保存できていないのに黙っていると、設定したつもりで投稿してしまう

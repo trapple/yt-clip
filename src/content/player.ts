@@ -1,4 +1,5 @@
 import { YT_SELECTORS } from "@/content/selectors";
+import type { Channel } from "@/shared/settings";
 import type { VideoMeta } from "@/shared/types";
 
 export class ElementNotFoundError extends Error {
@@ -64,25 +65,12 @@ function labelOf(element: Element): string {
 }
 
 /**
- * 候補を順に試し、中身が空でない最初のものを採る。
+ * 候補に一致するものをすべて集める。中身が空のものは飛ばす。
  *
  * **要素に一致するだけでは足りない。** 実機に、先頭の候補に一致はするが
- * 中身が空になる画面構成があった (タイトルで実際に起きた)
+ * 中身が空になる画面構成があった (タイトルで実際に起きた)。`querySelector`
+ * ではその要素で打ち切ってしまうので、一致する要素は全部見る
  */
-function firstValue(
-  selectors: readonly string[],
-  read: (element: Element) => string,
-): string | null {
-  for (const selector of selectors) {
-    for (const element of document.querySelectorAll(selector)) {
-      const value = read(element);
-      if (value !== "") return value;
-    }
-  }
-  return null;
-}
-
-/** 候補に一致するものを**すべて**集める。中身が空のものは飛ばす */
 function allValues(
   selectors: readonly string[],
   read: (element: Element) => string,
@@ -97,39 +85,9 @@ function allValues(
   return values;
 }
 
-/** 変換して最初に null でなかったものを返す */
-function firstMapped<T>(
-  values: readonly string[],
-  convert: (value: string) => T | null,
-): T | null {
-  for (const value of values) {
-    const converted = convert(value);
-    if (converted !== null) return converted;
-  }
-  return null;
-}
-
-/**
- * ページ見出しから動画タイトルを拾う。
- *
- * 候補を順に試し、**中身が空でない最初のもの**を採る。要素に一致するだけでは
- * 足りない: 実機に、先頭の候補に一致はするが中身が空になる画面構成があり、
- * 投稿本文からタイトルだけが消える形で表に出た。
- */
+/** ページ見出しから動画タイトルを拾う */
 function findTitleInPage(): string | null {
-  for (const selector of YT_SELECTORS.title) {
-    const element = document.querySelector(selector);
-    if (element === null) continue;
-
-    // meta 要素は表示されないので content 属性に入っている
-    const text =
-      element instanceof HTMLMetaElement
-        ? element.content
-        : (element.textContent ?? "");
-    const trimmed = text.trim();
-    if (trimmed !== "") return trimmed;
-  }
-  return null;
+  return allValues(YT_SELECTORS.title, labelOf)[0] ?? null;
 }
 
 /**
@@ -168,31 +126,46 @@ function extractHandle(value: string): string | null {
  *
  * **見つからなくても throw しない。** タイトルと違い、チャンネルが分からなくても
  * 投稿本文は成立する (タグが付かないだけ)。ここで止めると、画面構成が
- * 少し変わっただけで録画そのものができなくなる
+ * 少し変わっただけで録画そのものができなくなる。
+ *
+ * **ハンドルを優先する。** `UC...` の方が本来は安定した識別子だが、いま取れると
+ * は限らない (メンバーシップのあるチャンネルだけ `/channel/UC.../join` が出る、
+ * といった差がありうる)。優先すると同じチャンネルなのに動画によって鍵が変わり、
+ * 設定したタグが別の動画で出てこなくなる。ハンドルはどの watch ページにも出ている
  */
-export function getChannel(): { id: string; name: string } {
-  // **候補を全部集めてから探す。** 「順に試して最初の 1 つ」だと、リストの
-  // 前の方にある UC... のリンクが先に当たり、ハンドルを見ずに終わる
-  const candidates = allValues(YT_SELECTORS.channelLink, identityOf);
-  const id =
-    // **ハンドルを優先する。** UC... の方が本来は安定した識別子だが、
-    // いま取れるとは限らない (メンバーシップのあるチャンネルだけ
-    // /channel/UC.../join が出る、といった差が実際にありうる)。優先すると
-    // 同じチャンネルなのに動画によって鍵が変わり、設定したタグが別の動画で
-    // 出てこなくなる。ハンドルはどの watch ページにも必ず出ている
-    firstMapped(candidates, extractHandle) ??
-    firstMapped(candidates, extractChannelId);
+export function getChannel(): Channel {
+  // ハンドルが出た時点で打ち切る。`UC...` は見つけても覚えるだけで、
+  // 走査は続ける。全部集めてから 2 周するより、実機で当たる経路が短い
+  let fallbackId: string | null = null;
+  const candidates: string[] = [];
 
-  const name = firstValue(YT_SELECTORS.channelName, labelOf);
+  for (const selector of YT_SELECTORS.channelLink) {
+    for (const element of document.querySelectorAll(selector)) {
+      const value = identityOf(element);
+      if (value === "") continue;
+      candidates.push(value);
 
-  if (id === null) {
-    // **集まった候補をそのまま出す。** 「特定できません」だけでは、
-    // 次に何を直せばよいか分からない
-    console.warn(
-      `[yt-clip] チャンネルを特定できませんでした (候補 ${candidates.length} 件: ${candidates.slice(0, 5).join(" / ")})`,
-    );
+      const handle = extractHandle(value);
+      if (handle !== null) return { id: handle, name: channelNameOr(handle) };
+      fallbackId ??= extractChannelId(value);
+    }
   }
-  return { id: id ?? "", name: name ?? id ?? "" };
+
+  if (fallbackId !== null) {
+    return { id: fallbackId, name: channelNameOr(fallbackId) };
+  }
+
+  // **集まった候補をそのまま出す。** 「特定できません」だけでは、
+  // 次に何を直せばよいか分からない
+  console.warn(
+    `[yt-clip] チャンネルを特定できませんでした (候補 ${candidates.length} 件: ${candidates.slice(0, 5).join(" / ")})`,
+  );
+  return { id: "", name: "" };
+}
+
+/** 表示名。取れなければ鍵をそのまま出す。空欄よりは手がかりになる */
+function channelNameOr(fallback: string): string {
+  return allValues(YT_SELECTORS.channelName, labelOf)[0] ?? fallback;
 }
 
 export function getVideoMeta(): VideoMeta {
@@ -201,12 +174,10 @@ export function getVideoMeta(): VideoMeta {
     // 空のまま進むと、投稿本文が改行だけで始まる不可解な形になる
     throw new ElementNotFoundError(YT_SELECTORS.title.join(" / "));
   }
-  const channel = getChannel();
   return {
     videoId: parseVideoId(location.href),
     title,
-    channelId: channel.id,
-    channelName: channel.name,
+    channelId: getChannel().id,
   };
 }
 

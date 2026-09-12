@@ -7,7 +7,7 @@ import {
   type TimeWindow,
 } from "@/content/range-math";
 import { RANGE_STYLE } from "@/content/styles";
-import { DEFAULT_MAX_CLIP_SEC, formatTime } from "@/shared/time";
+import { formatTime } from "@/shared/time";
 import type { ClipRange } from "@/shared/types";
 
 export type RangeBarCallbacks = {
@@ -20,6 +20,15 @@ export type RangeBarCallbacks = {
    * **範囲は変えない。** 見るための操作であって、切り抜く場所を決める操作ではない
    */
   onSeekPlay(sec: number): void;
+  /**
+   * 1 クリップの最大長 (秒)。**ドラッグのたびに引く。**
+   *
+   * 値を渡す形 (setter) にすると、設定が変わったときと**バーを作り直したとき**の
+   * 2 回、呼び出し側が流し込み直す義務を負う。バーは YouTube の再描画のたびに
+   * 作り直されるので、流し込み忘れるとそのバーでだけ上限が既定値に戻り、
+   * OUT ボタン側 (`validateRange`) と食い違う
+   */
+  maxClipSec(): number;
 };
 
 export type RangeBar = {
@@ -34,12 +43,6 @@ export type RangeBar = {
   setEnabled(enabled: boolean): void;
   /** 現在の再生位置を示す。窓の外や位置が分からないときは null */
   setPlayhead(sec: number | null): void;
-  /**
-   * 1 クリップの最大長 (秒)。設定が変わったら呼び直す。
-   * **OUT ボタン側 (`validateRange`) と必ず同じ値にすること。** ずれると、
-   * ドラッグでは伸ばせるのに OUT では弾かれる状態ができる
-   */
-  setMaxClipSec(sec: number): void;
   destroy(): void;
 };
 
@@ -100,8 +103,6 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
    * ready を知らせてから行う
    */
   let enabled = false;
-  /** 1 クリップの最大長。設定から流し込まれるまでは既定値 */
-  let maxClipSec = DEFAULT_MAX_CLIP_SEC;
   /** 間引き用。次の描画フレームまで scrub をまとめる */
   let scrubFrame = 0;
   let pendingScrubSec: number | null = null;
@@ -179,7 +180,7 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
           pointerToSec(moveEvent.clientX),
           range,
           window_,
-          maxClipSec,
+          callbacks.maxClipSec(),
         );
         paint();
         // 動かしている側の位置を見せる。反対側は動いていない
@@ -246,10 +247,6 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
       }
       playhead.hidden = false;
       playhead.style.left = `${timeToRatio(sec, window_) * 100}%`;
-    },
-
-    setMaxClipSec(sec: number): void {
-      maxClipSec = sec;
     },
 
     setEnabled(next: boolean): void {

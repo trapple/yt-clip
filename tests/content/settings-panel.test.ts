@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, test } from "vitest";
+import { CHANNEL } from "../helpers/fixtures";
 import { createSettingsPanel } from "@/content/settings-panel";
 import {
   DEFAULT_SETTINGS,
@@ -8,8 +9,6 @@ import {
   type SettingsContext,
 } from "@/shared/settings";
 
-/** テストで使うチャンネル。ハッシュタグ設定の鍵になる */
-const CHANNEL = { id: "UCchannel-a", name: "チャンネル A" };
 
 function makeDeps(
   initial: Partial<Settings> = {},

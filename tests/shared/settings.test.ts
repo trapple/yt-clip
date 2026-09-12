@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { CHANNEL } from "../helpers/fixtures";
 import {
   DEFAULT_SETTINGS,
   SETTINGS_FIELDS,
@@ -15,8 +16,6 @@ import {
 } from "@/shared/settings";
 import { DEFAULT_MAX_CLIP_SEC, MAX_SETTABLE_CLIP_SEC } from "@/shared/time";
 
-/** テストで使うチャンネル。設定の鍵になる */
-const CHANNEL = { id: "UCchannel-a", name: "チャンネル A" };
 const CONTEXT: SettingsContext = { channel: CHANNEL };
 
 describe("normalizeHashtags", () => {
@@ -214,11 +213,14 @@ describe("画面に出す項目", () => {
 
 describe("parseMaxClipSec", () => {
   test("整数を受け取る", () => {
-    expect(parseMaxClipSec("30")).toEqual({ ok: true, value: 30 });
+    expect(parseMaxClipSec("30")).toEqual({ ok: true, patch: { maxClipSec: 30 } });
   });
 
   test("前後の空白は落とす", () => {
-    expect(parseMaxClipSec("  30 ")).toEqual({ ok: true, value: 30 });
+    expect(parseMaxClipSec("  30 ")).toEqual({
+      ok: true,
+      patch: { maxClipSec: 30 },
+    });
   });
 
   test("X の上限を超える値は入れさせない", () => {
@@ -233,7 +235,7 @@ describe("parseMaxClipSec", () => {
   test("上限ちょうどは入れられる", () => {
     expect(parseMaxClipSec(String(MAX_SETTABLE_CLIP_SEC))).toEqual({
       ok: true,
-      value: MAX_SETTABLE_CLIP_SEC,
+      patch: { maxClipSec: MAX_SETTABLE_CLIP_SEC },
     });
   });
 
@@ -321,17 +323,19 @@ describe("hashtagsFor", () => {
 
 describe("チャンネル別にする前の共通タグ", () => {
   test("引き継がずに読み捨てる", () => {
-    // どのチャンネルにも同じタグが出てくるのは邪魔。ただし黙って消さない
+    // どのチャンネルにも同じタグが出てくるのは邪魔
+    expect(
+      mergeSettings({ hashtags: ["クリ明透", "あすカット"] }).hashtagsByChannel,
+    ).toEqual({});
+  });
+
+  test("捨てたことを値ごとログに残す", () => {
+    // 黙って消さない。何が消えたのか後から追える
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
-    const settings = mergeSettings({ hashtags: ["クリ明透", "あすカット"] });
+    mergeSettings({ hashtags: ["クリ明透"] });
 
-    expect(settings.hashtagsByChannel).toEqual({});
-    // 値ごとログに残す。何が消えたのか後から追える
-    expect(info).toHaveBeenCalledWith(
-      expect.stringContaining("クリ明透"),
-    );
-
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("クリ明透"));
     info.mockRestore();
   });
 
