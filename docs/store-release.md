@@ -127,5 +127,21 @@ npm run package                                # dist を zip に固める
 
 ## 6. 版を上げるとき
 
-`manifest.config.ts` の `version` を上げてから `npm run package`。
-**同じ版番号では再アップロードできない。**
+**同じ版番号では再アップロードできない。** 公開のたびに上げること。
+
+```bash
+# 1. CHANGELOG.md の「未リリース」を版の見出しに書き換え、新しい「未リリース」を足す
+# 2. 版を上げる (型チェックとテストが走り、通ればコミットとタグができる)
+npm version patch    # または minor / major
+# 3. zip を作る
+npm run package
+```
+
+版番号の出どころは `package.json` の 1 箇所だけで、`manifest.config.ts` は
+それを読む。**manifest を手で直さないこと。**
+
+タグは自動では push されない。送るときは明示する:
+
+```bash
+git push --follow-tags
+```

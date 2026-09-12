@@ -68,8 +68,13 @@ npm test           # 単体テスト
 npm run typecheck  # 型チェック
 npm run e2e        # E2E (ネットワーク必須。CI では実行しない)
 npm run icons      # アイコンを描き直す (public/icons/)
+npm run screenshots # 掲載用スクリーンショットを release/screenshots/ に撮る
 npm run package    # ウェブストアへ上げる zip を release/ に作る
+npm version patch  # 版を上げる (型チェックとテストが通ってからコミットとタグ)
 ```
+
+版番号の出どころは `package.json` の 1 箇所だけ。`manifest.config.ts` は
+それを読むので**手で直さない**。変更履歴は [`CHANGELOG.md`](CHANGELOG.md)。
 
 ウェブストアへの公開手順は [`docs/store-release.md`](docs/store-release.md)。
 **審査に落ちる可能性が高い理由もそこに書いてある。先に読むこと。**
