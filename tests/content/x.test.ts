@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   SelectorMissingError,
   attachFile,
+  attachPayload,
   buildClipFile,
   containsHead,
   keepText,
@@ -321,5 +322,103 @@ describe("keepText", () => {
 
     expect(insert.mock.calls.filter(([c]) => c === "insertText")).toHaveLength(2);
     expect(editor.textContent).toBe(text);
+  });
+});
+
+describe("attachPayload", () => {
+  const payload = {
+    base64: "AAECAw==",
+    fileName: "yt-clip-abc123-10s.mp4",
+    mimeType: "video/mp4",
+    text: "動画の題名\n\nhttps://youtu.be/abc123?t=10",
+  };
+
+  function buildComposePage(draft: string): HTMLElement {
+    document.body.innerHTML =
+      '<div data-testid="tweetTextarea_0"></div>' +
+      '<input data-testid="fileInput" type="file">';
+    const editor = document.querySelector<HTMLElement>(
+      '[data-testid="tweetTextarea_0"]',
+    );
+    if (editor === null) throw new Error("入力欄を作れませんでした");
+    editor.textContent = draft;
+    return editor;
+  }
+
+  beforeEach(() => {
+    // jsdom は execCommand を持たない。実物と同じ「末尾に足す」形で再現する
+    (document as unknown as { execCommand: unknown }).execCommand = vi.fn(
+      (command: string, _ui?: boolean, value?: string) => {
+        const editor = document.querySelector<HTMLElement>(
+          '[data-testid="tweetTextarea_0"]',
+        );
+        if (editor === null) return false;
+        if (command === "insertText") {
+          editor.textContent = (editor.textContent ?? "") + String(value);
+        }
+        if (command === "delete") editor.textContent = "";
+        return true;
+      },
+    );
+    vi.stubGlobal("chrome", { runtime: { sendMessage: () => Promise.resolve() } });
+
+    // jsdom の input.files は読み取り専用で、代入すると strict mode で投げる。
+    // 実物では差し替えられる場所なので、書き換えられるようにしておく
+    Object.defineProperty(HTMLInputElement.prototype, "files", {
+      configurable: true,
+      get(): FileList | null {
+        return (this as { __files?: FileList }).__files ?? null;
+      },
+      set(value: FileList) {
+        (this as { __files?: FileList }).__files = value;
+      },
+    });
+
+    // jsdom は DataTransfer を持たない。attachFile が使う分だけ用意する
+    vi.stubGlobal(
+      "DataTransfer",
+      class {
+        private readonly list: File[] = [];
+        readonly items = { add: (file: File): void => void this.list.push(file) };
+        get files(): FileList {
+          const list = this.list;
+          return {
+            ...list,
+            length: list.length,
+            item: (index: number) => list[index] ?? null,
+          } as unknown as FileList;
+        }
+      },
+    );
+  });
+
+  test("前の下書きを上書きする", async () => {
+    // X は前回の下書きを復元する。そのまま入れると末尾に足されて
+    // 本文が二重になる (実機で URL が 2 つ並んだ)
+    const editor = buildComposePage("https://youtu.be/abc123?t=10");
+
+    await attachPayload(payload);
+
+    expect(editor.textContent).toBe(payload.text);
+  });
+
+  test("本文を入れてからファイルを添付する", async () => {
+    // 添付すると X が UI を作り直すため、順番が逆だと焦点が定まらない。
+    // jsdom では input.files を差し替えられないので、添付を知らせる change が
+    // 飛んだ時点で本文が入っているかを見る
+    const editor = buildComposePage("");
+    const input = document.querySelector<HTMLInputElement>(
+      '[data-testid="fileInput"]',
+    );
+    let textAtAttach: string | null = null;
+    input?.addEventListener("change", () => {
+      textAtAttach = editor.textContent;
+    });
+
+    await attachPayload(payload);
+
+    expect(textAtAttach).toBe(payload.text);
+    expect(input?.files?.[0]?.name).toBe("yt-clip-abc123-10s.mp4");
+    expect(input?.files?.[0]?.type).toBe("video/mp4");
   });
 });

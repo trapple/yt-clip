@@ -251,7 +251,52 @@ function notify(message: Message): void {
 // 単体テスト (jsdom) は chrome グローバルを持たないため import 時点の副作用が
 // ReferenceError で落ちる。テストのために振る舞いを変えるのではなく、
 // 拡張コンテキスト外で読み込まれた場合に安全側へ倒すガードとして扱う。
+/**
+ * 受け取った本文と動画を投稿画面へ載せる。
+ *
+ * **本文が先、添付が後。** ファイルを添付すると X が UI を作り直すため、
+ * その最中に入力すると焦点が定まらない。
+ *
+ * 投稿ボタンは押さない。最終確認はユーザーに委ねる。
+ */
+export async function attachPayload(message: {
+  base64: string;
+  fileName: string;
+  mimeType: string;
+  text: string;
+}): Promise<void> {
+  try {
+    const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);
+    // **入れる前に消すこと。** X は前回の下書きを復元するため、そのまま
+    // 入れると insertText が末尾に足して本文が二重になる (実機で URL が
+    // 2 つ並んだ)。下書きを残す判断は X の画面側でしてもらう
+    clearEditor(editor);
+    await insertText(editor, message.text);
+
+    const input = await waitForElement<HTMLInputElement>(
+      X_SELECTORS.fileInput,
+    );
+    attachFile(input, buildClipFile(message));
+
+    // 添付で入力欄が作り直されると本文が消える。消えたら入れ直す。
+    // **ここの失敗で添付の成功を取り消さない。** 動画は既に X に載っており、
+    // 失敗として扱うと popup がダウンロード誘導に変わってしまう
+    try {
+      await keepText(message.text, () =>
+        document.querySelector<HTMLElement>(X_SELECTORS.editor.join(",")),
+      );
+    } catch (error) {
+      console.warn(`[yt-clip] 本文の入れ直しに失敗しました: ${String(error)}`);
+    }
+
+    notify({ type: "x/attached" });
+  } catch (error) {
+    notify({ type: "x/failed", reason: String(error) });
+  }
+}
+
 if (typeof chrome !== "undefined") {
+
   /**
    * **同期で `sendResponse()` を返すこと。** 応答しないと送り手の Promise は
    * `The message port closed before a response was received.` で reject し、
@@ -265,35 +310,7 @@ if (typeof chrome !== "undefined") {
     if (message.type !== "x/payload") return;
     sendResponse();
 
-    void (async () => {
-      try {
-        // 本文を先に入れる。ファイルを添付すると X が UI を作り直すため、
-        // その最中に入力すると焦点が定まらない
-        const editor = await waitForElement<HTMLElement>(X_SELECTORS.editor);
-        await insertText(editor, message.text);
-
-        const input = await waitForElement<HTMLInputElement>(
-          X_SELECTORS.fileInput,
-        );
-        attachFile(input, buildClipFile(message));
-
-        // 添付で入力欄が作り直されると本文が消える。消えたら入れ直す。
-        // **ここの失敗で添付の成功を取り消さない。** 動画は既に X に載っており、
-        // 失敗として扱うと popup がダウンロード誘導に変わってしまう
-        try {
-          await keepText(message.text, () =>
-            document.querySelector<HTMLElement>(X_SELECTORS.editor.join(",")),
-          );
-        } catch (error) {
-          console.warn(`[yt-clip] 本文の入れ直しに失敗しました: ${String(error)}`);
-        }
-
-        // 投稿ボタンは押さない。最終確認はユーザーに委ねる
-        notify({ type: "x/attached" });
-      } catch (error) {
-        notify({ type: "x/failed", reason: String(error) });
-      }
-    })();
+    void attachPayload(message);
   });
 
   // 投稿画面が開かれたことを service worker に知らせる
