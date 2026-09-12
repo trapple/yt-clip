@@ -25,11 +25,19 @@ describe("actionsFor", () => {
     expect(actionsFor("ready")).toEqual(["record"]);
   });
 
-  test("進行中は操作を出さない", () => {
-    // 押しても状態機械に拒まれるだけなので、出さない
-    expect(actionsFor("seeking")).toEqual([]);
-    expect(actionsFor("recording")).toEqual([]);
+  test("録り始めてからでも中止できる", () => {
+    expect(actionsFor("seeking")).toEqual(["cancel"]);
+    expect(actionsFor("recording")).toEqual(["cancel"]);
+  });
+
+  test("書き出し中は中止を出さない", () => {
+    // ここで止めると、録り終えたものを捨てることになる
     expect(actionsFor("encoding")).toEqual([]);
+  });
+
+  test("中止は主操作にしない", () => {
+    // 塗りつぶすと押してほしい操作に見えてしまう
+    expect(PRIMARY_ACTIONS.has("cancel")).toBe(false);
   });
 
   test("録画できたら投稿か取り直し", () => {

@@ -738,9 +738,9 @@ describe("状態ごとの操作", () => {
     emit({ kind: "ready", range: RANGE, meta: META_A });
     expect(labels()).toEqual(["● 録画"]);
 
-    // 進行中は押しても拒まれるだけなので出さない
+    // 録り始めてからでも戻れる
     emit({ kind: "recording", range: RANGE, meta: META_A });
-    expect(labels()).toEqual([]);
+    expect(labels()).toEqual(["■ 中止"]);
 
     emit({
       kind: "posted",
@@ -773,5 +773,37 @@ describe("状態ごとの操作", () => {
     });
 
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
+  });
+});
+
+describe("録画の中止", () => {
+  test("中止を押すと状態機械へ伝わる", () => {
+    emit({ kind: "recording", range: RANGE, meta: META_A });
+
+    document
+      .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
+      ?.click();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+  });
+
+  test("録画から離れると録画も監視も止まる", async () => {
+    // 中止の停止処理は「recording から外れた」ことを見て走る。
+    // 中止のためだけの後始末は足していないので、ここが唯一の担保になる
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "recording", range: RANGE, meta: META_A });
+    command("recorder/start");
+    await flush();
+    const recorder = startedRecorder();
+    expect(recorder.state).toBe("recording");
+
+    emit({ kind: "ready", range: RANGE, meta: META_A });
+    await flush();
+
+    expect(recorder.state).toBe("inactive");
+    expect(stoppedTracks).toBe(1);
+    // 中止した分は送らない = 保存もされない
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(false);
+    expect(saved).toEqual([]);
   });
 });

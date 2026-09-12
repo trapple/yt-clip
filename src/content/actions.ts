@@ -6,10 +6,17 @@ import type { ClipEvent, ClipState } from "@/shared/types";
  * IN / OUT / 範囲を見る は状態に関わらず常に出ている別枠なので、ここには
  * 含めない。ここに並ぶのは「いまの状態でだけ意味を持つ操作」。
  */
-export type BarAction = "record" | "post" | "repost" | "retake" | "retry";
+export type BarAction =
+  | "record"
+  | "cancel"
+  | "post"
+  | "repost"
+  | "retake"
+  | "retry";
 
 export const ACTION_LABELS: Record<BarAction, string> = {
   record: "● 録画",
+  cancel: "■ 中止",
   post: "X に投稿",
   repost: "X にもう一度投稿",
   retake: "取り直す",
@@ -19,6 +26,7 @@ export const ACTION_LABELS: Record<BarAction, string> = {
 /** 状態機械から見れば repost も post も同じ POST。文言だけが違う */
 export const ACTION_EVENTS: Record<BarAction, ClipEvent> = {
   record: { type: "START_RECORDING" },
+  cancel: { type: "CANCEL_RECORDING" },
   post: { type: "POST" },
   repost: { type: "POST" },
   retake: { type: "RETAKE" },
@@ -39,9 +47,11 @@ export function actionsFor(kind: ClipState["kind"]): BarAction[] {
       return [];
     case "ready":
       return ["record"];
-    // 進行中は押しても状態機械に拒まれるだけなので出さない
+    // 録り始めてからでも戻れるようにする
     case "seeking":
     case "recording":
+      return ["cancel"];
+    // 書き出しは一瞬で終わる。ここで止めると録り終えたものを捨てることになる
     case "encoding":
       return [];
     case "preview":

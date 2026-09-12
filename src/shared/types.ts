@@ -118,6 +118,8 @@ export type ClipEvent =
   | { type: "START_RECORDING" }
   | { type: "SEEK_DONE" }
   | { type: "OUT_REACHED" }
+  /** 録り始めてから戻る。範囲は残すので、そのまま録り直せる */
+  | { type: "CANCEL_RECORDING" }
   | { type: "BLOB_READY"; clipId: string; mimeType: string }
   | { type: "RETAKE" }
   | { type: "POST" }

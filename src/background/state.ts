@@ -73,11 +73,19 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
       if (event.type === "SEEK_DONE") {
         return { kind: "recording", range: state.range, meta: state.meta };
       }
+      if (event.type === "CANCEL_RECORDING") {
+        return { kind: "ready", range: state.range, meta: state.meta };
+      }
       return invalid(state);
 
     case "recording":
       if (event.type === "OUT_REACHED") {
         return { kind: "encoding", range: state.range, meta: state.meta };
+      }
+      // 範囲は残す。そのまま録り直せる。録画の停止は content script が
+      // 「recording から外れた」ことを見て行う
+      if (event.type === "CANCEL_RECORDING") {
+        return { kind: "ready", range: state.range, meta: state.meta };
       }
       return invalid(state);
 

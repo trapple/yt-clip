@@ -326,3 +326,34 @@ describe("添付に失敗した後", () => {
     expect(reduce(downloadable, { type: "ATTACHED" }).kind).toBe("failed");
   });
 });
+
+describe("録画の中止", () => {
+  test("シーク中に中止すると範囲を残して戻る", () => {
+    const seeking: ClipState = { kind: "seeking", range, meta };
+    expect(reduce(seeking, { type: "CANCEL_RECORDING" })).toEqual({
+      kind: "ready",
+      range,
+      meta,
+    });
+  });
+
+  test("録画中に中止すると範囲を残して戻る", () => {
+    // 範囲を残すので、そのまま録り直せる
+    const recording: ClipState = { kind: "recording", range, meta };
+    expect(reduce(recording, { type: "CANCEL_RECORDING" })).toEqual({
+      kind: "ready",
+      range,
+      meta,
+    });
+  });
+
+  test("書き出し中は中止できない", () => {
+    // ここで止めると、録り終えたものを捨てることになる
+    const encoding: ClipState = { kind: "encoding", range, meta };
+    expect(reduce(encoding, { type: "CANCEL_RECORDING" }).kind).toBe("failed");
+  });
+
+  test("録画していないときの中止は失敗として表面化させる", () => {
+    expect(reduce(ready, { type: "CANCEL_RECORDING" }).kind).toBe("failed");
+  });
+});
