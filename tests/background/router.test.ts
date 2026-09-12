@@ -349,10 +349,10 @@ describe("投稿画面が用意できないとき", () => {
     // 存在することだけを確認する
     const state = h.router.getState();
     expect(state).toMatchObject({
-      kind: "downloadable",
+      kind: "degraded",
       reason: "x-attach-failed",
     });
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 
   test("準備完了直後はまだ composing のまま", async () => {
@@ -370,7 +370,7 @@ describe("投稿画面が用意できないとき", () => {
 
     // タイマーは取り消されるのではなく、待つ対象が「投稿画面の準備」から
     // 「添付の結果」に張り替わるだけ。タブを閉じられれば結果は永久に
-    // 来ないため、ここでも時間切れになれば downloadable へ退避する
+    // 来ないため、ここでも時間切れになれば degraded へ退避する
     h.fireTimers();
     await Promise.resolve();
 
@@ -378,10 +378,10 @@ describe("投稿画面が用意できないとき", () => {
     // 存在することだけを確認する
     const state = h.router.getState();
     expect(state).toMatchObject({
-      kind: "downloadable",
+      kind: "degraded",
       reason: "x-attach-failed",
     });
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 
   test("添付完了が届けば張り替えたタイマーも取り消される", async () => {
@@ -469,7 +469,7 @@ describe("投稿待ちから離れたらタイマーを始末する", () => {
 
     // 30 秒以内に録り直して preview まで進む。ここで古いタイマーが残っていると、
     // 全く無関係なこの場面が「X の画面構成が変わった」という誤った理由で
-    // downloadable に落ちてしまう
+    // degraded に落ちてしまう
     await h.router.handle({
       type: "clip/event",
       event: { type: "START_RECORDING" },
@@ -529,13 +529,13 @@ describe("受け付けられないメッセージで状態を壊さない", () =
     const h = makeHarness({}, clip);
     await reachComposing(h);
     await h.router.handle({ type: "x/failed", reason: "セレクタ不一致" });
-    // 二度目。downloadable は DEGRADE を受理しないので拒まれる遷移になる
+    // 二度目。degraded は DEGRADE を受理しないので拒まれる遷移になる
     await h.router.handle({ type: "x/failed", reason: "セレクタ不一致" });
 
     const state = h.router.getState();
-    expect(state.kind).toBe("downloadable");
+    expect(state.kind).toBe("degraded");
     // failed に落ちると clipId ごと失われ、録画した動画を取り出せなくなる
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 
   test("録画開始の通知が二重に届いても recording のまま保つ", async () => {
@@ -623,10 +623,10 @@ describe("想定できない失敗を握り潰さない", () => {
     // 存在することだけを確認する
     const state = h.router.getState();
     expect(state).toMatchObject({
-      kind: "downloadable",
+      kind: "degraded",
       reason: "x-attach-failed",
     });
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 
   test("クリップを持たない状態の例外は内部エラーとして提示する", async () => {
@@ -762,8 +762,8 @@ describe("録画の終了と保存", () => {
 
     expect(h.saved[0]?.mimeType).toBe("video/webm");
     const state = h.router.getState();
-    expect(state.kind).toBe("downloadable");
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state.kind).toBe("degraded");
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 
   test("停止指示に応答が無くても、届いた録画結果を保存する", async () => {
@@ -852,7 +852,7 @@ describe("録画の終了と保存", () => {
     );
   });
 
-  test("WebM を受け取ったら downloadable へ退避する", async () => {
+  test("WebM を受け取ったら degraded へ退避する", async () => {
     const h = makeHarness();
     await recordUntilEncoding(h);
     await h.router.handle({
@@ -863,8 +863,8 @@ describe("録画の終了と保存", () => {
 
     // 録画は成功しているので成果物は捨てない
     const state = h.router.getState();
-    expect(state).toMatchObject({ kind: "downloadable", reason: "mp4-unsupported" });
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state).toMatchObject({ kind: "degraded", reason: "mp4-unsupported" });
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 
   test("録画側の失敗は握り潰さず failed にする", async () => {
@@ -1005,7 +1005,7 @@ describe("X への受け渡し", () => {
 
   test("投稿タブの応答が無いだけなら composing のまま添付の結果を待つ", async () => {
     // **添付は投稿タブで正常に進んでいる。** ここで退避すると popup が
-    // ダウンロード誘導になり、後から届く x/attached は downloadable から
+    // ダウンロード誘導になり、後から届く x/attached は degraded から
     // 拒まれて戻れなくなる
     const h = makeHarness(
       {
@@ -1039,26 +1039,26 @@ describe("X への受け渡し", () => {
 
     const state = h.router.getState();
     expect(state).toMatchObject({
-      kind: "downloadable",
+      kind: "degraded",
       reason: "x-attach-failed",
     });
     // 録画済みクリップへの参照は残す
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 
-  test("添付失敗でも成果物は捨てず downloadable へ退避する", async () => {
+  test("添付失敗でも成果物は捨てず degraded へ退避する", async () => {
     const h = makeHarness({}, clip);
     await reachComposing(h);
     await h.router.handle({ type: "x/failed", reason: "セレクタ不一致" });
 
     const state = h.router.getState();
     expect(state).toMatchObject({
-      kind: "downloadable",
+      kind: "degraded",
       reason: "x-attach-failed",
       mimeType: "video/mp4",
     });
     // 保存済みクリップへの参照が残っていること
-    expect(state.kind === "downloadable" && state.clipId).toBeTruthy();
+    expect(state.kind === "degraded" && state.clipId).toBeTruthy();
   });
 });
 

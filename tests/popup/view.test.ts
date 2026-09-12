@@ -77,23 +77,24 @@ describe("プレビューと投稿", () => {
 });
 
 describe("degraded path", () => {
-  test("MP4 非対応は spec の文言でダウンロードへ誘導する", () => {
+  test("MP4 非対応は行き止まりであることを伝える", () => {
     const view = describeState({
-      kind: "downloadable",
+      kind: "degraded",
       clipId: "clip-1",
       range,
       meta,
       mimeType: "video/webm",
       reason: "mp4-unsupported",
     });
+    // **ダウンロードへ誘導しないこと。** 取り出す道はもう無い
     expect(view.message).toBe(
-      "この環境では X に直接添付できません。変換してご利用ください",
+      "このブラウザでは X に添付できる形式で録画できません",
     );
   });
 
-  test("添付失敗は spec の文言で手動添付へ誘導する", () => {
+  test("添付失敗はやり直せることを伝える", () => {
     const view = describeState({
-      kind: "downloadable",
+      kind: "degraded",
       clipId: "clip-1",
       range,
       meta,
@@ -101,7 +102,7 @@ describe("degraded path", () => {
       reason: "x-attach-failed",
     });
     expect(view.message).toBe(
-      "X の画面構成が変わったため自動添付できませんでした。ファイルをダウンロードして手動で添付してください",
+      "X への自動添付に失敗しました。「X にもう一度投稿」でやり直せます",
     );
   });
 });

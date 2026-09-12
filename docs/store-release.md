@@ -1,0 +1,131 @@
+# Chrome ウェブストア公開の手引き
+
+## 0. 先に読むこと — 審査で落ちる可能性が高い
+
+**ウェブストアは、サイトの利用規約に反してストリーミング動画をダウンロード
+させる拡張を禁止している。** YouTube の利用規約は YouTube が提供する手段以外
+での動画のダウンロードを禁じており、これを理由に多数の YouTube ダウンローダ
+拡張が削除されてきた。
+
+この拡張は再生中の動画を `captureStream()` で録画する。**録画そのものが
+禁止の対象に当たりうる。**
+
+ディスクへ書き出す経路は 2026-09-12 に廃止した
+(`.claude/specs/2026-09-12-drop-auto-save-design.md`)。クリップはブラウザの中に
+留まり、X の投稿画面へ添付されるだけになる。「ダウンローダ」という見え方は
+弱まるが、**録画している事実は変わらないので、これで通る保証は無い。**
+
+提出前に、以下を自分の目で確認すること。ここの結論が出るまで他の準備は
+意味を持たない。
+
+- [ ] [Chrome Web Store Developer Program Policies](https://developer.chrome.com/docs/webstore/program-policies)
+      の現行本文を読み、ストリーミング保存に関する条項を確認した
+- [ ] [YouTube 利用規約](https://www.youtube.com/t/terms)の「許可されない行為」を確認した
+- [ ] 落ちた場合にどうするかを決めた (公開を諦める / 自分用に unpacked のまま使う /
+      仕組みを変える)
+
+**審査に落ちても拡張が壊れるわけではない。** 開発者モードで読み込めば今まで
+どおり使える。公開は「他人に配る」ための手続きであって、自分で使う分には要らない。
+
+## 1. 提出物
+
+| 物 | 状態 | 備考 |
+|---|---|---|
+| 登録料 5 USD (1 回きり) | 未 | [Developer Dashboard](https://chrome.google.com/webstore/devconsole) で支払う |
+| zip パッケージ | `npm run package` | `dist` を固めたもの |
+| アイコン 128x128 | 済 | `public/icons/icon-128.png` |
+| スクリーンショット 1280x800 (1〜5 枚) | `npm run screenshots` | 2 枚は自動。X の投稿画面だけ手撮り (§4) |
+| プライバシーポリシーの URL | **未** | 本文は `docs/privacy-policy.md`。公開 URL が要る (§3) |
+| 権限の説明文 | 済 | §2 をそのまま貼る |
+| 単一用途の説明 | 済 | §2 |
+
+## 2. ダッシュボードに書く文面
+
+そのまま貼れる形で持っておく。**実装と食い違うと審査で止まる**ので、
+権限を足したらここも直すこと。
+
+### 単一用途 (Single purpose)
+
+> YouTube の再生画面で選んだ区間を録画し、X の投稿画面に動画と本文を添付する。
+> 用途はこの 1 つに限られる。
+
+### `storage`
+
+> 投稿本文のテンプレート、チャンネルごとのハッシュタグ、クリップの最大秒数を
+> 保存する (`chrome.storage.sync`)。録画の進行状態を service worker の再起動を
+> またいで保つのにも使う (`chrome.storage.session`)。
+
+### `https://www.youtube.com/*`
+
+> 再生画面に操作 UI を差し込み、選ばれた区間の動画を録画するため。
+
+### `https://x.com/*`
+
+> 録画した動画と本文を投稿画面に添付するため。**投稿ボタンは押さない。**
+
+### リモートコードの使用
+
+> 使用しない。すべてのコードはパッケージに含まれている。
+
+### データの取り扱い (Privacy practices)
+
+- 収集するもの: **なし**
+- 販売・移転: **しない**
+- 用途外の使用: **しない**
+- 設定は利用者の Google アカウントに同期されるだけで、開発者を含む第三者には送られない
+- 録画した動画はブラウザの中に留まり、ディスクには書き出されない (X への添付は利用者のブラウザ内で完結する)
+
+## 3. プライバシーポリシーの公開
+
+ダッシュボードは**ポリシーの URL** を求める。ファイルを置くだけでは足りない。
+
+もっとも手軽なのは GitHub Pages:
+
+1. リポジトリの Settings → Pages → Source を `main` / `/docs` にする
+2. `https://trapple.github.io/yt-clip/privacy-policy` が URL になる
+3. その URL をダッシュボードに入れる
+
+## 4. スクリーンショット
+
+```bash
+npm run screenshots   # release/screenshots/ に 1280x800 を 2 枚
+```
+
+1. `1-range.png` — 再生画面の下に出た操作バーと拡大バー (IN/OUT を置いた状態)
+2. `2-settings.png` — 設定パネルを開いた状態
+
+**題材は Big Buck Bunny (Blender Foundation, Creative Commons)。** 掲載画像には
+動画の中身がそのまま写るので、権利関係で問題にならないものを使う。
+関連動画の欄は隠してある (他人の動画のサムネイルを写さないため)。
+
+**X の投稿画面はログインが要るので自動化していない。** 3 枚目が欲しければ
+手で撮ること。本文と動画が入った状態が分かりやすい。
+
+出力は 1280x800 / 24bit RGB / アルファ無しで、そのまま上げられる。
+アップローダに形式を拒まれたら JPEG へ変換する:
+
+```bash
+sips -s format jpeg -s formatOptions 90 release/screenshots/1-range.png --out release/screenshots/1-range.jpg
+```
+
+## 5. 公開までの手順
+
+```bash
+npm run typecheck && npm test && npm run e2e   # 全部通ることを確認
+npm run package                                # dist を zip に固める
+```
+
+1. [Developer Dashboard](https://chrome.google.com/webstore/devconsole) で「新しいアイテム」
+2. `yt-clip-<version>.zip` をアップロード
+3. ストアの掲載情報 (説明・アイコン・スクリーンショット・カテゴリ) を埋める
+4. プライバシーの項目に §2 の文面を入れる
+5. 公開範囲を選ぶ
+   - **限定公開 (Unlisted)** — URL を知っている人だけ。**最初はこれを勧める**。
+     検索に出ないぶん目に付きにくく、落ちたときの影響も小さい
+   - 公開 (Public) — 誰でも検索できる
+6. 審査へ提出する (数日かかる)
+
+## 6. 版を上げるとき
+
+`manifest.config.ts` の `version` を上げてから `npm run package`。
+**同じ版番号では再アップロードできない。**

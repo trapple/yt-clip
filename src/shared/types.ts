@@ -20,7 +20,15 @@ export type VideoMeta = {
   channelId: string;
 };
 
-/** 録画は成功したが通常の投稿フローに乗せられなかった理由 */
+/**
+ * 録画は成功したが通常の投稿フローに乗せられなかった理由。
+ *
+ * **`mp4-unsupported` は行き止まり。** 自動ダウンロードを廃止したので、
+ * 録れた WebM を取り出す道は無い。操作の出し分けは状態の種類だけを見ており
+ * 理由までは見ないため、「X にもう一度投稿」は押せるが同じ理由でまた失敗する。
+ * 起きるのはプロプライエタリコーデック無しの環境だけなので、そこに分岐を
+ * 足す価値より構造を複雑にする損の方が大きいと判断した
+ */
 export type DegradedReason = "mp4-unsupported" | "x-attach-failed";
 
 /** 明示的な失敗の理由。握り潰さず必ずユーザーに提示する */
@@ -93,7 +101,7 @@ export type ClipState =
       mimeType: string;
     }
   | {
-      kind: "downloadable";
+      kind: "degraded";
       clipId: string;
       range: ClipRange;
       meta: VideoMeta;

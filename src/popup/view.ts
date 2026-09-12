@@ -21,11 +21,17 @@ export type PopupView = {
   recordingSec: number | null;
 };
 
+/**
+ * 録画は成功したが投稿の流れに乗せられなかった理由。
+ *
+ * **ダウンロードへ誘導しないこと。** 動画ファイルをディスクに書き出す経路は
+ * 廃止した (`.claude/specs/2026-09-12-drop-auto-save-design.md`)
+ */
 const DEGRADED_MESSAGES = {
   "mp4-unsupported":
-    "この環境では X に直接添付できません。変換してご利用ください",
+    "このブラウザでは X に添付できる形式で録画できません",
   "x-attach-failed":
-    "X の画面構成が変わったため自動添付できませんでした。ファイルをダウンロードして手動で添付してください",
+    "X への自動添付に失敗しました。「X にもう一度投稿」でやり直せます",
 } as const;
 
 function durationOf(startSec: number, endSec: number): number {
@@ -95,7 +101,7 @@ export function describeState(state: ClipState): PopupView {
         recordingSec: null,
       };
 
-    case "downloadable":
+    case "degraded":
       return {
         message: DEGRADED_MESSAGES[state.reason],
         busy: false,

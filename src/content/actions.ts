@@ -60,7 +60,7 @@ export function actionsFor(kind: ClipState["kind"]): BarAction[] {
       return ["retake"];
     case "posted":
       return ["repost", "retake"];
-    case "downloadable":
+    case "degraded":
       return ["repost", "retake"];
     case "failed":
       return ["retry"];

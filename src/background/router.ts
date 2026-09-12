@@ -217,7 +217,7 @@ export function createRouter(
    * 拒まれた遷移なら `null` を返し、状態は書き換えない。
    *
    * 一部のイベントだけ直接 `publish` すると保護が抜ける。たとえば `x/failed` が
-   * 二重に届いたとき、二度目は `downloadable` から拒まれる遷移になるが、それを
+   * 二重に届いたとき、二度目は `degraded` から拒まれる遷移になるが、それを
    * 書き換えてしまうと `failed` には `clipId` が無いため録画済みクリップへの
    * 参照ごと消える。
    *
@@ -349,7 +349,7 @@ export function createRouter(
 
     // 投稿タブに受け手が居ないと分かった場合だけ退避する。応答が無いだけで
     // 退避すると、**添付は投稿タブで正常に進んでいるのに** popup が
-    // ダウンロード誘導になり、後から届く x/attached は downloadable から
+    // ダウンロード誘導になり、後から届く x/attached は degraded から
     // 拒まれて戻れなくなる。待ちすぎは COMPOSE_READY_TIMEOUT_MS が拾う
     if (delivery === "unreachable") {
       await apply({ type: "DEGRADE", reason: "x-attach-failed" });

@@ -116,7 +116,7 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
       }
       if (event.type === "DEGRADE") {
         return {
-          kind: "downloadable",
+          kind: "degraded",
           clipId: state.clipId,
           mimeType: state.mimeType,
           range: state.range,
@@ -146,7 +146,7 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
       // 録画済みの成果物は捨てずにダウンロードへ退避させる
       if (event.type === "DEGRADE") {
         return {
-          kind: "downloadable",
+          kind: "degraded",
           clipId: state.clipId,
           mimeType: state.mimeType,
           range: state.range,
@@ -186,7 +186,7 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
       if (event.type === "RESET_MARKS") return { kind: "idle" };
       return invalid(state);
 
-    case "downloadable":
+    case "degraded":
       // X の画面構成の変化で一度失敗しても、録り直さずに試し直せる。
       // ATTACHED を拒むガード (二度目の x/failed の後に遅れて届く経路) は
       // 別の話なので、そちらはそのまま残す
