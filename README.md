@@ -87,3 +87,11 @@ E2E は実ネットワークと YouTube の実 DOM に依存するため CI で�
 
 - [`.claude/specs/2026-09-10-yt-clip-design.md`](.claude/specs/2026-09-10-yt-clip-design.md) — 全体設計 (状態機械・メッセージ・X への添付)
 - [`.claude/specs/2026-09-11-capture-and-range-ui-design.md`](.claude/specs/2026-09-11-capture-and-range-ui-design.md) — `video.captureStream()` による録画方式と、拡大バーによる範囲指定
+
+## ライセンス
+
+[MIT License](LICENSE) — Copyright (c) 2026 trapple
+
+本リポジトリのコードに適用される。YouTube の動画そのものの権利は各権利者に
+帰属し、このライセンスの対象ではない。録画したクリップの利用は YouTube の
+利用規約と各動画の権利関係に従うこと。
