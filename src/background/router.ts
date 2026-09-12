@@ -105,6 +105,14 @@ export function createRouter(
   let state: ClipState = initial?.state ?? INITIAL_STATE;
   let captureTabId: number | null = initial?.captureTabId ?? null;
   let composeTabId: number | null = initial?.composeTabId ?? null;
+  /**
+   * いまの投稿待ちで、本文と動画を既に送ったか。
+   *
+   * 投稿画面が二度読み込まれると `x/ready` も二度届く。一度目の添付が
+   * 終わる前に二度目が来ると、どちらも `composing` を通り抜けて
+   * **本文が二重に入る** (実機で確認)。送るのは一度だけにする
+   */
+  let payloadSent = false;
   /** 投稿画面の準備待ちを打ち切るためのハンドル */
   let cancelComposeTimeout: (() => void) | null = null;
 
@@ -160,6 +168,8 @@ export function createRouter(
     if (next.kind !== "composing") {
       cancelComposeTimeout?.();
       cancelComposeTimeout = null;
+      // 次の投稿待ちでは改めて送る
+      payloadSent = false;
     }
 
     state = next;
@@ -294,6 +304,12 @@ export function createRouter(
 
   async function sendPayload(): Promise<void> {
     if (state.kind !== "composing" || composeTabId === null) return;
+    if (payloadSent) {
+      console.info("本文と動画は送信済みのため、二度目の準備完了を無視しました");
+      return;
+    }
+    // 待っている間に二度目が来ても弾けるよう、await の前に立てる
+    payloadSent = true;
 
     // 待つ対象が「投稿画面の準備」から「添付の結果」に変わるだけで、
     // 待たなくてよくなるわけではない。タブを閉じられれば結果は永久に来ない

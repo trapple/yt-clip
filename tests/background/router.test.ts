@@ -924,6 +924,35 @@ describe("X への受け渡し", () => {
     });
   });
 
+  test("準備完了が二度届いても本文と動画は一度しか送らない", async () => {
+    // 投稿画面が二度読み込まれると x/ready も二度届く。一度目の添付が
+    // 終わる前に二度目が来ると、実機では本文が二重に入った
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+    await h.router.handle({ type: "x/ready" });
+
+    const payloads = h.sentToTab.filter(
+      (sent) => sent.message.type === "x/payload",
+    );
+    expect(payloads).toHaveLength(1);
+  });
+
+  test("取り直して投稿し直すときは改めて送る", async () => {
+    const h = makeHarness({}, clip);
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+    await h.router.handle({ type: "x/attached" });
+
+    await reachComposing(h);
+    await h.router.handle({ type: "x/ready" });
+
+    const payloads = h.sentToTab.filter(
+      (sent) => sent.message.type === "x/payload",
+    );
+    expect(payloads).toHaveLength(2);
+  });
+
   test("添付完了で idle に戻る", async () => {
     const h = makeHarness({}, clip);
     await reachComposing(h);
