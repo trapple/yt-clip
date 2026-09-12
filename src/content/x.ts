@@ -143,7 +143,9 @@ export async function keepText(
     // 手で書いた内容を消して元に戻してしまう
     if ((editor.textContent ?? "").trim() !== "") continue;
 
-    console.info("[yt-clip] 添付で消えた本文を入れ直します");
+    console.info(
+      `[yt-clip] 添付で消えた本文を入れ直します (${attempt + 1} 回目)`,
+    );
     // insertText が全選択して置き換えるので、入れ直しても積み上がらない
     await insertText(editor, text);
 
@@ -151,6 +153,12 @@ export async function keepText(
     // 一周ぶん待ってから次の確認に入る
     await wait(SURVIVE_CHECK_MS);
   }
+
+  const editor = findEditor();
+  console.info(
+    `[yt-clip] 見張り終わり。入力欄は ${(editor?.textContent ?? "").length} 文字`,
+    { 入力欄: editor?.textContent },
+  );
 }
 
 export async function insertText(
@@ -176,7 +184,14 @@ export async function insertText(
   selection?.addRange(range);
 
   if (document.execCommand("insertText", false, text)) {
-    console.info("[yt-clip] 本文を execCommand で入力しました");
+    // **入れた後の中身も出す。** 入れた文字列が正しくても、X 側の補完
+    // (ハッシュタグの候補など) が後から書き換えることがある
+    console.info(
+      `[yt-clip] 本文を execCommand で入力しました (${text.length} 文字 → 入力欄 ${
+        (editor.textContent ?? "").length
+      } 文字)`,
+      { 入れた文字列: text, 入力欄: editor.textContent },
+    );
     return;
   }
 
@@ -195,7 +210,12 @@ export async function insertText(
   // 入ったかどうかは戻り値では判断できない (preventDefault の有無しか分からない)。
   // 実際に本文へ現れたかを見る
   if (containsHead(editor.textContent ?? "", text)) {
-    console.info("[yt-clip] 本文を paste で入力しました");
+    console.info(
+      `[yt-clip] 本文を paste で入力しました (${text.length} 文字 → 入力欄 ${
+        (editor.textContent ?? "").length
+      } 文字)`,
+      { 入れた文字列: text, 入力欄: editor.textContent },
+    );
     return;
   }
 
