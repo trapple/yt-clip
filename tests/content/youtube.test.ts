@@ -382,6 +382,9 @@ beforeAll(async () => {
   };
 });
 
+/** 自動保存でダウンロードされたファイル名 */
+let saved: string[] = [];
+
 beforeEach(async () => {
   history.pushState({}, "", "/watch?v=video-a");
   buildPage();
@@ -389,6 +392,16 @@ beforeEach(async () => {
   recorders = [];
   stoppedTracks = 0;
   rejectMessageType = null;
+  saved = [];
+
+  // jsdom は Blob の URL を作れない。自動保存の経路を実際に通すため補う
+  URL.createObjectURL = (): string => "blob:fake";
+  URL.revokeObjectURL = (): void => undefined;
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    saved.push(this.download);
+  });
 
   // DOM を作り直したので、observer に拾わせて操作 UI を載せ直す
   document.body.append(document.createElement("div"));
@@ -578,6 +591,10 @@ describe("録画の後始末", () => {
     await flush();
 
     expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+
+    // **送る前に自動保存していること。** ここが外れても他のテストは通る。
+    // 投稿の成否に関わらず手元に残すのが目的なので、配線そのものを固定する
+    expect(saved).toEqual(["yt-clip-video-a-10s.mp4"]);
 
     // **送る前に表示行列を直していること。** ここが外れても他のテストは
     // 全部通ってしまう (実際に外して確認した)。#6 はこの branch でいちばん

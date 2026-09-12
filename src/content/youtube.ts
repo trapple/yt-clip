@@ -10,6 +10,7 @@ import {
 } from "@/content/player";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
+import { saveToDownloads } from "@/content/save";
 import { makeDefaultRange } from "@/content/range-math";
 import {
   DrmProtectedError,
@@ -19,6 +20,7 @@ import {
 } from "@/content/recorder";
 import { YT_SELECTORS } from "@/content/selectors";
 import { encodeBase64 } from "@/shared/base64";
+import { buildClipFileName } from "@/shared/filename";
 import type { Message, MessageResponse } from "@/shared/messages";
 import { formatTime, validateRange } from "@/shared/time";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
@@ -564,6 +566,17 @@ async function finishRecording(): Promise<void> {
           `表示行列を直せませんでした。X への添付は弾かれる見込みです: ${String(error)}`,
         );
       }
+    }
+
+    // 投稿の成否に関わらず手元に残す。添付が失敗しても録り直さずに済む。
+    // 範囲を作った動画が分からなければファイル名を組み立てられないので、
+    // 揃わないまま保存はしない
+    if (currentRange !== null && rangeVideoId !== null) {
+      saveToDownloads(
+        bytes,
+        buildClipFileName(rangeVideoId, currentRange.startSec, blob.type),
+        blob.type,
+      );
     }
 
     notify({
