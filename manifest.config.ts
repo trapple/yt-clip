@@ -1,4 +1,36 @@
 import { defineManifest } from "@crxjs/vite-plugin";
+import { readFileSync } from "node:fs";
+
+/**
+ * 版番号は `package.json` から読む。**ここに直接書かないこと。**
+ *
+ * 2 箇所に手書きすると、片方を上げたときにもう片方が置いていかれる。
+ * `npm version` は `package.json` だけを更新してタグを打つので、
+ * 出どころをそちらに寄せておけば「この版はどのコミットか」が常に辿れる。
+ */
+function packageVersion(): string {
+  const path = new URL("./package.json", import.meta.url);
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const version =
+    typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>).version
+      : undefined;
+
+  if (typeof version !== "string") {
+    throw new Error("package.json に version がありません");
+  }
+  // Chrome が受け付けるのは 1〜4 個の整数をドットで繋いだ形だけ。
+  // npm の `1.0.0-beta.1` のような前置き付きは読み込み時に弾かれる。
+  // ビルドが通った後に拡張が入らない、という分かりにくい失敗を避けるため
+  // ここで止める (前置きを使いたい場合は manifest の version_name が要る)
+  if (!/^\d+(\.\d+){0,3}$/.test(version)) {
+    throw new Error(
+      `Chrome が受け付けない版番号です: ${version} (整数をドットで繋いだ形のみ)`,
+    );
+  }
+  return version;
+}
+
 
 /**
  * 権限は設計ドキュメント「必要な権限」表と 1:1 対応させる。
@@ -9,7 +41,7 @@ import { defineManifest } from "@crxjs/vite-plugin";
 export default defineManifest({
   manifest_version: 3,
   name: "yt-clip",
-  version: "0.1.0",
+  version: packageVersion(),
   description: "YouTube の切り抜きを作って X に投稿する",
   homepage_url: "https://github.com/trapple/yt-clip",
   // ダウンロードは content script がアンカー要素で行うため権限は要らない。
