@@ -1,5 +1,7 @@
 import { INITIAL_STATE, reduce } from "@/background/state";
 import type { StoredClip } from "@/background/storage";
+// MIME の扱いは録画形式の知識なので codec.ts に集約している (DOM 非依存)
+import { baseMimeType } from "@/content/codec";
 import { decodeBase64, encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message } from "@/shared/messages";
@@ -17,7 +19,12 @@ export type RouterDeps = {
   getClip(id: string): Promise<StoredClip>;
   /** popup 宛。受け手が居ないことは正常なので送信側では扱わない */
   sendToRuntime(message: Message): void;
-  sendToTab(tabId: number, message: Message): void;
+  /**
+   * タブ宛。**受け手が居ないことは異常なので必ず失敗を返す。**
+   * タブが閉じられた・content script が消えた場合、録画の続きを進める相手が
+   * 居ないまま seeking / encoding で固まり、popup からも抜けられなくなる
+   */
+  sendToTab(tabId: number, message: Message): Promise<void>;
   openComposeTab(): Promise<number>;
   loadTemplate(): Promise<string>;
   /** UTC epoch ミリ秒 */
@@ -34,6 +41,45 @@ export type RouterDeps = {
  */
 const COMPOSE_READY_TIMEOUT_MS = 30_000;
 
+/**
+ * タブへの指示に応答が返るのを待つ上限。
+ *
+ * 待ちは直列 queue の中で起きるため、応答が返らないと以降のメッセージが
+ * 1 つも処理されなくなり、拡張を再読み込みするまで復帰できない。
+ * **時間切れは「届かなかった」ではなく「応答が無かった」として扱う。**
+ */
+const TAB_COMMAND_TIMEOUT_MS = 5_000;
+
+/** タブへの指示がどう終わったか */
+type TabDelivery =
+  /** 応答が返った */
+  | "delivered"
+  /** 応答が無かった。受け手は居て、処理も済んでいる見込みがある */
+  | "no-response"
+  /** 受け手が居ない。タブが失われている */
+  | "unreachable";
+
+/**
+ * タブに受け手が居ないことを示す失敗か。
+ *
+ * `chrome.tabs.sendMessage` の reject には**意味が正反対の 2 種類**がある。
+ *
+ * - `Could not establish connection. Receiving end does not exist.`
+ *   → リスナが 1 つも居ない。**本当にタブが失われている**
+ * - `The message port closed before a response was received.`
+ *   → リスナは居るが応答を返さなかった。**受け手は居て、処理も済んでいる**
+ *
+ * 後者はタブ側が `sendResponse` を呼ばなければ通常経路で起きるうえ、Chrome の
+ * バージョンによって resolve するか reject するかが変わってきた領域でもある。
+ * 区別せず「タブが失われた」と解釈すると、正常な録画も投稿も失敗に落ちる。
+ */
+export function isTabUnreachable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Receiving end does not exist|Could not establish connection/.test(
+    message,
+  );
+}
+
 /** service worker が停止しても復元できるよう保存する内容 */
 export type RouterSnapshot = {
   state: ClipState;
@@ -44,6 +90,12 @@ export type RouterSnapshot = {
 export type Router = {
   getState(): ClipState;
   handle(message: Message, senderTabId?: number): Promise<void>;
+  /**
+   * タブが閉じられた。録画対象のタブなら録画は続けられない。
+   * service worker は数十秒で止まるためタイマーによる救済は当てにできず、
+   * 閉じられたことを知る経路はこれしかない
+   */
+  handleTabRemoved(tabId: number): Promise<void>;
 };
 
 export function createRouter(
@@ -53,8 +105,64 @@ export function createRouter(
   let state: ClipState = initial?.state ?? INITIAL_STATE;
   let captureTabId: number | null = initial?.captureTabId ?? null;
   let composeTabId: number | null = initial?.composeTabId ?? null;
+  /**
+   * いまの投稿待ちで、本文と動画を既に送ったか。
+   *
+   * 投稿画面が二度読み込まれると `x/ready` も二度届く。一度目の添付が
+   * 終わる前に二度目が来ると、どちらも `composing` を通り抜けて
+   * **本文が二重に入る** (実機で確認)。送るのは一度だけにする。
+   *
+   * **永続化しないのは意図。** service worker が落ちて再起動した後に
+   * `x/ready` が届く場面は「投稿画面が読み込み直された」場面であり、
+   * そこでは送り直すのが正しい
+   */
+  let payloadSent = false;
   /** 投稿画面の準備待ちを打ち切るためのハンドル */
   let cancelComposeTimeout: (() => void) | null = null;
+
+  /**
+   * タブへ指示を送り、結果を分類する。
+   *
+   * **応答が無いこと自体は失敗ではない。** 失敗に落としてよいのは
+   * `isTabUnreachable` で受け手不在と分かったときだけ。
+   */
+  async function commandTab(
+    tabId: number,
+    message: Message,
+  ): Promise<TabDelivery> {
+    // startTimer は Promise の executor の中で同期的に呼ばれるので、
+    // race を待つ時点では必ず本物の取り消し関数が入っている
+    let cancelTimeout: () => void = () => undefined;
+    const timedOut = new Promise<TabDelivery>((resolve) => {
+      cancelTimeout = deps.startTimer(TAB_COMMAND_TIMEOUT_MS, () => {
+        console.error(
+          "タブへの指示が時間内に応答しませんでした",
+          tabId,
+          message.type,
+        );
+        resolve("no-response");
+      });
+    });
+
+    const answered = deps.sendToTab(tabId, message).then(
+      (): TabDelivery => "delivered",
+      (error: unknown): TabDelivery => {
+        if (isTabUnreachable(error)) return "unreachable";
+        // 受け手は居る。理由を残さないと、後から区別がつかなくなる
+        console.error(
+          "タブへの指示に応答がありませんでした",
+          tabId,
+          message.type,
+          error,
+        );
+        return "no-response";
+      },
+    );
+
+    const delivery = await Promise.race([answered, timedOut]);
+    cancelTimeout();
+    return delivery;
+  }
 
   /** 新しい状態を確定させ、関係者へ通知する */
   async function publish(next: ClipState): Promise<void> {
@@ -64,6 +172,8 @@ export function createRouter(
     if (next.kind !== "composing") {
       cancelComposeTimeout?.();
       cancelComposeTimeout = null;
+      // 次の投稿待ちでは改めて送る
+      payloadSent = false;
     }
 
     state = next;
@@ -71,8 +181,16 @@ export function createRouter(
 
     const message: Message = { type: "state/changed", state };
     deps.sendToRuntime(message);
-    if (captureTabId !== null) {
-      deps.sendToTab(captureTabId, message);
+
+    const tabId = captureTabId;
+    if (tabId !== null) {
+      // **これはブロードキャストなので待たない。** publish は直列 queue の
+      // 中で走るため、ここで応答を待つと、返ってこないときに以降のメッセージが
+      // 1 つも処理されなくなる。タブが失われたかどうかは tabs.onRemoved と、
+      // 実際に指示を出す recorder/start・recorder/stop・x/payload で判断する
+      void deps.sendToTab(tabId, message).catch((error: unknown) => {
+        console.error("録画対象のタブへ状態を届けられませんでした", tabId, error);
+      });
     }
   }
 
@@ -138,7 +256,12 @@ export function createRouter(
       return;
     }
     // 録画するのは content script。service worker は指示を出すだけ
-    deps.sendToTab(captureTabId, { type: "recorder/start" });
+    const delivery = await commandTab(captureTabId, { type: "recorder/start" });
+    // 受け手が居ないと分かったときだけ落とす。応答が無いだけなら content
+    // script は指示を受け取っている見込みで、recorder/started が続く
+    if (delivery === "unreachable") {
+      await fail("tab-lost");
+    }
   }
 
   /**
@@ -158,25 +281,39 @@ export function createRouter(
       return;
     }
 
+    // **ここが録画データの入口。以降は素の MIME だけを扱う。**
+    // content script から届くのは MediaRecorder 用のコーデック付き MIME
+    // (`video/mp4;codecs="avc1.42E01E,mp4a.40.2"`)。そのまま持ち回ると、
+    // 保存する Blob も、添付する File も、ダウンロードするファイルも
+    // パラメータ付きのラベルになる。X はそれで対応形式の判定に落ちる
+    const storedMime = baseMimeType(mimeType);
+
     const clipId = `clip-${deps.now()}`;
     await deps.saveClip({
       id: clipId,
-      blob: new Blob([decodeBase64(base64)], { type: mimeType }),
-      mimeType,
+      blob: new Blob([decodeBase64(base64)], { type: storedMime }),
+      mimeType: storedMime,
       range: state.range,
       meta: state.meta,
       createdAt: deps.now(),
     });
-    await apply({ type: "BLOB_READY", clipId, mimeType });
+    await apply({ type: "BLOB_READY", clipId, mimeType: storedMime });
 
-    // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない
-    if (!mimeType.includes("mp4")) {
+    // MP4 でなければ X に添付できないが、録画済みの成果物は捨てない。
+    // パラメータを落としても video/mp4 / video/webm の判定は変わらない
+    if (!storedMime.includes("mp4")) {
       await apply({ type: "DEGRADE", reason: "mp4-unsupported" });
     }
   }
 
   async function sendPayload(): Promise<void> {
     if (state.kind !== "composing" || composeTabId === null) return;
+    if (payloadSent) {
+      console.info("本文と動画は送信済みのため、二度目の準備完了を無視しました");
+      return;
+    }
+    // 待っている間に二度目が来ても弾けるよう、await の前に立てる
+    payloadSent = true;
 
     // 待つ対象が「投稿画面の準備」から「添付の結果」に変わるだけで、
     // 待たなくてよくなるわけではない。タブを閉じられれば結果は永久に来ない
@@ -188,7 +325,7 @@ export function createRouter(
 
     const clip = await deps.getClip(state.clipId);
     const template = await deps.loadTemplate();
-    deps.sendToTab(composeTabId, {
+    const delivery = await commandTab(composeTabId, {
       type: "x/payload",
       base64: encodeBase64(new Uint8Array(await clip.blob.arrayBuffer())),
       mimeType: clip.mimeType,
@@ -199,6 +336,14 @@ export function createRouter(
       ),
       text: renderTemplate(template, clip.meta, clip.range),
     });
+
+    // 投稿タブに受け手が居ないと分かった場合だけ退避する。応答が無いだけで
+    // 退避すると、**添付は投稿タブで正常に進んでいるのに** popup が
+    // ダウンロード誘導になり、後から届く x/attached は downloadable から
+    // 拒まれて戻れなくなる。待ちすぎは COMPOSE_READY_TIMEOUT_MS が拾う
+    if (delivery === "unreachable") {
+      await apply({ type: "DEGRADE", reason: "x-attach-failed" });
+    }
   }
 
   async function handleEvent(
@@ -235,8 +380,18 @@ export function createRouter(
     if (state.kind === previous.kind) return;
 
     if (state.kind === "encoding") {
-      if (captureTabId !== null) {
-        deps.sendToTab(captureTabId, { type: "recorder/stop" });
+      if (captureTabId === null) {
+        await fail("tab-lost");
+        return;
+      }
+      const delivery = await commandTab(captureTabId, {
+        type: "recorder/stop",
+      });
+      // 応答が無いだけなら encoding のまま待つ。実時間をかけた録画結果が
+      // 後から届くことがあり、ここで失敗に落とすと storeRecording が
+      // 「encoding ではない」として成果物を捨ててしまう
+      if (delivery === "unreachable") {
+        await fail("tab-lost");
       }
       return;
     }
@@ -253,6 +408,29 @@ export function createRouter(
     }
   }
 
+  /**
+   * content script が読み込まれた。
+   *
+   * 録画中にタブをリロードすると、OUT を監視していた content script ごと消える。
+   * タブは生きているので `tabs.onRemoved` は発火せず、`state/changed` も起きない
+   * ので送信失敗からも気付けない。`OUT_REACHED` は永久に来ず、popup にも押せる
+   * ボタンが無い。ここが唯一の抜け道になる。
+   *
+   * **録画対象のタブからの通知でなければ何もしない。** 録画中に別の YouTube
+   * タブを開いただけで、進行中の録画を落としてしまう。
+   */
+  async function handleContentLoaded(senderTabId?: number): Promise<void> {
+    if (senderTabId === undefined || senderTabId !== captureTabId) return;
+    if (!BUSY_KINDS.has(state.kind)) return;
+
+    // 理由を残さないと、popup の「録画が中断されました」だけでは原因を追えない
+    console.error(
+      `録画中に対象タブが読み込み直されました (状態: ${state.kind})`,
+      senderTabId,
+    );
+    await fail("recording-aborted");
+  }
+
   async function route(
     message: Message,
     senderTabId?: number,
@@ -260,6 +438,9 @@ export function createRouter(
     switch (message.type) {
       case "clip/event":
         await handleEvent(message.event, senderTabId);
+        return;
+      case "content/loaded":
+        await handleContentLoaded(senderTabId);
         return;
       case "recorder/started":
         await apply({ type: "SEEK_DONE" });
@@ -293,6 +474,11 @@ export function createRouter(
    * 処理中の連鎖。メッセージは 1 つずつ順に処理する。
    * 保存など時間のかかる副作用の最中に別のメッセージが状態を進めると、
    * 戻ってきたときの遷移が拒まれて録画済みクリップへの参照を失う。
+   *
+   * **不変条件: この中で settle しない Promise を待たないこと。**
+   * 1 つ止まれば以降のメッセージが 1 つも処理されず、拡張を再読み込みする
+   * まで復帰できない。別のコンテキスト (タブ) の応答を待つものは、必ず
+   * `commandTab` のように上限を付けてから待つ。
    */
   let queue: Promise<void> = Promise.resolve();
 
@@ -317,6 +503,30 @@ export function createRouter(
             ? { type: "DEGRADE", reason: "x-attach-failed" }
             : { type: "FAIL", reason: "internal-error" };
           await apply(recovery).catch(() => undefined);
+        }
+      });
+      return queue;
+    },
+
+    handleTabRemoved(tabId: number): Promise<void> {
+      queue = queue.then(async () => {
+        if (tabId !== captureTabId) return;
+        // このタブへはもう何も届かない。次の指示先として使わせない
+        captureTabId = null;
+
+        try {
+          // 死んだ tabId をスナップショットに残すと、service worker が
+          // 再起動したときに復活して指示先に戻る
+          await deps.persist({ state, captureTabId, composeTabId });
+
+          // 録画の進行中だけ失敗に落とす。preview / composing は録画済みの
+          // クリップを抱えており、failed には clipId が無いため参照ごと失う。
+          // ready で閉じられた場合は、録画開始時に tab-lost として弾かれる
+          if (BUSY_KINDS.has(state.kind)) {
+            await fail("tab-lost");
+          }
+        } catch (error) {
+          console.error("タブ消失の反映に失敗しました", error);
         }
       });
       return queue;

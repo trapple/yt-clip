@@ -122,6 +122,7 @@ describe("失敗", () => {
       ["tab-lost", "録画対象のタブが見つかりません"],
       ["recording-aborted", "録画が中断されました"],
       ["drm-protected", "この動画は保護されているため録画できません"],
+      ["video-changed", "動画が切り替わりました。IN を押し直してください"],
       ["internal-error", "内部エラーが発生しました"],
     ] as const;
 

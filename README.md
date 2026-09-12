@@ -23,11 +23,15 @@ YouTube の切り抜きを作って X に投稿する Chrome 拡張機能 (MV3)�
   できない。倍速再生すると早送り映像がそのまま記録されてしまうため、
   等速固定にしている)
 - **クリップの最大長は 60 秒**。それより長い範囲を指定すると録画に進めない
+- **画質は録画時に再生している画質になる**。`captureStream()` が返すのは
+  デコード済みのフレームなので、360p で再生しながら録れば 360p のクリップに
+  なる。録画してから画質を上げることはできないため、720p 未満で録画を始めると
+  警告を出す (録画自体は止めない)
 - DRM 保護された動画（有料レンタルなど）は録画できない
 - **録画中に広告が挟まると中断される**。広告の映像が切り抜きに混入するのを
   避けるため
 - **MP4 で録画できない環境では WebM のダウンロードのみ**。ブラウザが
-  `video/mp4;codecs="avc1.42E01E,mp4a.40.2"` に対応していない場合、X への
+  `video/mp4;codecs="avc1.640028,mp4a.40.2"` に対応していない場合、X への
   自動添付はできず、WebM ファイルをダウンロードして手元で変換する運用になる
 - **X への添付が失敗した場合はダウンロードに切り替わる**。録画自体は実時間の
   コストを払った成果物のため、投稿画面の DOM 変更等で自動添付に失敗しても
@@ -53,7 +57,7 @@ E2E は実際の YouTube を開くため、実装とは無関係な理由でも�
 | 症状 | 原因の候補 |
 |---|---|
 | service worker が現れない | `dist/` が未ビルド、または manifest のパス誤り |
-| `#yt-clip-bar` が出ない | `YT_SELECTORS.controls` が YouTube の DOM 変更で不一致 |
+| `#yt-clip-bar` が出ない | `YT_SELECTORS.mountAnchor` (プレイヤー直下の `#below`) が YouTube の DOM 変更で不一致 |
 | IN を押しても範囲が確定しない | 動画タイトルの読み込みが間に合っていない、または `YT_SELECTORS.title` の不一致。広告や同意ダイアログがクリックを奪っている可能性もある |
 | status の文言が違う | `formatTime` の出力、または `validateRange` で弾かれている |
 | 録画が preview まで進まない | DRM 保護された動画、MP4 非対応 (この場合は degraded の文言になる)、または広告の混入 |
@@ -66,4 +70,7 @@ E2E は実ネットワークと YouTube の実 DOM に依存するため CI で�
 要するため自動化しておらず、[`docs/manual-check.md`](docs/manual-check.md)
 のチェックリストで手動確認する。
 
-設計は [`.claude/specs/2026-09-10-yt-clip-design.md`](.claude/specs/2026-09-10-yt-clip-design.md) を参照。
+設計は以下を参照。
+
+- [`.claude/specs/2026-09-10-yt-clip-design.md`](.claude/specs/2026-09-10-yt-clip-design.md) — 全体設計 (状態機械・メッセージ・X への添付)
+- [`.claude/specs/2026-09-11-capture-and-range-ui-design.md`](.claude/specs/2026-09-11-capture-and-range-ui-design.md) — `video.captureStream()` による録画方式と、拡大バーによる範囲指定

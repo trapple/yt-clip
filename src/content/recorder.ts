@@ -32,8 +32,79 @@ type CapturableVideo = HTMLVideoElement & {
  * 無駄だったと分かることになる。
  */
 export function assertRecordable(video: HTMLVideoElement): void {
-  if (video.mediaKeys !== null) {
+  // `mediaKeys` を持たない環境では undefined になる。`!== null` で見ると
+  // DRM でない動画まで保護扱いになり、どの動画も録画できなくなる
+  if ((video.mediaKeys ?? null) !== null) {
     throw new DrmProtectedError();
+  }
+}
+
+/** X が受け付ける音声チャンネル数の上限 */
+export const MAX_AUDIO_CHANNELS = 2;
+
+export type RecordingStream = {
+  stream: MediaStream;
+  /** 取得したリソースを解放する。二度呼ばれても安全 */
+  release(): void;
+};
+
+/**
+ * 録画に流し込むストリームを組み立てる。
+ *
+ * **音声を必ずステレオに落とすこと。** YouTube は 5.1 / 7.1 の音声を配信する
+ * ことがあり、`captureStream()` はそれをそのまま通す。8ch のまま録ると、
+ * ファイル自体は正しい MP4 なのに X のサーバ側の変換が落ち、投稿画面に
+ * 「問題が発生しました」とだけ出る (実機で 8ch を確認済み)。
+ *
+ * 取得したトラックの `getSettings()` は `channelCount` を報告しないため、
+ * **何 ch なのかは判定できない**。よって音声がある限り常に通す。
+ */
+export function buildRecordingStream(
+  captured: MediaStream,
+  createAudioContext: () => AudioContext = () => new AudioContext(),
+): RecordingStream {
+  const releaseCaptured = (): void => {
+    for (const track of captured.getTracks()) {
+      track.stop();
+    }
+  };
+
+  const audioTrack = captured.getAudioTracks()[0];
+  if (audioTrack === undefined) {
+    return { stream: captured, release: releaseCaptured };
+  }
+
+  try {
+    const context = createAudioContext();
+    const source = context.createMediaStreamSource(new MediaStream([audioTrack]));
+    const destination = context.createMediaStreamDestination();
+    // 既定でも 2ch だが、話者配置に沿って混ぜる規則ごと明示しておく
+    destination.channelCount = MAX_AUDIO_CHANNELS;
+    destination.channelCountMode = "explicit";
+    destination.channelInterpretation = "speakers";
+    source.connect(destination);
+
+    const downmixed = destination.stream.getAudioTracks()[0];
+    if (downmixed === undefined) {
+      throw new Error("ステレオに落とした音声を取り出せませんでした");
+    }
+
+    return {
+      stream: new MediaStream([...captured.getVideoTracks(), downmixed]),
+      release(): void {
+        downmixed.stop();
+        void context.close();
+        releaseCaptured();
+      },
+    };
+  } catch (error) {
+    // ここで録画ごと失敗させない。8ch のままでも録画は成立し、
+    // ダウンロードして使う道は残る。塞がるのは X への添付だけなので、
+    // 後から原因を追えるよう理由は必ず残す
+    console.warn(
+      `音声をステレオに落とせませんでした。X への添付が通らない可能性があります: ${String(error)}`,
+    );
+    return { stream: captured, release: releaseCaptured };
   }
 }
 
@@ -43,7 +114,9 @@ export function assertRecordable(video: HTMLVideoElement): void {
  * タブではなく `video` 要素から直接ストリームを取るので、コメント欄や
  * プレイヤーの操作系は映らず、解像度も再生中の表示サイズに縛られない。
  * `captureStream()` はタブの音声出力を奪わないため、取得した音声を
- * スピーカーへ流し戻す処理 (旧 offscreen 版の AudioContext) は不要になる。
+ * スピーカーへ流し戻す処理 (旧 offscreen 版の AudioContext) は不要。
+ * ただし音声をステレオに落とすためだけに AudioContext は経由する
+ * (`buildRecordingStream` 参照)。
  *
  * リソース解放の設計:
  * `stop` イベントは明示的な `stop()` 呼び出しだけでなく、録画が致命的エラーで
@@ -61,13 +134,12 @@ export async function startRecording(
     throw new Error("この環境では動画を直接録画できません");
   }
 
-  const stream = target.captureStream();
+  const recording = buildRecordingStream(target.captureStream());
+  const stream = recording.stream;
 
   /** 取得済みのリソースを解放する。二度呼ばれても安全 */
   function release(): void {
-    for (const track of stream.getTracks()) {
-      track.stop();
-    }
+    recording.release();
   }
 
   try {
