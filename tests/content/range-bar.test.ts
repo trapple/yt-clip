@@ -8,6 +8,7 @@ function makeBar(): { bar: RangeBar; committed: ClipRange[] } {
   const bar = createRangeBar({
     onScrub: () => undefined,
     onCommit: (range) => committed.push(range),
+    onSeekPlay: () => undefined,
   });
   document.body.append(bar.element);
   return { bar, committed };
@@ -79,6 +80,7 @@ describe("現在の再生位置", () => {
     const bar = createRangeBar({
       onScrub: () => undefined,
       onCommit: () => undefined,
+      onSeekPlay: () => undefined,
     });
     // 窓は範囲の 2 倍か 30 秒の広い方。ここでは 30 秒 (22.5〜52.5)
     bar.update({ startSec: 30, endSec: 45 }, 600);
@@ -110,5 +112,105 @@ describe("現在の再生位置", () => {
     bar.setPlayhead(null);
 
     expect(playheadOf(bar).hidden).toBe(true);
+  });
+});
+
+describe("トラックのクリックで再生", () => {
+  /** 窓は 22.5〜52.5 秒 (範囲 15 秒の 2 倍か 30 秒の広い方) */
+  function makeBar(): {
+    bar: RangeBar;
+    seeked: number[];
+    committed: ClipRange[];
+    track: HTMLElement;
+    handles: HTMLElement[];
+  } {
+    const seeked: number[] = [];
+    const committed: ClipRange[] = [];
+    const bar = createRangeBar({
+      onScrub: () => undefined,
+      onCommit: (range) => committed.push(range),
+      onSeekPlay: (sec) => seeked.push(sec),
+    });
+    document.body.append(bar.element);
+    bar.update({ startSec: 30, endSec: 45 }, 600);
+
+    const track = bar.element.querySelector<HTMLElement>("[data-role=track]");
+    if (track === null) throw new Error("トラックがありません");
+    // jsdom はレイアウトを持たないので、割合の計算に必要な幅を与える
+    track.getBoundingClientRect = () =>
+      ({ left: 0, width: 100 }) as DOMRect;
+
+    const handles = [...bar.element.querySelectorAll<HTMLElement>("[aria-label]")];
+    for (const handle of handles) {
+      // jsdom の setPointerCapture は pointerId を検証して投げる。
+      // ここで見たいのはドラッグの成否ではなく、再生が始まらないこと
+      handle.setPointerCapture = () => undefined;
+      handle.releasePointerCapture = () => undefined;
+    }
+
+    return { bar, seeked, committed, track, handles };
+  }
+
+  function pressAt(target: HTMLElement, clientX: number): void {
+    target.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, clientX }),
+    );
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  test("押した位置の再生位置を返す", () => {
+    const { bar, track, seeked } = makeBar();
+    bar.setEnabled(true);
+
+    pressAt(track, 50);
+
+    // 窓 22.5〜52.5 の中央
+    expect(seeked).toEqual([37.5]);
+  });
+
+  test("範囲は変えない", () => {
+    // IN/OUT を動かす操作ではない。押しただけで範囲が確定してしまうと、
+    // 見ようとしただけで切り抜く場所が変わる
+    const { bar, track, seeked, committed } = makeBar();
+    bar.setEnabled(true);
+
+    pressAt(track, 90);
+
+    expect(seeked).toHaveLength(1);
+    expect(committed).toEqual([]);
+    expect(handleLabels(bar)).toEqual(["開始 0:30", "終了 0:45"]);
+  });
+
+  test("ハンドルを掴んだときは再生しない", () => {
+    // ハンドルはトラックの子なので、何もしないと掴むたびに再生が始まる
+    const { bar, handles, seeked } = makeBar();
+    bar.setEnabled(true);
+
+    for (const handle of handles) pressAt(handle, 50);
+
+    expect(seeked).toEqual([]);
+  });
+
+  test("操作を受け付けない間は再生しない", () => {
+    // 録画中にシークすると、録画された映像に飛びが入る
+    const { bar, track, seeked } = makeBar();
+    bar.setEnabled(true);
+    bar.setEnabled(false);
+
+    pressAt(track, 50);
+
+    expect(seeked).toEqual([]);
+  });
+
+  test("窓の外を押しても窓の中に収まる", () => {
+    const { bar, track, seeked } = makeBar();
+    bar.setEnabled(true);
+
+    pressAt(track, -20);
+
+    expect(seeked).toEqual([22.5]);
   });
 });

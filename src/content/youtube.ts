@@ -329,6 +329,29 @@ function onScrub(sec: number): void {
   }
 }
 
+/**
+ * 拡大バーのトラックを押されたとき。その位置から再生する。
+ *
+ * **範囲は変えない。** 切り抜く場所を決める操作ではなく、内容を見るための操作。
+ *
+ * 範囲再生の監視はここで解く。残すと、登録したときの OUT を通過した瞬間に
+ * `pause()` が飛び、押した場所からの再生が理由もなく止まる
+ */
+function onSeekPlay(sec: number): void {
+  cancelPreviewWatch();
+
+  void (async () => {
+    try {
+      const video = getVideo();
+      await seekTo(video, sec);
+      await startPlayback(video);
+      setStatus(`${formatTime(sec)} から再生中…`);
+    } catch (error) {
+      setStatus(`再生できませんでした: ${String(error)}`);
+    }
+  })();
+}
+
 /** YouTube のシークバーに範囲を帯で重ねて、動画全体のどこかを示す */
 function paintOverlay(range: ClipRange, videoDurationSec: number): void {
   const bar = document.querySelector<HTMLElement>(YT_SELECTORS.progressBar);
@@ -673,7 +696,11 @@ function buildBar(): HTMLElement {
   row.append(inButton, outButton, playButton, actions, status, settingsButton);
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される
-  rangeBar = createRangeBar({ onScrub, onCommit: onRangeCommitted });
+  rangeBar = createRangeBar({
+    onScrub,
+    onCommit: onRangeCommitted,
+    onSeekPlay,
+  });
   rangeBar.element.id = RANGE_ID;
   // 拡大バーを上、操作を下に置く。範囲を見ながらボタンへ手を伸ばす順番
   bar.append(rangeBar.element, row, settingsPanel.element);

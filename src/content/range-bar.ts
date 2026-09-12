@@ -15,6 +15,11 @@ export type RangeBarCallbacks = {
   onScrub(sec: number): void;
   /** 指を離した。確定した範囲を送る */
   onCommit(range: ClipRange): void;
+  /**
+   * トラックが押された。その位置から再生する。
+   * **範囲は変えない。** 見るための操作であって、切り抜く場所を決める操作ではない
+   */
+  onSeekPlay(sec: number): void;
 };
 
 export type RangeBar = {
@@ -42,6 +47,8 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   const endLabel = document.createElement("span");
 
   const track = document.createElement("div");
+  // テストから掴むための目印。子要素の構成が変わっても位置で数えずに済む
+  track.dataset.role = "track";
   track.style.cssText = RANGE_STYLE.track;
 
   const selection = document.createElement("div");
@@ -181,6 +188,27 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
 
   beginDrag("in", inHandle);
   beginDrag("out", outHandle);
+
+  /**
+   * トラックを押したらそこから再生する。
+   *
+   * **ハンドルはトラックの子**なので、掴んだときの pointerdown はここにも
+   * 伝わる。発生元がハンドルなら何もしない。ハンドル側に stopPropagation を
+   * 足す案は採らない。ハンドルの責務が「自分を動かす」から「親に伝えない」
+   * まで広がり、親を足すたびにそちらを直すことになる。
+   *
+   * 受け付ける条件はドラッグと同じ (`enabled`)。false なのは「範囲が未確定」と
+   * 「録画が進行中」で、後者でシークすると録画された映像に飛びが入る
+   */
+  track.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (!enabled) return;
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (inHandle.contains(target) || outHandle.contains(target)) return;
+
+    event.preventDefault();
+    callbacks.onSeekPlay(pointerToSec(event.clientX));
+  });
 
   return {
     element,
