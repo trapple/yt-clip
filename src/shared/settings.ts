@@ -26,13 +26,6 @@ export type Settings = {
    * 共通のタグは持たない。切り抜くチャンネルごとに付けるタグが違うため
    */
   hashtagsByChannel: Record<string, string[]>;
-  /**
-   * チャンネル別にする前の共通タグ。**移行のためだけにある。**
-   *
-   * 設定がまだ無いチャンネルではこれを使う (捨てずに引き継ぐ)。一度でも
-   * 保存すれば空になり、以降は素直にチャンネル別だけになる
-   */
-  legacyHashtags: string[];
   /** 1 クリップの最大長 (秒) */
   maxClipSec: number;
 };
@@ -49,7 +42,6 @@ export const DEFAULT_TEMPLATE = "{title}\n\n{url}{tags}";
 export const DEFAULT_SETTINGS: Settings = {
   template: DEFAULT_TEMPLATE,
   hashtagsByChannel: {},
-  legacyHashtags: [],
   maxClipSec: DEFAULT_MAX_CLIP_SEC,
 };
 
@@ -126,18 +118,16 @@ export function parseMaxClipSec(
  * `meta` には `channelId` が無い。型の上では `string` だが、保存済みの値は
  * 型を保証しない。
  *
- * 設定がまだ無いチャンネルでは、移行前の共通タグを返す。ここを空にすると、
- * 設定パネルには引き継がれたタグが出ているのに投稿本文には入らない、という
- * 食い違いが起きる。**画面の表示と本文の組み立ては同じ関数から引くこと**
+ * 設定がまだ無いチャンネルでは空を返す。**画面の表示と本文の組み立ては
+ * 同じ関数から引くこと。** 別々に書くと「パネルには出ているのに本文に
+ * 入らない」食い違いが生まれる
  */
 export function hashtagsFor(
   settings: Settings,
   channelId: string | undefined,
 ): string[] {
-  if (channelId === undefined || channelId === "") {
-    return settings.legacyHashtags;
-  }
-  return settings.hashtagsByChannel[channelId] ?? settings.legacyHashtags;
+  if (channelId === undefined || channelId === "") return [];
+  return settings.hashtagsByChannel[channelId] ?? [];
 }
 
 /** 設定として受け入れられる最大長かどうか。読み込みと入力の両方で使う */
@@ -192,19 +182,14 @@ export function mergeSettings(stored: unknown): Settings {
     );
   }
 
-  // 共通タグからチャンネル別への移行。**捨てない。**
-  // 保存し直した後は legacyHashtags 側だけが残る (古い hashtags キーは消える)
-  if (isStringArray(source.legacyHashtags)) {
-    settings.legacyHashtags = source.legacyHashtags;
-  } else if (isStringArray(source.hashtags)) {
-    settings.legacyHashtags = source.hashtags;
-    if (source.hashtags.length > 0) {
-      console.info(
-        `[yt-clip] 共通のハッシュタグ (${formatHashtags(source.hashtags)}) をチャンネル別設定へ引き継ぎます。保存すると引き継ぎは終わります`,
-      );
-    }
-  } else if (source.hashtags !== undefined) {
-    console.warn("[yt-clip] 保存された hashtags が使えないため既定値を使います");
+  // チャンネル別にする前の共通タグ。**引き継がない。**
+  // どのチャンネルにも同じタグが出てくるのは邪魔で、「チャンネル別のみ」という
+  // 決定とも食い違う。ただし**黙って消さない**。値ごと残す。
+  // 保存し直せば、この古いキーは storage からも消える
+  if (isStringArray(source.hashtags) && source.hashtags.length > 0) {
+    console.info(
+      `[yt-clip] 共通のハッシュタグ (${formatHashtags(source.hashtags)}) は使われなくなりました。必要なチャンネルで設定し直してください`,
+    );
   }
 
   if (isSettableClipSec(source.maxClipSec)) {
@@ -251,10 +236,9 @@ export type SettingsField = {
   scope: "global" | "channel";
   /**
    * 入力欄の下に出す短い説明。
-   * 文脈と設定の両方で変わるので関数にする (どのチャンネルのタグか、
-   * いま引き継ぎ中かどうか)
+   * 「どのチャンネルのタグか」を出すので文脈を受け取る
    */
-  hint(settings: Settings, context: SettingsContext): string;
+  hint(context: SettingsContext): string;
   /** 保存されている値を入力欄の文字列にする */
   toText(settings: Settings, context: SettingsContext): string;
   /**
@@ -280,18 +264,11 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: "hashtags",
     label: "ハッシュタグ",
     scope: "channel",
-    hint: (settings, context) => {
+    hint: (context) => {
       if (context.channel === null) {
         return "チャンネルを特定できないため設定できません";
       }
-      const base = `空白区切り。# は省略できます (${context.channel.name} のタグ)`;
-      // 引き継ぎ中であることを画面に出す。ログだけでは利用者は見ない
-      const inherited =
-        settings.hashtagsByChannel[context.channel.id] === undefined &&
-        settings.legacyHashtags.length > 0;
-      return inherited
-        ? `${base}。以前の共通設定から引き継いでいます。保存すると引き継ぎは終わります`
-        : base;
+      return `空白区切り。# は省略できます (${context.channel.name} のタグ)`;
     },
     toText: (settings, context) =>
       formatHashtags(hashtagsFor(settings, context.channel?.id)),
@@ -311,9 +288,6 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
             ...settings.hashtagsByChannel,
             [context.channel.id]: normalizeHashtags(text),
           },
-          // 一度保存すれば引き継ぎは終わり。残すと新しいチャンネルを開くたびに
-          // 同じタグが出続け、「チャンネル別のみ」という決定と食い違う
-          legacyHashtags: [],
         },
       };
     },

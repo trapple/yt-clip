@@ -83,12 +83,11 @@ describe("mergeSettings", () => {
   });
 
   test("保存されている値を採る", () => {
-    // hashtags は移行用の引き継ぎとして読まれる (共通タグは持たなくなった)
+    // hashtags は読み捨てられる (共通タグは持たなくなった)
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     expect(mergeSettings({ hashtags: ["a"], template: "{url}" })).toEqual({
       ...DEFAULT_SETTINGS,
-      legacyHashtags: ["a"],
       template: "{url}",
     });
 
@@ -99,9 +98,9 @@ describe("mergeSettings", () => {
     // 古いバージョンや別端末が書いた値でありうる。型は保証されない
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    expect(mergeSettings({ hashtags: "切り抜き", template: 42 })).toEqual(
-      DEFAULT_SETTINGS,
-    );
+    expect(
+      mergeSettings({ hashtagsByChannel: "切り抜き", template: 42 }),
+    ).toEqual(DEFAULT_SETTINGS);
     expect(warn).toHaveBeenCalledTimes(2);
     warn.mockRestore();
   });
@@ -116,9 +115,9 @@ describe("mergeSettings", () => {
   test("片方だけ壊れていても、もう片方は採る", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    expect(mergeSettings({ hashtags: ["a"], template: 42 })).toEqual({
+    expect(mergeSettings({ hashtagsByChannel: { UC1: ["a"] }, template: 42 })).toEqual({
       ...DEFAULT_SETTINGS,
-      legacyHashtags: ["a"],
+      hashtagsByChannel: { UC1: ["a"] },
     });
     info.mockRestore();
     warn.mockRestore();
@@ -180,9 +179,9 @@ describe("画面に出す項目", () => {
   test("すべての項目に文言と変換がある", () => {
     for (const field of SETTINGS_FIELDS) {
       expect(field.label).toBeTruthy();
-      expect(field.hint(DEFAULT_SETTINGS, CONTEXT)).toBeTruthy();
+      expect(field.hint(CONTEXT)).toBeTruthy();
       // チャンネルを特定できない画面でも文言は出す。空だと理由が伝わらない
-      expect(field.hint(DEFAULT_SETTINGS, { channel: null })).toBeTruthy();
+      expect(field.hint({ channel: null })).toBeTruthy();
       expect(typeof field.toText).toBe("function");
       expect(typeof field.fromText).toBe("function");
     }
@@ -318,65 +317,34 @@ describe("hashtagsFor", () => {
     expect(hashtagsFor(settings, "")).toEqual([]);
   });
 
-  test("設定がまだ無いチャンネルには引き継いだ共通タグを使う", () => {
-    // 画面 (toText) と本文の組み立てが同じ関数を通るので、
-    // 「パネルには出ているのに本文に入らない」食い違いが起きない
-    const migrating: Settings = {
-      ...DEFAULT_SETTINGS,
-      hashtagsByChannel: { UC1: ["切り抜き"] },
-      legacyHashtags: ["クリ明透"],
-    };
-
-    expect(hashtagsFor(migrating, "UC9")).toEqual(["クリ明透"]);
-    // 設定済みのチャンネルは引き継ぎに触れない
-    expect(hashtagsFor(migrating, "UC1")).toEqual(["切り抜き"]);
-  });
 });
 
-describe("共通タグからチャンネル別への移行", () => {
-  test("古い hashtags を引き継ぎとして読む", () => {
+describe("チャンネル別にする前の共通タグ", () => {
+  test("引き継がずに読み捨てる", () => {
+    // どのチャンネルにも同じタグが出てくるのは邪魔。ただし黙って消さない
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     const settings = mergeSettings({ hashtags: ["クリ明透", "あすカット"] });
 
-    expect(settings.legacyHashtags).toEqual(["クリ明透", "あすカット"]);
     expect(settings.hashtagsByChannel).toEqual({});
-    // 黙って移すと、利用者は消えたと思う
-    expect(info).toHaveBeenCalled();
+    // 値ごとログに残す。何が消えたのか後から追える
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining("クリ明透"),
+    );
 
     info.mockRestore();
   });
 
-  test("保存し直された legacyHashtags を優先する", () => {
-    // 一度保存した後は空。古い hashtags キーが残っていても復活させない
-    const settings = mergeSettings({
-      hashtags: ["クリ明透"],
-      legacyHashtags: [],
-    });
+  test("空の共通タグでは何も言わない", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
-    expect(settings.legacyHashtags).toEqual([]);
+    mergeSettings({ hashtags: [] });
+
+    expect(info).not.toHaveBeenCalled();
+    info.mockRestore();
   });
 
-  test("保存すると引き継ぎが終わる", () => {
-    const field = SETTINGS_FIELDS.find((item) => item.key === "hashtags");
-    if (field === undefined) throw new Error("項目がありません");
-    const before: Settings = {
-      ...DEFAULT_SETTINGS,
-      legacyHashtags: ["クリ明透"],
-    };
-
-    const result = field.fromText("切り抜き", before, CONTEXT);
-
-    expect(result).toEqual({
-      ok: true,
-      patch: {
-        hashtagsByChannel: { [CHANNEL.id]: ["切り抜き"] },
-        legacyHashtags: [],
-      },
-    });
-  });
-
-  test("他のチャンネルの設定は残る", () => {
+  test("保存すると他のチャンネルの設定は残る", () => {
     const field = SETTINGS_FIELDS.find((item) => item.key === "hashtags");
     if (field === undefined) throw new Error("項目がありません");
     const before: Settings = {
@@ -386,7 +354,8 @@ describe("共通タグからチャンネル別への移行", () => {
 
     const result = field.fromText("切り抜き", before, CONTEXT);
 
-    expect(result).toMatchObject({
+    expect(result).toEqual({
+      ok: true,
       patch: {
         hashtagsByChannel: { UCother: ["歌枠"], [CHANNEL.id]: ["切り抜き"] },
       },

@@ -34,7 +34,7 @@ import {
  * 二重に読み込むと、前のテストの observer が同じ DOM を触りに来る。
  */
 
-const META_A: VideoMeta = { videoId: "video-a", title: "動画 A", channelId: "UCchannel-a", channelName: "チャンネル A" };
+const META_A: VideoMeta = { videoId: "video-a", title: "動画 A", channelId: "@channel-a", channelName: "チャンネル A" };
 const RANGE: ClipRange = { startSec: 10, endSec: 20 };
 
 /** content script が service worker へ送ったメッセージ */
@@ -200,31 +200,22 @@ function buildPage(): void {
   titleText.textContent = META_A.title;
   title.append(titleText);
 
-  // チャンネル。ハッシュタグ設定の鍵になる
-  const channelMeta = document.createElement("meta");
-  channelMeta.setAttribute("itemprop", "channelId");
-  channelMeta.setAttribute("content", META_A.channelId);
-  const owner = document.createElement("div");
-  owner.id = "owner";
-  const channelName = document.createElement("ytd-channel-name");
-  const channelLink = document.createElement("a");
-  channelLink.href = `/channel/${META_A.channelId}`;
-  channelLink.textContent = META_A.channelName;
-  channelName.append(channelLink);
-  owner.append(channelName);
+  // チャンネル。実機の watch ページと同じく、構造化データにハンドルが入る
+  const author = document.createElement("span");
+  author.setAttribute("itemprop", "author");
+  const authorUrl = document.createElement("link");
+  authorUrl.setAttribute("itemprop", "url");
+  authorUrl.setAttribute("href", `/${META_A.channelId}`);
+  const authorName = document.createElement("link");
+  authorName.setAttribute("itemprop", "name");
+  authorName.setAttribute("content", META_A.channelName);
+  author.append(authorUrl, authorName);
 
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
   video = installVideo();
-  document.body.append(
-    below,
-    title,
-    channelMeta,
-    owner,
-    progressBar,
-    video.element,
-  );
+  document.body.append(below, title, author, progressBar, video.element);
 }
 
 type StorageListener = (

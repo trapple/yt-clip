@@ -46,12 +46,10 @@ export function isAdPlaying(): boolean {
  */
 function identityOf(element: Element): string {
   if (element instanceof HTMLMetaElement) return element.content.trim();
-  if (element instanceof HTMLAnchorElement) {
-    return element.getAttribute("href")?.trim() ?? "";
-  }
-  if (element instanceof HTMLLinkElement) {
-    return element.getAttribute("href")?.trim() ?? "";
-  }
+  // **絶対 URL (`href` プロパティ) を読む。** 属性は相対にも絶対にもなり、
+  // ページによってどちらが来るか分からない。絶対に揃えれば取り出し方は 1 つで済む
+  if (element instanceof HTMLAnchorElement) return element.href.trim();
+  if (element instanceof HTMLLinkElement) return element.href.trim();
   return (element.textContent ?? "").trim();
 }
 
@@ -80,6 +78,33 @@ function firstValue(
       const value = read(element);
       if (value !== "") return value;
     }
+  }
+  return null;
+}
+
+/** 候補に一致するものを**すべて**集める。中身が空のものは飛ばす */
+function allValues(
+  selectors: readonly string[],
+  read: (element: Element) => string,
+): string[] {
+  const values: string[] = [];
+  for (const selector of selectors) {
+    for (const element of document.querySelectorAll(selector)) {
+      const value = read(element);
+      if (value !== "") values.push(value);
+    }
+  }
+  return values;
+}
+
+/** 変換して最初に null でなかったものを返す */
+function firstMapped<T>(
+  values: readonly string[],
+  convert: (value: string) => T | null,
+): T | null {
+  for (const value of values) {
+    const converted = convert(value);
+    if (converted !== null) return converted;
   }
   return null;
 }
@@ -146,19 +171,26 @@ function extractHandle(value: string): string | null {
  * 少し変わっただけで録画そのものができなくなる
  */
 export function getChannel(): { id: string; name: string } {
-  const rawId = firstValue(YT_SELECTORS.channelId, identityOf);
+  // **候補を全部集めてから探す。** 「順に試して最初の 1 つ」だと、リストの
+  // 前の方にある UC... のリンクが先に当たり、ハンドルを見ずに終わる
+  const candidates = allValues(YT_SELECTORS.channelLink, identityOf);
   const id =
-    (rawId === null ? null : extractChannelId(rawId)) ??
-    // ID が取れなければハンドルを鍵にする。無いよりは引ける方がよい
-    (() => {
-      const rawHandle = firstValue(YT_SELECTORS.channelHandle, identityOf);
-      return rawHandle === null ? null : extractHandle(rawHandle);
-    })();
+    // **ハンドルを優先する。** UC... の方が本来は安定した識別子だが、
+    // いま取れるとは限らない (メンバーシップのあるチャンネルだけ
+    // /channel/UC.../join が出る、といった差が実際にありうる)。優先すると
+    // 同じチャンネルなのに動画によって鍵が変わり、設定したタグが別の動画で
+    // 出てこなくなる。ハンドルはどの watch ページにも必ず出ている
+    firstMapped(candidates, extractHandle) ??
+    firstMapped(candidates, extractChannelId);
 
   const name = firstValue(YT_SELECTORS.channelName, labelOf);
 
   if (id === null) {
-    console.warn("[yt-clip] チャンネルを特定できませんでした");
+    // **集まった候補をそのまま出す。** 「特定できません」だけでは、
+    // 次に何を直せばよいか分からない
+    console.warn(
+      `[yt-clip] チャンネルを特定できませんでした (候補 ${candidates.length} 件: ${candidates.slice(0, 5).join(" / ")})`,
+    );
   }
   return { id: id ?? "", name: name ?? id ?? "" };
 }

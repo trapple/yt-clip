@@ -23,29 +23,30 @@ export const YT_SELECTORS = {
     'meta[itemprop="name"]',
   ],
   /**
-   * チャンネル ID (`UC...`)。**候補を順に試す。**
+   * チャンネルへのリンク。ここから `UC...` かハンドル (`@name`) を取り出す。
    *
-   * meta 要素は表示されないので構成変更の影響を受けにくいが、確実ではない。
-   * リンクからは href の `/channel/UC...` を取り出す
+   * **実機では `UC...` はもうページに出ていない** (2026-09 時点)。
+   * `meta[itemprop="channelId"]` は存在せず、オーナー欄のリンクもすべて
+   * ハンドルだった。**鍵にはハンドルを優先し**、`UC...` は保険として探す
+   * (理由は player.ts の getChannel を参照)。
+   *
+   * **構造化データ (schema.org) を先に置く。** 見た目のレイアウトは
+   * A/B テストで利用者ごとに違いうるが、こちらは変わりにくい
    */
-  channelId: [
+  channelLink: [
     'meta[itemprop="channelId"]',
-    'span[itemprop="author"] meta[itemprop="identifier"]',
-    '#owner a[href*="/channel/"]',
-    'ytd-channel-name a[href*="/channel/"]',
+    'span[itemprop="author"] link[itemprop="url"]',
+    "#owner ytd-channel-name a",
+    "ytd-video-owner-renderer a",
+    "#upload-info a",
+    "#owner a",
+    "ytd-channel-name a",
   ],
-  /**
-   * チャンネル ID が取れなかったときの鍵。ハンドル (`@name`)。
-   *
-   * **ハンドルは変更されうる。** 変わるとそのチャンネルのタグが引けなくなるので、
-   * `UC...` を先に試す
-   */
-  channelHandle: ['#owner a[href^="/@"]', 'ytd-channel-name a[href^="/@"]'],
   /** チャンネル名。表示にしか使わない */
   channelName: [
+    'span[itemprop="author"] link[itemprop="name"]',
     "#owner ytd-channel-name a",
     "ytd-channel-name #text",
-    'span[itemprop="author"] link[itemprop="name"]',
   ],
   /** 範囲を帯で重ねる対象。プレイヤーのシークバー */
   progressBar: ".ytp-progress-bar",

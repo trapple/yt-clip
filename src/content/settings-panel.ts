@@ -96,7 +96,7 @@ export function createSettingsPanel(
       const unavailable = field.scope === "channel" && context.channel === null;
       input.disabled = unavailable;
       input.value = unavailable ? "" : field.toText(settings, context);
-      hint.textContent = field.hint(settings, context);
+      hint.textContent = field.hint(context);
     }
   }
 
