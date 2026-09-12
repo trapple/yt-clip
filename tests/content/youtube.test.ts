@@ -421,7 +421,10 @@ beforeAll(async () => {
   };
 });
 
-/** 自動保存でダウンロードされたファイル名 */
+/**
+ * ダウンロードされたファイル名。**常に空でなければならない。**
+ * 自動ダウンロードは廃止した (`.claude/specs/2026-09-12-drop-auto-save-design.md`)
+ */
 let saved: string[] = [];
 
 beforeEach(async () => {
@@ -434,7 +437,8 @@ beforeEach(async () => {
   saved = [];
   storedSettings = {};
 
-  // jsdom は Blob の URL を作れない。自動保存の経路を実際に通すため補う
+  // jsdom は Blob の URL を作れない。ダウンロードの経路が**残っていた場合に**
+  // 途中で落ちずに最後まで進み、click まで観測できるようにする
   URL.createObjectURL = (): string => "blob:fake";
   URL.revokeObjectURL = (): void => undefined;
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
@@ -632,9 +636,10 @@ describe("録画の後始末", () => {
 
     expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
 
-    // **送る前に自動保存していること。** ここが外れても他のテストは通る。
-    // 投稿の成否に関わらず手元に残すのが目的なので、配線そのものを固定する
-    expect(saved).toEqual(["yt-clip-video-a-10s.mp4"]);
+    // **ディスクに書かないこと。** 録画が成功した経路でこそ確かめる価値がある。
+    // 自動ダウンロードはウェブストアへ出すために廃止したので、うっかり
+    // 戻ってきたらここで気付けるようにしておく
+    expect(saved).toEqual([]);
 
     // **送る前に表示行列を直していること。** ここが外れても他のテストは
     // 全部通ってしまう (実際に外して確認した)。#6 はこの branch でいちばん
@@ -842,7 +847,7 @@ describe("録画の中止", () => {
 
     expect(recorder.state).toBe("inactive");
     expect(stoppedTracks).toBe(1);
-    // 中止した分は送らない = 保存もされない
+    // 中止した分は送らない
     expect(sent.some((message) => message.type === "recorder/done")).toBe(false);
     expect(saved).toEqual([]);
   });

@@ -144,11 +144,11 @@ describe("投稿と degraded path", () => {
     expect(reduce(composing, { type: "RETAKE" })).toEqual(ready);
   });
 
-  test("MP4 非対応なら preview から downloadable へ退避する", () => {
+  test("MP4 非対応なら preview から degraded へ退避する", () => {
     expect(
       reduce(preview, { type: "DEGRADE", reason: "mp4-unsupported" }),
     ).toEqual({
-      kind: "downloadable",
+      kind: "degraded",
       clipId: "clip-1",
       range,
       meta,
@@ -157,14 +157,14 @@ describe("投稿と degraded path", () => {
     });
   });
 
-  test("添付失敗なら composing から downloadable へ退避し成果物を保持する", () => {
+  test("添付失敗なら composing から degraded へ退避し成果物を保持する", () => {
     const composing = reduce(preview, { type: "POST" });
     const result = reduce(composing, {
       type: "DEGRADE",
       reason: "x-attach-failed",
     });
     expect(result).toEqual({
-      kind: "downloadable",
+      kind: "degraded",
       clipId: "clip-1",
       range,
       meta,
@@ -173,7 +173,7 @@ describe("投稿と degraded path", () => {
     });
   });
 
-  test("downloadable からも取り直せる", () => {
+  test("degraded からも取り直せる", () => {
     const degraded = reduce(preview, {
       type: "DEGRADE",
       reason: "mp4-unsupported",
@@ -302,8 +302,8 @@ describe("投稿した後", () => {
 });
 
 describe("添付に失敗した後", () => {
-  const downloadable: ClipState = {
-    kind: "downloadable",
+  const degraded: ClipState = {
+    kind: "degraded",
     clipId: "clip-1",
     mimeType: "video/mp4",
     range,
@@ -312,7 +312,7 @@ describe("添付に失敗した後", () => {
   };
 
   test("録り直さずに投稿を試し直せる", () => {
-    expect(reduce(downloadable, { type: "POST" })).toEqual({
+    expect(reduce(degraded, { type: "POST" })).toEqual({
       kind: "composing",
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -322,9 +322,9 @@ describe("添付に失敗した後", () => {
   });
 
   test("遅れて届いた添付完了は拒む", () => {
-    // x/failed が二度届いて downloadable に落ちた後、遅れて x/attached が
+    // x/failed が二度届いて degraded に落ちた後、遅れて x/attached が
     // 来る経路を塞ぐ既存のガード。上の POST とは別の話
-    expect(reduce(downloadable, { type: "ATTACHED" }).kind).toBe("failed");
+    expect(reduce(degraded, { type: "ATTACHED" }).kind).toBe("failed");
   });
 });
 

@@ -16,7 +16,7 @@ const ALL_KINDS: ClipState["kind"][] = [
   "preview",
   "composing",
   "posted",
-  "downloadable",
+  "degraded",
   "failed",
 ];
 
@@ -49,7 +49,7 @@ describe("actionsFor", () => {
   });
 
   test("添付に失敗した後も投稿を試し直せる", () => {
-    expect(actionsFor("downloadable")).toEqual(["repost", "retake"]);
+    expect(actionsFor("degraded")).toEqual(["repost", "retake"]);
   });
 
   test("投稿待ちからは抜けられる", () => {
