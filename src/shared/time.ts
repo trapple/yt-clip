@@ -1,5 +1,18 @@
-/** 1 クリップの最大長 (秒)。ArrayBuffer 転送量を抑えるための上限 */
-export const MAX_CLIP_SEC = 60;
+/**
+ * 1 クリップの最大長 (秒) の**既定値**。設定で変えられる。
+ *
+ * **これは「いまの上限」ではない。** 現在値は設定から読んで引数で渡すこと。
+ * ここを直接読むと、設定を変えた利用者の画面で既定値が効いてしまう
+ */
+export const DEFAULT_MAX_CLIP_SEC = 60;
+
+/**
+ * 設定で入れられる最大長の上限 (秒)。
+ *
+ * X の動画の上限に合わせる。これを超える値を保存できてしまうと、録画は通るのに
+ * X で弾かれる。失敗が録画の後まで遅れるぶん、手前で止める価値がある
+ */
+export const MAX_SETTABLE_CLIP_SEC = 140;
 
 /** 1 クリップの最小長 (秒) */
 export const MIN_CLIP_SEC = 1;
@@ -37,6 +50,7 @@ export function toUrlSeconds(sec: number): number {
 export function validateRange(
   startSec: number,
   endSec: number,
+  maxClipSec: number = DEFAULT_MAX_CLIP_SEC,
 ): RangeValidation {
   assertPlayableSeconds(startSec, "開始位置");
   assertPlayableSeconds(endSec, "終了位置");
@@ -49,10 +63,10 @@ export function validateRange(
   if (duration < MIN_CLIP_SEC) {
     return { ok: false, message: `クリップは ${MIN_CLIP_SEC} 秒以上必要です` };
   }
-  if (duration > MAX_CLIP_SEC) {
+  if (duration > maxClipSec) {
     return {
       ok: false,
-      message: `クリップは ${MAX_CLIP_SEC} 秒までです (現在 ${Math.round(duration)} 秒)`,
+      message: `クリップは ${maxClipSec} 秒までです (現在 ${Math.round(duration)} 秒)`,
     };
   }
 

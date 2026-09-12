@@ -207,6 +207,21 @@ function buildPage(): void {
   document.body.append(below, title, progressBar, video.element);
 }
 
+type StorageListener = (
+  changes: Record<string, { newValue?: unknown }>,
+  areaName: string,
+) => void;
+
+/** chrome.storage.sync が返す設定。テストごとに差し替える */
+let storedSettings: Record<string, unknown> = {};
+let storageListener: StorageListener | null = null;
+
+/** 別のタブで設定が変わったことを届ける */
+function changeSettings(next: Record<string, unknown>): void {
+  storedSettings = next;
+  storageListener?.({ settings: { newValue: next } }, "sync");
+}
+
 function installGlobals(): void {
   class FakeMediaRecorder implements FakeRecorder {
     static isTypeSupported(): boolean {
@@ -237,6 +252,19 @@ function installGlobals(): void {
   vi.stubGlobal("Blob", NodeBlob);
   vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
   vi.stubGlobal("chrome", {
+    storage: {
+      sync: {
+        get: (): Promise<Record<string, unknown>> =>
+          Promise.resolve({ settings: storedSettings }),
+        set: (): Promise<void> => Promise.resolve(),
+      },
+      // 別のタブで設定を変えられたときに拾う経路
+      onChanged: {
+        addListener: (fn: StorageListener): void => {
+          storageListener = fn;
+        },
+      },
+    },
     runtime: {
       onMessage: {
         addListener: (fn: TabListener): void => {
@@ -393,6 +421,7 @@ beforeEach(async () => {
   stoppedTracks = 0;
   rejectMessageType = null;
   saved = [];
+  storedSettings = {};
 
   // jsdom は Blob の URL を作れない。自動保存の経路を実際に通すため補う
   URL.createObjectURL = (): string => "blob:fake";
@@ -833,5 +862,102 @@ describe("設定", () => {
 
     settingsButton().click();
     expect(panel.hidden).toBe(true);
+  });
+});
+
+describe("最大秒数の設定", () => {
+  /** 直近に送った MARK_IN の範囲 */
+  function markedRange(): ClipRange {
+    const message = [...sent]
+      .reverse()
+      .find(
+        (item): item is Extract<Message, { type: "clip/event" }> =>
+          item.type === "clip/event" && item.event.type === "MARK_IN",
+      );
+    if (message === undefined) throw new Error("MARK_IN が送られていません");
+    if (message.event.type !== "MARK_IN") throw new Error("MARK_IN ではない");
+    return message.event.range;
+  }
+
+  test("既定では 15 秒の範囲ができる", async () => {
+    video.element.currentTime = 100;
+
+    clickButton("IN");
+    await flush();
+
+    expect(markedRange()).toEqual({ startSec: 100, endSec: 115 });
+  });
+
+  test("上限を既定の長さより短くすると、IN の範囲も短くなる", async () => {
+    // IN を押しただけで上限を超えた範囲ができると、validateRange を
+    // 通らないまま (OUT を押さずに) 録画できてしまう
+    changeSettings({ maxClipSec: 10 });
+    await flush();
+    video.element.currentTime = 100;
+
+    clickButton("IN");
+    await flush();
+
+    expect(markedRange()).toEqual({ startSec: 100, endSec: 110 });
+  });
+
+  /** 拡大バーの OUT ハンドルを窓の右端まで引っ張る */
+  function dragOutToEnd(): void {
+    const track = rangeBarElement().querySelector<HTMLElement>(
+      "[data-role=track]",
+    );
+    if (track === null) throw new Error("トラックがありません");
+    track.getBoundingClientRect = () => ({ left: 0, width: 100 }) as DOMRect;
+
+    const handles = [...rangeBarElement().querySelectorAll<HTMLElement>("[aria-label]")];
+    const outHandle = handles[1];
+    if (outHandle === undefined) throw new Error("終了ハンドルがありません");
+    outHandle.setPointerCapture = () => undefined;
+    outHandle.releasePointerCapture = () => undefined;
+
+    outHandle.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, clientX: 0 }),
+    );
+    outHandle.dispatchEvent(
+      new MouseEvent("pointermove", { bubbles: true, clientX: 1000 }),
+    );
+  }
+
+  test("作り直されたバーにも設定した上限が効く", async () => {
+    // YouTube の再描画でバーは作り直される。**新しいバーは既定値で始まる**ので、
+    // 作った直後に流し込まないと、そのバーでだけ上限が 60 秒に戻る
+    changeSettings({ maxClipSec: 20 });
+    await flush();
+
+    // 再描画を起こしてバーを作り直させる
+    buildPage();
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    video.element.currentTime = 100;
+    clickButton("IN");
+    await flush();
+    // 実機では service worker が state/changed を配る。それで拡大バーが有効になる
+    emit({ kind: "ready", range: { startSec: 100, endSec: 115 }, meta: META_A });
+    await flush();
+
+    dragOutToEnd();
+
+    expect(handleLabels()[1]).toBe("終了 2:00");
+  });
+
+  test("上限を超える OUT は理由を出して受け付けない", async () => {
+    changeSettings({ maxClipSec: 10 });
+    await flush();
+    video.element.currentTime = 100;
+    clickButton("IN");
+    await flush();
+
+    video.element.currentTime = 130;
+    clickButton("OUT");
+    await flush();
+
+    // 既定の 60 秒ではなく、設定した 10 秒が文言に出る
+    expect(statusText()).toContain("10 秒までです");
   });
 });

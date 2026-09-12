@@ -87,7 +87,9 @@ describe("createSettingsPanel", () => {
     saveButton(panel).click();
     await flush();
 
-    expect(saved).toEqual([{ hashtags: ["切り抜き", "VTuber"] }]);
+    // 保存は 1 回。すべての項目の差分がまとめて 1 つの patch に入る
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ hashtags: ["切り抜き", "VTuber"] });
   });
 
   test("保存した後は正規化された形が入力欄に出る", async () => {
@@ -132,5 +134,59 @@ describe("createSettingsPanel", () => {
     await flush();
 
     expect(panel.element.textContent).toContain("保存できませんでした");
+  });
+});
+
+describe("入力を受け付けないとき", () => {
+  test("理由を出して保存しない", async () => {
+    // 保存できなかったことを黙ると、設定したつもりで録画に進んでしまう
+    const { deps, saved } = makeDeps();
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+    panel.toggle();
+    await flush();
+
+    inputOf(panel, "maxClipSec").value = "999";
+    saveButton(panel).click();
+    await flush();
+
+    expect(saved).toEqual([]);
+    expect(panel.element.textContent).toContain("最大秒数");
+  });
+
+  test("1 つでも通らなければ他の項目も保存しない", async () => {
+    // 一部だけ書き込むと、何が保存されて何が保存されなかったかを
+    // 画面から判断できない
+    const { deps, saved } = makeDeps();
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+    panel.toggle();
+    await flush();
+
+    inputOf(panel, "hashtags").value = "切り抜き";
+    inputOf(panel, "maxClipSec").value = "abc";
+    saveButton(panel).click();
+    await flush();
+
+    expect(saved).toEqual([]);
+  });
+
+  test("直して押し直せば保存できる", async () => {
+    const { deps, saved } = makeDeps();
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+    panel.toggle();
+    await flush();
+
+    inputOf(panel, "maxClipSec").value = "999";
+    saveButton(panel).click();
+    await flush();
+    inputOf(panel, "maxClipSec").value = "30";
+    saveButton(panel).click();
+    await flush();
+
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ maxClipSec: 30 });
+    expect(panel.element.textContent).toContain("保存しました");
   });
 });

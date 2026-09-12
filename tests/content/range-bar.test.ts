@@ -214,3 +214,69 @@ describe("トラックのクリックで再生", () => {
     expect(seeked).toEqual([22.5]);
   });
 });
+
+describe("最大秒数", () => {
+  /** ハンドルを掴んで動かす。jsdom は捕捉 API を持たないので差し替える */
+  function dragOut(bar: RangeBar, clientX: number): void {
+    const handles = [...bar.element.querySelectorAll<HTMLElement>("[aria-label]")];
+    const outHandle = handles[1];
+    if (outHandle === undefined) throw new Error("終了ハンドルがありません");
+    outHandle.setPointerCapture = () => undefined;
+    outHandle.releasePointerCapture = () => undefined;
+
+    outHandle.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, clientX: 0 }),
+    );
+    outHandle.dispatchEvent(
+      new MouseEvent("pointermove", { bubbles: true, clientX }),
+    );
+  }
+
+  /**
+   * 窓を 0〜100 秒にして開く (範囲 50 秒の 2 倍)。
+   * **窓は `update` でしか変わらない。** 窓より上限を小さく取らないと、
+   * 見ているのが上限なのか窓の端なのか区別が付かない
+   */
+  function makeBar(): RangeBar {
+    const bar = createRangeBar({
+      onScrub: () => undefined,
+      onCommit: () => undefined,
+      onSeekPlay: () => undefined,
+    });
+    document.body.append(bar.element);
+    bar.update({ startSec: 0, endSec: 50 }, 300);
+    const track = bar.element.querySelector<HTMLElement>("[data-role=track]");
+    if (track === null) throw new Error("トラックがありません");
+    // 幅 300px が窓の 100 秒に対応する
+    track.getBoundingClientRect = () => ({ left: 0, width: 300 }) as DOMRect;
+    bar.setEnabled(true);
+    return bar;
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  test("設定した上限までしか伸びない", () => {
+    // 計算 (clampHandle) は range-math で固めてある。ここで見るのは
+    // 設定した値がドラッグまで届いているかという繋ぎ込み
+    const bar = makeBar();
+    bar.setMaxClipSec(20);
+
+    // 窓の右端 (100 秒) まで引っ張る
+    dragOut(bar, 300);
+
+    expect(handleLabels(bar)).toEqual(["開始 0:00", "終了 0:20"]);
+  });
+
+  test("上限を変えれば結果も変わる", () => {
+    const bar = makeBar();
+    bar.setMaxClipSec(20);
+    dragOut(bar, 300);
+
+    bar.setMaxClipSec(60);
+    dragOut(bar, 300);
+
+    expect(handleLabels(bar)).toEqual(["開始 0:00", "終了 1:00"]);
+  });
+});

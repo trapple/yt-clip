@@ -85,7 +85,16 @@ export function createSettingsPanel(
         for (const field of SETTINGS_FIELDS) {
           const input = inputs.get(field.key);
           if (input === undefined) continue;
-          patch = { ...patch, ...field.fromText(input.value) };
+
+          const converted = field.fromText(input.value);
+          // **1 つでも通らなければ何も保存しない。** 一部だけ書き込むと、
+          // エラーを見た利用者が「何が保存されて何が保存されなかったか」を
+          // 画面から判断できない
+          if (!converted.ok) {
+            result.textContent = `${field.label}: ${converted.message}`;
+            return;
+          }
+          patch = { ...patch, ...converted.patch };
         }
         await deps.save(patch);
         // 正規化した結果を出す。何が保存されたかを見せる

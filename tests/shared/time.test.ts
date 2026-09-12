@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  MAX_CLIP_SEC,
+  DEFAULT_MAX_CLIP_SEC,
   MIN_CLIP_SEC,
   formatTime,
   toUrlSeconds,
@@ -48,7 +48,7 @@ describe("validateRange", () => {
   });
 
   test("上限ちょうどは許可する", () => {
-    expect(validateRange(0, MAX_CLIP_SEC)).toEqual({ ok: true });
+    expect(validateRange(0, DEFAULT_MAX_CLIP_SEC)).toEqual({ ok: true });
   });
 
   test("下限ちょうどは許可する", () => {
@@ -81,5 +81,26 @@ describe("validateRange", () => {
 
   test("不正な値は throw する", () => {
     expect(() => validateRange(Number.NaN, 10)).toThrow(RangeError);
+  });
+});
+
+describe("最大秒数を差し替える", () => {
+  test("渡した上限で判定が変わる", () => {
+    // 既定 (60 秒) では通らない長さが、上限を上げれば通る
+    expect(validateRange(0, 70)).toMatchObject({ ok: false });
+    expect(validateRange(0, 70, 80)).toEqual({ ok: true });
+  });
+
+  test("上限ちょうどは通る", () => {
+    expect(validateRange(0, 10, 10)).toEqual({ ok: true });
+  });
+
+  test("文言には渡した上限が出る", () => {
+    // 既定値をそのまま出すと、設定を変えた利用者には嘘になる
+    const result = validateRange(0, 30, 10);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("通ってはいけない");
+    expect(result.message).toContain("10 秒までです");
+    expect(result.message).toContain("30 秒");
   });
 });

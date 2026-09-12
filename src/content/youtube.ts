@@ -31,7 +31,8 @@ import { YT_SELECTORS } from "@/content/selectors";
 import { encodeBase64 } from "@/shared/base64";
 import { buildClipFileName } from "@/shared/filename";
 import type { Message, MessageResponse } from "@/shared/messages";
-import { formatTime, validateRange } from "@/shared/time";
+import { loadSettings, SETTINGS_KEY } from "@/shared/settings";
+import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
   BUSY_KINDS,
@@ -66,6 +67,14 @@ let cancelPreview: (() => void) | null = null;
 let rangeBar: RangeBar | null = null;
 /** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
 let playheadWatched = false;
+/**
+ * 1 クリップの最大長 (秒)。設定から流し込む。
+ *
+ * **読む場所が 3 つある** (`makeDefaultRange` / `validateRange` / 拡大バーの
+ * `clampHandle`) ので、必ずこの 1 つの変数から配ること。ばらばらに読むと、
+ * ドラッグでは伸ばせるのに OUT では弾かれる食い違いが生まれる
+ */
+let maxClipSec = DEFAULT_MAX_CLIP_SEC;
 let handle: RecorderHandle | null = null;
 
 /**
@@ -234,7 +243,7 @@ function onMarkIn(): void {
   const video = getVideo();
   const meta = getVideoMeta();
   // 既定の長さの範囲をここで作る。状態機械は長さの決め方を知らない
-  const range = makeDefaultRange(video.currentTime, video.duration);
+  const range = makeDefaultRange(video.currentTime, video.duration, maxClipSec);
 
   rangeVideoId = meta.videoId;
   applyRange(range, video.duration);
@@ -268,7 +277,7 @@ function onMarkOut(): void {
 
   const video = getVideo();
   const next = { startSec: currentRange.startSec, endSec: video.currentTime };
-  const validation = validateRange(next.startSec, next.endSec);
+  const validation = validateRange(next.startSec, next.endSec, maxClipSec);
   if (!validation.ok) {
     setStatus(validation.message);
     return;
@@ -701,6 +710,10 @@ function buildBar(): HTMLElement {
     onCommit: onRangeCommitted,
     onSeekPlay,
   });
+  // **作った直後に流し込む。** バーは YouTube の再描画のたびに作り直され、
+  // 新しいバーは既定値で始まる。ここを抜かすと、そのバーでだけ上限が
+  // 60 秒に戻り、OUT ボタン側 (validateRange) と食い違う
+  rangeBar.setMaxClipSec(maxClipSec);
   rangeBar.element.id = RANGE_ID;
   // 拡大バーを上、操作を下に置く。範囲を見ながらボタンへ手を伸ばす順番
   bar.append(rangeBar.element, row, settingsPanel.element);
@@ -851,6 +864,30 @@ function recoverFromState(): void {
     });
 }
 
+/**
+ * 設定を読み直して、上限を使う側すべてに配る。
+ *
+ * 読めなくても操作は続けさせる。既定値のまま動く方が、バーごと出ないより
+ * ましで、上限の食い違いも起きない (全員が既定値を見る)
+ */
+function refreshSettings(): void {
+  void loadSettings()
+    .then((settings) => {
+      maxClipSec = settings.maxClipSec;
+      rangeBar?.setMaxClipSec(maxClipSec);
+    })
+    .catch((error: unknown) => {
+      console.warn(`設定を読めませんでした: ${String(error)}`);
+    });
+}
+
+// 設定は**別のタブで変えられる**。保存ボタンに繋ぐだけでは、開いたままの
+// タブが古い上限のまま残り、そのタブでだけ録画の長さが違うことになる
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "sync" || !(SETTINGS_KEY in changes)) return;
+  refreshSettings();
+});
+
 /** 直前に見ていた URL。SPA 遷移の検出に使う */
 let lastHref = location.href;
 
@@ -879,4 +916,5 @@ const observer = new MutationObserver(() => {
 });
 observer.observe(document.body, { childList: true, subtree: true });
 mount();
+refreshSettings();
 recoverFromState();

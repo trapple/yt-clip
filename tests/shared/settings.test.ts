@@ -6,9 +6,11 @@ import {
   loadSettings,
   mergeSettings,
   normalizeHashtags,
+  parseMaxClipSec,
   saveSettings,
   tagsVariable,
 } from "@/shared/settings";
+import { DEFAULT_MAX_CLIP_SEC, MAX_SETTABLE_CLIP_SEC } from "@/shared/time";
 
 describe("normalizeHashtags", () => {
   test("空白区切りで受け取る", () => {
@@ -75,6 +77,7 @@ describe("mergeSettings", () => {
 
   test("保存されている値を採る", () => {
     expect(mergeSettings({ hashtags: ["a"], template: "{url}" })).toEqual({
+      ...DEFAULT_SETTINGS,
       hashtags: ["a"],
       template: "{url}",
     });
@@ -100,8 +103,8 @@ describe("mergeSettings", () => {
   test("片方だけ壊れていても、もう片方は採る", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(mergeSettings({ hashtags: ["a"], template: 42 })).toEqual({
+      ...DEFAULT_SETTINGS,
       hashtags: ["a"],
-      template: DEFAULT_SETTINGS.template,
     });
     warn.mockRestore();
   });
@@ -151,6 +154,7 @@ describe("読み書き", () => {
     await saveSettings({ hashtags: ["a"] });
 
     await expect(loadSettings()).resolves.toEqual({
+      ...DEFAULT_SETTINGS,
       template: "{url}",
       hashtags: ["a"],
     });
@@ -182,5 +186,88 @@ describe("画面に出す項目", () => {
     // DOM の id に使うので、重なると入力欄を取り違える
     const keys = SETTINGS_FIELDS.map((field) => field.key);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+describe("parseMaxClipSec", () => {
+  test("整数を受け取る", () => {
+    expect(parseMaxClipSec("30")).toEqual({ ok: true, value: 30 });
+  });
+
+  test("前後の空白は落とす", () => {
+    expect(parseMaxClipSec("  30 ")).toEqual({ ok: true, value: 30 });
+  });
+
+  test("X の上限を超える値は入れさせない", () => {
+    // 保存できてしまうと、録画は通るのに X で弾かれる。
+    // 失敗が録画の後まで遅れるので、手前で止める
+    const result = parseMaxClipSec(String(MAX_SETTABLE_CLIP_SEC + 1));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("通ってはいけない");
+    expect(result.message).toContain(String(MAX_SETTABLE_CLIP_SEC));
+  });
+
+  test("上限ちょうどは入れられる", () => {
+    expect(parseMaxClipSec(String(MAX_SETTABLE_CLIP_SEC))).toEqual({
+      ok: true,
+      value: MAX_SETTABLE_CLIP_SEC,
+    });
+  });
+
+  test.each(["0", "-5", "abc", "", "   ", "1.5", "Infinity"])(
+    "%o は入れさせない",
+    (text) => {
+      expect(parseMaxClipSec(text).ok).toBe(false);
+    },
+  );
+});
+
+describe("最大秒数の設定", () => {
+  test("既定は DEFAULT_MAX_CLIP_SEC", () => {
+    expect(DEFAULT_SETTINGS.maxClipSec).toBe(DEFAULT_MAX_CLIP_SEC);
+  });
+
+  test("保存された値を読む", () => {
+    expect(mergeSettings({ maxClipSec: 30 }).maxClipSec).toBe(30);
+  });
+
+  test.each([0, -1, MAX_SETTABLE_CLIP_SEC + 1, Number.NaN, "30"])(
+    "使えない値 %o は既定値に倒す",
+    (value) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+      expect(mergeSettings({ maxClipSec: value }).maxClipSec).toBe(
+        DEFAULT_MAX_CLIP_SEC,
+      );
+      // 握り潰さず理由を残す
+      expect(warn).toHaveBeenCalled();
+
+      warn.mockRestore();
+    },
+  );
+});
+
+describe("SETTINGS_FIELDS の最大秒数", () => {
+  function fieldOf(key: string) {
+    const field = SETTINGS_FIELDS.find((item) => item.key === key);
+    if (field === undefined) throw new Error(`項目がありません: ${key}`);
+    return field;
+  }
+
+  test("保存された値が入力欄の文字列になる", () => {
+    const field = fieldOf("maxClipSec");
+    expect(field.toText({ ...DEFAULT_SETTINGS, maxClipSec: 45 })).toBe("45");
+  });
+
+  test("通る入力は patch になる", () => {
+    expect(fieldOf("maxClipSec").fromText("45")).toEqual({
+      ok: true,
+      patch: { maxClipSec: 45 },
+    });
+  });
+
+  test("通らない入力は理由を返す", () => {
+    const result = fieldOf("maxClipSec").fromText("0");
+    expect(result.ok).toBe(false);
   });
 });

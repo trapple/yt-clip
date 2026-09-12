@@ -1,4 +1,4 @@
-import { MAX_CLIP_SEC, MIN_CLIP_SEC } from "@/shared/time";
+import { DEFAULT_MAX_CLIP_SEC, MIN_CLIP_SEC } from "@/shared/time";
 import type { ClipRange } from "@/shared/types";
 
 /** IN を押したときに作られる範囲の長さ (秒) */
@@ -73,11 +73,16 @@ function fitWithin(
 export function makeDefaultRange(
   startSec: number,
   videoDurationSec: number,
+  maxClipSec: number = DEFAULT_MAX_CLIP_SEC,
 ): ClipRange {
   assertSeconds(startSec, "開始位置");
   assertSeconds(videoDurationSec, "動画の長さ");
 
-  const endSec = Math.min(startSec + DEFAULT_CLIP_SEC, videoDurationSec);
+  // 上限が既定の長さより短いことがある。頭打ちにしないと、IN を押しただけで
+  // 上限を超えた範囲ができる。validateRange は OUT ボタンしか通らないので、
+  // そのまま録画まで進んでしまう
+  const widthSec = Math.min(DEFAULT_CLIP_SEC, maxClipSec);
+  const endSec = Math.min(startSec + widthSec, videoDurationSec);
   if (endSec - startSec >= MIN_CLIP_SEC) {
     return { startSec, endSec };
   }
@@ -144,6 +149,7 @@ export function clampHandle(
   desiredSec: number,
   range: ClipRange,
   window: TimeWindow,
+  maxClipSec: number = DEFAULT_MAX_CLIP_SEC,
 ): ClipRange {
   assertSeconds(desiredSec, "ハンドルの位置");
   assertRange(range);
@@ -159,7 +165,7 @@ export function clampHandle(
   }
 
   if (kind === "in") {
-    const lowest = Math.max(window.startSec, range.endSec - MAX_CLIP_SEC);
+    const lowest = Math.max(window.startSec, range.endSec - maxClipSec);
     const highest = range.endSec - MIN_CLIP_SEC;
     return {
       startSec: Math.min(highest, Math.max(lowest, desiredSec)),
@@ -168,7 +174,7 @@ export function clampHandle(
   }
 
   const lowest = range.startSec + MIN_CLIP_SEC;
-  const highest = Math.min(window.endSec, range.startSec + MAX_CLIP_SEC);
+  const highest = Math.min(window.endSec, range.startSec + maxClipSec);
   return {
     startSec: range.startSec,
     endSec: Math.max(lowest, Math.min(highest, desiredSec)),

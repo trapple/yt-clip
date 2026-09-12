@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { DEFAULT_SETTINGS } from "@/shared/settings";
 import {
   createRouter,
   isTabUnreachable,
@@ -62,8 +63,8 @@ function makeHarness(
     },
     openComposeTab: async () => 99,
     loadSettings: async () => ({
+      ...DEFAULT_SETTINGS,
       template: "{title}\n\n{url}{tags}",
-      hashtags: [],
     }),
     now: () => Date.UTC(2026, 8, 10, 3, 0, 0),
     persist: async () => undefined,
@@ -960,6 +961,7 @@ describe("X への受け渡し", () => {
     const h = makeHarness(
       {
         loadSettings: async () => ({
+          ...DEFAULT_SETTINGS,
           template: "{title}\n\n{url}{tags}",
           hashtags: ["切り抜き", "VTuber"],
         }),

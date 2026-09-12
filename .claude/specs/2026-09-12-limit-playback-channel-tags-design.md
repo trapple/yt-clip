@@ -11,7 +11,7 @@
 
 ## A. 最大秒数の設定
 
-### A.1 いま上限を持っている場所は 2 つある
+### A.1 いま上限を持っている場所は 3 つある
 
 `MAX_CLIP_SEC` (= 60) を読んでいるのは次の 2 箇所で、**通る経路が違う**。
 
@@ -23,6 +23,18 @@
 片方だけ設定に繋ぐと、**ドラッグでは伸ばせるのに OUT では弾かれる**という
 食い違いが生まれる。両方を同じ値で動かす。
 
+3 つめは `makeDefaultRange` で、IN を押したときに **15 秒** (`DEFAULT_CLIP_SEC`)
+の範囲を作る。上限を 15 秒より短くすると、**IN を押した直後から上限を超えた
+範囲**ができ、そのまま録画できてしまう (`validateRange` は OUT ボタンしか
+通らない)。既定の長さも上限で頭打ちにする。
+
+### A.1.1 定数の名前を変える
+
+`MAX_CLIP_SEC` は「いまの上限」ではなく「既定値」になる。名前を
+`DEFAULT_MAX_CLIP_SEC` に変え、設定で入れられる上限を
+`MAX_SETTABLE_CLIP_SEC` (= 140) として隣に置く。
+古い名前のまま残すと、**現在値のつもりで既定値を読む**取り違えが起きる。
+
 ### A.2 引数で渡す。モジュール変数にしない
 
 どちらも純粋関数なので、上限を**引数で受ける**形にする。
@@ -31,7 +43,7 @@
 export function validateRange(
   startSec: number,
   endSec: number,
-  maxClipSec: number = MAX_CLIP_SEC,
+  maxClipSec: number = DEFAULT_MAX_CLIP_SEC,
 ): RangeValidation;
 
 export function clampHandle(
@@ -39,7 +51,13 @@ export function clampHandle(
   desiredSec: number,
   range: ClipRange,
   window: TimeWindow,
-  maxClipSec: number = MAX_CLIP_SEC,
+  maxClipSec: number = DEFAULT_MAX_CLIP_SEC,
+): ClipRange;
+
+export function makeDefaultRange(
+  startSec: number,
+  videoDurationSec: number,
+  maxClipSec: number = DEFAULT_MAX_CLIP_SEC,
 ): ClipRange;
 ```
 
@@ -76,8 +94,12 @@ export type RangeBar = {
 | 下限 | `MIN_CLIP_SEC` (= 1) |
 | 上限 | **140** (X の動画の上限) |
 
-範囲外や数値でない入力は保存せず、入力欄の下にその理由を出す。
+範囲外や数値でない入力は保存せず、その理由を出す。
 **保存できなかったことを黙らない。** 設定したつもりで録画に進むのが一番困る。
+
+入力が 1 つでも通らなければ、**他の項目も保存しない**。一部だけ書き込むと、
+エラーを見た利用者が「何が保存されて何が保存されなかったか」を
+画面から判断できない。
 
 上限を超える値を保存できてしまうと、録画は通るのに X で弾かれる。
 失敗が録画の後まで遅れるぶん、手前で止める価値がある。
@@ -213,15 +235,22 @@ export type SettingsField = {
     text: string,
     settings: Settings,
     context: SettingsContext,
-  ): Partial<Settings> | { error: string };
+  ): FieldResult;
 };
 ```
 
 `scope` で分岐するのはパネル側 1 箇所だけ (`channel` かつ文脈が null なら
 入力欄を無効にして理由を出す)。項目の `key` で分岐はしない。
 
-`fromText` が `{ error }` を返せるようにするのは A.5 の検証のため。
-**保存できない入力を黙って捨てない。**
+`fromText` の戻り値は既存の `RangeValidation` と同じ判別可能ユニオンにする。
+
+```typescript
+export type FieldResult =
+  | { ok: true; patch: Partial<Settings> }
+  | { ok: false; message: string };
+```
+
+検証を持てるようにするのは A.5 のため。**保存できない入力を黙って捨てない。**
 
 ### C.5 いま保存されている共通タグの行き場
 
@@ -245,7 +274,8 @@ export type SettingsField = {
 
 | 対象 | 見るもの |
 |---|---|
-| `validateRange` / `clampHandle` | 渡した上限で振る舞いが変わること。**両方が同じ値で動くこと** |
+| `validateRange` / `clampHandle` / `makeDefaultRange` | 渡した上限で振る舞いが変わること。**3 つが同じ値で動くこと** |
+| 拡大バー | `setMaxClipSec` した値がドラッグのクランプに効くこと (計算だけでなく繋ぎ込みを見る) |
 | 設定の検証 | 0 / 141 / 数値でない入力が保存されず理由が出ること |
 | `createRangeBar` | トラックの `pointerdown` で `onSeekPlay` が呼ばれ、`onCommit` が呼ばれないこと。ハンドル上では呼ばれないこと。`enabled` が false なら呼ばれないこと |
 | `hashtagsFor` | 該当チャンネル / 未設定のチャンネル / `channelId` が `undefined` |

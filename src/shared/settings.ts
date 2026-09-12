@@ -9,6 +9,12 @@
  * `SETTINGS_FIELDS` に 1 要素。それだけで画面にも出る。
  */
 
+import {
+  DEFAULT_MAX_CLIP_SEC,
+  MAX_SETTABLE_CLIP_SEC,
+  MIN_CLIP_SEC,
+} from "@/shared/time";
+
 export const SETTINGS_KEY = "settings";
 
 export type Settings = {
@@ -16,6 +22,8 @@ export type Settings = {
   template: string;
   /** 本文の末尾に付けるハッシュタグ。**`#` は含めない** */
   hashtags: string[];
+  /** 1 クリップの最大長 (秒) */
+  maxClipSec: number;
 };
 
 /** 既定の投稿本文。`{tags}` は自分で区切りを持つ (下記 tagsVariable 参照) */
@@ -24,6 +32,7 @@ export const DEFAULT_TEMPLATE = "{title}\n\n{url}{tags}";
 export const DEFAULT_SETTINGS: Settings = {
   template: DEFAULT_TEMPLATE,
   hashtags: [],
+  maxClipSec: DEFAULT_MAX_CLIP_SEC,
 };
 
 /** 区切りとして扱う文字。全角空白と読点も含める */
@@ -65,6 +74,43 @@ export function tagsVariable(tags: string[]): string {
   return formatted === "" ? "" : `\n\n${formatted}`;
 }
 
+/**
+ * 入力欄の文字列を最大秒数にする。
+ *
+ * **通らない理由を返す。** 黙って既定値に倒すと、設定したつもりで録画に進む
+ */
+export function parseMaxClipSec(
+  input: string,
+): { ok: true; value: number } | { ok: false; message: string } {
+  const text = input.trim();
+  if (text === "") {
+    return { ok: false, message: "最大秒数を入れてください" };
+  }
+
+  // Number("") が 0 になるのは上で弾いてある。ここでは形だけを見る
+  const value = Number(text);
+  if (!Number.isInteger(value)) {
+    return { ok: false, message: `最大秒数は整数で入れてください: ${text}` };
+  }
+  if (!isSettableClipSec(value)) {
+    return {
+      ok: false,
+      message: `最大秒数は ${MIN_CLIP_SEC}〜${MAX_SETTABLE_CLIP_SEC} 秒です: ${value}`,
+    };
+  }
+  return { ok: true, value };
+}
+
+/** 設定として受け入れられる最大長かどうか。読み込みと入力の両方で使う */
+function isSettableClipSec(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_CLIP_SEC &&
+    value <= MAX_SETTABLE_CLIP_SEC
+  );
+}
+
 /** 保存されている値が期待する型かどうか */
 function isStringArray(value: unknown): value is string[] {
   return (
@@ -97,6 +143,14 @@ export function mergeSettings(stored: unknown): Settings {
     console.warn("[yt-clip] 保存された hashtags が使えないため既定値を使います");
   }
 
+  if (isSettableClipSec(source.maxClipSec)) {
+    settings.maxClipSec = source.maxClipSec;
+  } else if (source.maxClipSec !== undefined) {
+    console.warn(
+      `[yt-clip] 保存された maxClipSec が使えないため既定値を使います: ${String(source.maxClipSec)}`,
+    );
+  }
+
   return settings;
 }
 
@@ -112,10 +166,15 @@ export async function saveSettings(patch: Partial<Settings>): Promise<void> {
 }
 
 /**
- * 画面に出す設定項目。
+ * 入力欄 1 つ分の変換結果。
  *
- * パネルはこれを並べるだけで、項目ごとの分岐を持たない
+ * **通らない入力を黙って捨てない。** `RangeValidation` と同じ判別可能ユニオンで、
+ * 通らなかった理由をそのまま画面に出せる形にする
  */
+export type FieldResult =
+  | { ok: true; patch: Partial<Settings> }
+  | { ok: false; message: string };
+
 export type SettingsField = {
   /** 入力欄を識別する。DOM の id にも使う */
   key: string;
@@ -125,15 +184,32 @@ export type SettingsField = {
   /** 保存されている値を入力欄の文字列にする */
   toText(settings: Settings): string;
   /** 入力欄の文字列から、設定の一部を作る */
-  fromText(text: string): Partial<Settings>;
+  fromText(text: string): FieldResult;
 };
 
+/**
+ * 画面に出す設定項目。
+ *
+ * パネルはこれを並べるだけで、項目ごとの分岐を持たない
+ */
 export const SETTINGS_FIELDS: readonly SettingsField[] = [
   {
     key: "hashtags",
     label: "ハッシュタグ",
     hint: "空白区切り。# は省略できます",
     toText: (settings) => formatHashtags(settings.hashtags),
-    fromText: (text) => ({ hashtags: normalizeHashtags(text) }),
+    fromText: (text) => ({ ok: true, patch: { hashtags: normalizeHashtags(text) } }),
+  },
+  {
+    key: "maxClipSec",
+    label: "最大秒数",
+    hint: `${MIN_CLIP_SEC}〜${MAX_SETTABLE_CLIP_SEC} 秒。X の動画の上限が ${MAX_SETTABLE_CLIP_SEC} 秒です`,
+    toText: (settings) => String(settings.maxClipSec),
+    fromText: (text) => {
+      const parsed = parseMaxClipSec(text);
+      return parsed.ok
+        ? { ok: true, patch: { maxClipSec: parsed.value } }
+        : { ok: false, message: parsed.message };
+    },
   },
 ];
