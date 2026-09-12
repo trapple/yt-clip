@@ -132,9 +132,10 @@ describe("投稿と degraded path", () => {
     });
   });
 
-  test("添付完了で idle に戻る", () => {
+  test("添付完了で posted へ進む", () => {
     const composing = reduce(preview, { type: "POST" });
-    expect(reduce(composing, { type: "ATTACHED" })).toEqual({ kind: "idle" });
+    // 範囲とクリップを残して使い回せるようにした
+    expect(reduce(composing, { type: "ATTACHED" }).kind).toBe("posted");
   });
 
   test("投稿画面が用意できないときは composing から取り直せる", () => {
@@ -225,5 +226,103 @@ describe("失敗と復帰", () => {
       range,
       meta,
     });
+  });
+});
+
+describe("投稿した後", () => {
+  const posted: ClipState = {
+    kind: "posted",
+    range,
+    meta,
+    clipId: "clip-1",
+    mimeType: "video/mp4",
+  };
+
+  test("添付が通ったら posted へ進み、範囲とクリップを残す", () => {
+    const composing: ClipState = {
+      kind: "composing",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      range,
+      meta,
+    };
+    expect(reduce(composing, { type: "ATTACHED" })).toEqual(posted);
+  });
+
+  test("同じクリップをもう一度投稿できる", () => {
+    expect(reduce(posted, { type: "POST" })).toEqual({
+      kind: "composing",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      range,
+      meta,
+    });
+  });
+
+  test("取り直すと範囲は残しクリップを外す", () => {
+    expect(reduce(posted, { type: "RETAKE" })).toEqual({
+      kind: "ready",
+      range,
+      meta,
+    });
+  });
+
+  test("範囲を変えるとクリップを外す", () => {
+    // 古い範囲のクリップを持ち続けると、画面に出ている範囲と
+    // 投稿される中身が食い違う
+    const moved = { startSec: 30, endSec: 45 };
+    expect(reduce(posted, { type: "ADJUST_RANGE", range: moved })).toEqual({
+      kind: "ready",
+      range: moved,
+      meta,
+    });
+  });
+
+  test("OUT を打ち直してもクリップを外す", () => {
+    expect(reduce(posted, { type: "MARK_OUT", sec: 40 })).toEqual({
+      kind: "ready",
+      range: { startSec: range.startSec, endSec: 40 },
+      meta,
+    });
+  });
+
+  test("新しい IN からやり直せる", () => {
+    const next = { startSec: 100, endSec: 115 };
+    expect(reduce(posted, { type: "MARK_IN", range: next, meta })).toEqual({
+      kind: "ready",
+      range: next,
+      meta,
+    });
+  });
+
+  test("定義していない操作は失敗として表面化させる", () => {
+    expect(reduce(posted, { type: "SEEK_DONE" }).kind).toBe("failed");
+  });
+});
+
+describe("添付に失敗した後", () => {
+  const downloadable: ClipState = {
+    kind: "downloadable",
+    clipId: "clip-1",
+    mimeType: "video/mp4",
+    range,
+    meta,
+    reason: "x-attach-failed",
+  };
+
+  test("録り直さずに投稿を試し直せる", () => {
+    expect(reduce(downloadable, { type: "POST" })).toEqual({
+      kind: "composing",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      range,
+      meta,
+    });
+  });
+
+  test("遅れて届いた添付完了は拒む", () => {
+    // x/failed が二度届いて downloadable に落ちた後、遅れて x/attached が
+    // 来る経路を塞ぐ既存のガード。上の POST とは別の話
+    expect(reduce(downloadable, { type: "ATTACHED" }).kind).toBe("failed");
   });
 });

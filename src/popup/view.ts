@@ -93,6 +93,18 @@ export function describeState(state: ClipState): PopupView {
         recordingSec: null,
       };
 
+    case "posted":
+      return {
+        message: `X に添付しました (${durationOf(
+          state.range.startSec,
+          state.range.endSec,
+        )}秒)`,
+        actions: [],
+        busy: false,
+        showPreview: false,
+        recordingSec: null,
+      };
+
     case "composing":
       // 投稿画面が開かないまま戻ってきたときに詰まないよう、抜ける道を必ず残す
       return {

@@ -391,7 +391,7 @@ describe("投稿画面が用意できないとき", () => {
     // 取り消し忘れても fireTimers で状態は動かない。だからこそタイマーが
     // 実際に片付いていることを直接確認する
     expect(h.pendingTimerCount()).toBe(0);
-    expect(h.router.getState()).toEqual({ kind: "idle" });
+    expect(h.router.getState().kind).toBe("posted");
   });
 });
 
@@ -953,12 +953,12 @@ describe("X への受け渡し", () => {
     expect(payloads).toHaveLength(2);
   });
 
-  test("添付完了で idle に戻る", async () => {
+  test("添付完了で posted へ進み、使い回せる状態になる", async () => {
     const h = makeHarness({}, clip);
     await reachComposing(h);
     await h.router.handle({ type: "x/attached" });
 
-    expect(h.router.getState()).toEqual({ kind: "idle" });
+    expect(h.router.getState().kind).toBe("posted");
   });
 
   test("投稿タブの応答が無いだけなら composing のまま添付の結果を待つ", async () => {
@@ -980,7 +980,7 @@ describe("X への受け渡し", () => {
 
     // 添付の完了は後から届く
     await h.router.handle({ type: "x/attached" });
-    expect(h.router.getState()).toEqual({ kind: "idle" });
+    expect(h.router.getState().kind).toBe("posted");
   });
 
   test("投稿タブに受け手が居なければダウンロードへ退避する", async () => {

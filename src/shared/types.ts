@@ -60,6 +60,20 @@ export type ClipState =
       meta: VideoMeta;
       mimeType: string;
     }
+  /**
+   * X へ添付し終えた状態。
+   *
+   * 範囲とクリップを残して**使い回せる**ようにする。同じ動画から続けて
+   * 切り抜きを作る / 同じクリップを投稿し直す、どちらも日常的に起きる。
+   * かつては `idle` に戻しており、範囲もクリップ参照も失われていた
+   */
+  | {
+      kind: "posted";
+      range: ClipRange;
+      meta: VideoMeta;
+      clipId: string;
+      mimeType: string;
+    }
   | {
       kind: "composing";
       clipId: string;
