@@ -44,10 +44,24 @@ export type BuildOptions = {
   decodeTimes?: number[];
   /** サンプル長を trun ではなく trex の既定値で表す */
   useDefaultDuration?: boolean;
+  /** 映像トラックの幅と高さ。0 にすると音声トラック扱いになる */
+  width?: number;
+  height?: number;
+  /** 表示変換行列の最後の要素を 0 にする (Chromium が実際に踏むバグの再現) */
+  brokenMatrix?: boolean;
 };
 
-export function buildFragmentedMp4(options: BuildOptions): Uint8Array {
-  const { fragments, decodeTimes, useDefaultDuration = false } = options;
+export function buildFragmentedMp4(
+  options: BuildOptions,
+): Uint8Array<ArrayBuffer> {
+  const {
+    fragments,
+    decodeTimes,
+    useDefaultDuration = false,
+    width = 1280,
+    height = 720,
+    brokenMatrix = true,
+  } = options;
   const allSamples = fragments.flat();
   const defaultDuration = useDefaultDuration ? (allSamples[0]?.duration ?? 0) : 0;
 
@@ -59,8 +73,21 @@ export function buildFragmentedMp4(options: BuildOptions): Uint8Array {
   const mdhd = versionedHeader("mdhd", MEDIA_TIMESCALE, 0, [0x55, 0xc4, 0, 0]);
   const mdia = box("mdia", mdhd, box("hdlr", u32(0), u32(0), [..."vide"].map((c) => c.charCodeAt(0))), minf);
 
-  // tkhd: version 0。track_id の後に reserved が入り、その次が duration
-  const tkhd = fullBox("tkhd", 0, 7, u32(0), u32(0), u32(1), u32(0), u32(0), new Array(60).fill(0));
+  // tkhd: version 0。track_id の後に reserved が入り、その次が duration。
+  // 行列は Chromium の muxer が captureStream 由来のフレームで作るものと
+  // 同じ形にする (最後の要素 w がゼロのまま = 実機で踏むバグ)
+  const matrix = [
+    ...u32(0x00010000), ...u32(0), ...u32(0),
+    ...u32(0), ...u32(0x00010000), ...u32(0),
+    ...u32(0), ...u32(0), ...u32(brokenMatrix ? 0 : 0x40000000),
+  ];
+  const tkhd = fullBox(
+    "tkhd", 0, 7,
+    u32(0), u32(0), u32(1), u32(0), u32(0),
+    new Array(16).fill(0),
+    matrix,
+    u32(width << 16), u32(height << 16),
+  );
   const trak = box("trak", tkhd, mdia);
 
   const mvhd = versionedHeader("mvhd", MOVIE_TIMESCALE, 0, new Array(80).fill(0));
@@ -106,5 +133,7 @@ export function buildFragmentedMp4(options: BuildOptions): Uint8Array {
     elapsed = decodeTime + samples.reduce((sum, s) => sum + s.duration, 0);
   });
 
-  return new Uint8Array(out);
+  const bytes = new Uint8Array(new ArrayBuffer(out.length));
+  bytes.set(out);
+  return bytes;
 }

@@ -9,7 +9,7 @@ import {
   startPlayback,
 } from "@/content/player";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
-import { remuxToProgressiveMp4 } from "@/content/remux";
+import { fixVideoDisplayMatrix } from "@/content/display-matrix";
 import { makeDefaultRange } from "@/content/range-math";
 import {
   DrmProtectedError,
@@ -547,11 +547,11 @@ async function finishRecording(): Promise<void> {
     const blob = await stopping.stop();
     const recorded = new Uint8Array(await blob.arrayBuffer());
 
-    // MediaRecorder の MP4 は断片化 MP4 で、X はこれを受け付けない
-    // (アップロード後の変換で失敗する)。通常の MP4 に組み直してから渡す。
+    // captureStream で録ると、Chromium の muxer が映像トラックの表示行列の
+    // 最後の要素を書き忘れる。そのままでは X の変換が落ちるので直す。
     // WebM はそもそも添付できずダウンロードへ退避するので、触らない
     const bytes = blob.type.includes("mp4")
-      ? remuxToProgressiveMp4(recorded)
+      ? fixVideoDisplayMatrix(recorded)
       : recorded;
 
     notify({

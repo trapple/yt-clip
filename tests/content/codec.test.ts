@@ -30,8 +30,10 @@ describe("pickMimeType", () => {
     );
   });
 
-  test("MP4 の判定には H.264 と AAC を明示した MIME を使う", () => {
-    expect(MP4_MIME).toBe('video/mp4;codecs="avc1.42E01E,mp4a.40.2"');
+  test("H.264 は High を指定する", () => {
+    // 素の Baseline (profile_idc=66, 制約フラグ 0x00) で出ると、X が
+    // 受け取った後の変換で失敗する。実機で片方ずつ入れ替えて確認済み
+    expect(MP4_MIME).toBe('video/mp4;codecs="avc1.640028,mp4a.40.2"');
   });
 });
 
