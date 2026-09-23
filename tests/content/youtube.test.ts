@@ -54,10 +54,12 @@ let onMessage: TabListener | null = null;
 
 /** MediaRecorder のフェイク。録画が止まったかを実際の状態で確かめる */
 type FakeRecorder = {
-  state: "inactive" | "recording";
+  state: "inactive" | "recording" | "paused";
   ondataavailable: ((event: { data: Blob }) => void) | null;
   onerror: ((event: Event) => void) | null;
   onstop: (() => void) | null;
+  /** 呼ばれた順。区間の繋ぎ方を順序ごと確かめる */
+  calls: string[];
 };
 let recorders: FakeRecorder[] = [];
 /** captureStream のトラックが解放された回数 */
@@ -214,8 +216,19 @@ function buildPage(): void {
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
+  // 広告の判定は #movie_player の ad-showing を見る (player.ts の isAdPlaying)
+  const player = document.createElement("div");
+  player.id = "movie_player";
+
   video = installVideo();
-  document.body.append(below, title, author, progressBar, video.element);
+  document.body.append(
+    below,
+    title,
+    author,
+    progressBar,
+    player,
+    video.element,
+  );
 }
 
 type StorageListener = (
@@ -238,19 +251,30 @@ function installGlobals(): void {
     static isTypeSupported(): boolean {
       return true;
     }
-    state: "inactive" | "recording" = "inactive";
+    state: "inactive" | "recording" | "paused" = "inactive";
     ondataavailable: ((event: { data: Blob }) => void) | null = null;
     onerror: ((event: Event) => void) | null = null;
     onstop: (() => void) | null = null;
+    readonly calls: string[] = [];
 
     constructor() {
       recorders.push(this);
     }
     start(): void {
       this.state = "recording";
+      this.calls.push("start");
+    }
+    pause(): void {
+      this.state = "paused";
+      this.calls.push("pause");
+    }
+    resume(): void {
+      this.state = "recording";
+      this.calls.push("resume");
     }
     stop(): void {
       this.state = "inactive";
+      this.calls.push("stop");
       // 表示行列を直す経路を実際に通すため、MediaRecorder が出すものと
       // 同じ断片化 MP4 を流す。中身が MP4 でないと box の走査で弾かれる
       this.ondataavailable?.({ data: new Blob([RECORDED_BYTES]) });
@@ -1111,5 +1135,119 @@ describe("エディットモード", () => {
 
     // 状態機械だけが戻ると、録画が走り続けて取り残される
     expect(sent).toEqual([]);
+  });
+});
+
+describe("複数区間の録画", () => {
+  const TWO: ClipRange[] = [
+    { startSec: 83, endSec: 98 },
+    { startSec: 242, endSec: 250 },
+  ];
+
+  /** 録画が走っている状態まで進める */
+  async function startTwoSegments(): Promise<FakeRecorder> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: TWO, meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    return startedRecorder();
+  }
+
+  /**
+   * 区間の終端に到達させ、次の区間の頭で新しいフレームが出たことにする。
+   *
+   * **フレームを 2 回進めるのは仕様どおり。** 終端の到達で pause とシークが
+   * 起き、そこから「新しいフレームが描かれた」のを見て初めて resume する
+   */
+  async function reachEndAndSettle(
+    endSec: number,
+    nextStartSec: number,
+  ): Promise<void> {
+    video.advanceFrame(endSec);
+    await flush();
+    video.advanceFrame(nextStartSec);
+    await flush();
+  }
+
+  function setAd(showing: boolean): void {
+    document
+      .querySelector("#movie_player")
+      ?.classList.toggle("ad-showing", showing);
+  }
+
+  test("最初の区間の頭へ飛ぶ", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "seeking", segments: TWO, meta: META_A });
+    await flush();
+
+    expect(video.element.currentTime).toBe(83);
+  });
+
+  test("区間の終わりで録画を止め、次の頭へ飛んでから再開する", async () => {
+    const recorder = await startTwoSegments();
+
+    await reachEndAndSettle(98, 242);
+
+    // 止めてから飛び、映像が整ってから再開する。順序が崩れると繋ぎ目に
+    // 前の場面が混入する
+    expect(recorder.calls).toEqual(["start", "pause", "resume"]);
+    expect(video.element.currentTime).toBe(242);
+    expect(recorder.state).toBe("recording");
+  });
+
+  test("区間の間では書き出しへ進まない", async () => {
+    await startTwoSegments();
+    sent = [];
+
+    video.advanceFrame(98);
+    await flush();
+
+    expect(clipEvents()).not.toContainEqual({ type: "OUT_REACHED" });
+  });
+
+  test("最後の区間の終わりで書き出しへ進む", async () => {
+    await startTwoSegments();
+
+    await reachEndAndSettle(98, 242);
+    sent = [];
+    video.advanceFrame(250);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "OUT_REACHED" });
+  });
+
+  test("区間の間で広告が始まったら全体を落とす", async () => {
+    const recorder = await startTwoSegments();
+    sent = [];
+    setAd(true);
+
+    await reachEndAndSettle(98, 242);
+
+    // 部分的に広告が混ざったクリップを残すより、録り直させる方がましである
+    expect(clipEvents()).toContainEqual({
+      type: "FAIL",
+      reason: "ad-playing",
+    });
+    expect(recorder.calls).not.toContain("resume");
+    setAd(false);
+  });
+
+  test("区間の間で中止しても録画は止まる", async () => {
+    const recorder = await startTwoSegments();
+
+    video.advanceFrame(98);
+    await flush();
+    emit({ kind: "ready", segments: TWO, meta: META_A });
+    await flush();
+
+    // pause 中に中止されてもストリームを掴んだままにしない
+    expect(recorder.state).toBe("inactive");
+  });
+
+  test("区間の進みを status に出す", async () => {
+    await startTwoSegments();
+
+    expect(statusText()).toContain("1 / 2 区間目");
   });
 });

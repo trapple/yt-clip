@@ -8,6 +8,7 @@ import {
   parseVideoId,
   seekTo,
   startPlayback,
+  waitForFreshFrame,
 } from "@/content/player";
 import {
   ACTION_EVENTS,
@@ -721,6 +722,15 @@ async function prepareRecording(
       return;
     }
 
+    // **合計で見る。区間ごとではない。** 区間ごとに上限を見ると、10 秒の
+    // 区間を 10 個作れてしまい、X の上限を超えたクリップができる
+    const sum = Math.round(totalSec(currentSegments));
+    if (sum > maxClipSec) {
+      send({ type: "FAIL", reason: "internal-error" });
+      setStatus(`合計 ${sum} 秒は上限 ${maxClipSec} 秒を超えています`);
+      return;
+    }
+
     const video = getVideo();
     // 画質は録画してからでは上げられないので、この時点で警告する (録画は
     // 止めない)。captureStream が返すのは再生中のフレームなので、低い画質の
@@ -764,23 +774,99 @@ async function beginRecording(): Promise<void> {
   }
 }
 
-/** 録画の後半。録画開始後に呼ばれ、再生して OUT 到達で停止する */
-async function runRecording(startSec: number, endSec: number): Promise<void> {
+/**
+ * 録画の後半。録画開始後に呼ばれ、区間を順に辿って最後の OUT で停止する。
+ *
+ * **区間ごとに録画セッションを分けない。** 1 本のセッションを走らせたまま
+ * `pause()` / `resume()` で繋げば、出力は継ぎ目のない 1 本になる。分けると
+ * MP4 の結合が要る
+ */
+async function runRecording(segments: ClipRange[]): Promise<void> {
   try {
     const video = getVideo();
     await startPlayback(video);
-
-    setStatus(`録画中… (${Math.round(endSec - startSec)}秒)`);
-
-    cancelWatch = onReachTime(video, endSec, () => {
-      cancelWatch = null;
-      video.pause();
-      send({ type: "OUT_REACHED" });
-      setStatus("録画を書き出しています…");
-    });
+    watchSegmentEnd(video, segments, 0);
   } catch (error) {
     send({ type: "FAIL", reason: "playback-failed" });
     setStatus(`再生を開始できませんでした: ${String(error)}`);
+  }
+}
+
+/** いまの区間の終わりを待つ。次があれば繋ぎ、無ければ書き出しへ進む */
+function watchSegmentEnd(
+  video: HTMLVideoElement,
+  segments: ClipRange[],
+  index: number,
+): void {
+  const segment = segments[index];
+  if (segment === undefined) {
+    // 状態機械が渡した区間列と辿っている位置が食い違っている。UI のバグ
+    send({ type: "FAIL", reason: "internal-error" });
+    return;
+  }
+
+  const remainingSec = Math.round(totalSec(segments.slice(index)));
+  setStatus(
+    segments.length === 1
+      ? `録画中… (${remainingSec}秒)`
+      : `録画中… ${index + 1} / ${segments.length} 区間目 (残り ${remainingSec}秒)`,
+  );
+
+  cancelWatch = onReachTime(video, segment.endSec, () => {
+    cancelWatch = null;
+    if (segments[index + 1] === undefined) {
+      video.pause();
+      send({ type: "OUT_REACHED" });
+      setStatus("録画を書き出しています…");
+      return;
+    }
+    void advanceToSegment(video, segments, index + 1);
+  });
+}
+
+/**
+ * 区間の間。録画を止めて次の頭へ飛び、映像が整ってから再開する。
+ *
+ * **`seeked` だけで再開しない。** 直後はデコードが追いつかず前のフレームが
+ * 残っていることがあり、繋ぎ目に前の場面が数フレーム混入する
+ * (`waitForFreshFrame`)。
+ */
+async function advanceToSegment(
+  video: HTMLVideoElement,
+  segments: ClipRange[],
+  index: number,
+): Promise<void> {
+  const segment = segments[index];
+  if (segment === undefined || handle === null) {
+    // handle が無いのに区間を繋ごうとしている = 録画が始まっていない
+    send({ type: "FAIL", reason: "internal-error" });
+    return;
+  }
+
+  const recorder = handle;
+  try {
+    recorder.pause();
+    video.pause();
+    setStatus(`${index + 1} / ${segments.length} 区間目へ移動中…`);
+
+    await seekTo(video, segment.startSec);
+    await startPlayback(video);
+    await waitForFreshFrame(video);
+
+    // **区間ごとに広告を見る。** 録画開始前の 1 回だけでは、この間に始まった
+    // ミッドロールを拾えない。部分的に広告が混ざったクリップを残すより、
+    // 録り直させる方がましである
+    if (isAdPlaying()) {
+      send({ type: "FAIL", reason: "ad-playing" });
+      setStatus(FAILURE_MESSAGES["ad-playing"]);
+      return;
+    }
+
+    recorder.resume();
+    watchSegmentEnd(video, segments, index);
+  } catch (error) {
+    send({ type: "FAIL", reason: "seek-failed" });
+    setStatus(`${FAILURE_MESSAGES["seek-failed"]}: ${String(error)}`);
   }
 }
 
@@ -1023,12 +1109,7 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
     return;
   }
   if (state.kind === "recording") {
-    const first = state.segments[0];
-    if (first === undefined) {
-      send({ type: "FAIL", reason: "internal-error" });
-      return;
-    }
-    void runRecording(first.startSec, first.endSec);
+    void runRecording(state.segments);
   }
 });
 
