@@ -98,7 +98,7 @@ PJ 側に CLAUDE.md / `.claude/rules/` は存在しない。以下はグロー�
 spec §9 の未検証の前提を潰す。**ここが崩れると設計の退避が要るので、コードを
 1 行も書く前に確かめる。**
 
-- [ ] **Step 1: 検証スニペットをユーザーに渡す**
+- [x] **Step 1: 検証スニペットをユーザーに渡す**
 
 YouTube の適当な動画 (3 分以上・広告なし・1080p) を開く。
 
@@ -163,7 +163,7 @@ user gesture を持たないため、停止したまま貼ると再生が始ま�
 })();
 ```
 
-- [ ] **Step 2: 結果を判定する**
+- [x] **Step 2: 結果を判定する**
 
 出力された URL を新しいタブで開いて再生し、次の 3 点を確認する。
 
@@ -173,7 +173,7 @@ user gesture を持たないため、停止したまま貼ると再生が始ま�
 | 繋ぎ目の映像 | 60 秒地点の場面が 120 秒地点に混入していない |
 | 繋ぎ目の音 | 映像と音がずれていない。無音区間が挟まっていない |
 
-- [ ] **Step 3: 結果を spec に追記する**
+- [x] **Step 3: 結果を spec に追記する**
 
 `.claude/specs/2026-09-23-edit-mode-segments-design.md` の §9 末尾に追記する。
 **通った場合:**
@@ -190,7 +190,7 @@ user gesture を持たないため、停止したまま貼ると再生が始ま�
 録る設計へ倒す判断をユーザーに仰ぐ。その場合この plan は破棄し、サブプロジェクト
 2 (書き出しパイプライン) の spec から書き直すことになる。
 
-- [ ] **Step 4: commit**
+- [x] **Step 4: commit**
 
 ```bash
 git add .claude/specs/2026-09-23-edit-mode-segments-design.md
@@ -221,7 +221,7 @@ MSG
 **コードより先にドキュメントを直す** (PJ 恒久ルール)。ここで書いた挙動が
 以降のタスクの受け入れ条件になる。
 
-- [ ] **Step 1: README に使い方とモードを書く**
+- [x] **Step 1: README に使い方とモードを書く**
 
 `README.md` の「## 使い方」の直後に節を足す。
 
@@ -239,7 +239,7 @@ MSG
 **モードを変えると作りかけの区間は消える。** 録画中は変えられない。
 ```
 
-- [ ] **Step 2: README の「できないこと・制約」に追記する**
+- [x] **Step 2: README の「できないこと・制約」に追記する**
 
 `## できないこと・制約` の箇条書きの末尾に足す。
 
@@ -256,7 +256,7 @@ MSG
   待ち時間も伸びる
 ```
 
-- [ ] **Step 3: README の spec 一覧にリンクを足す**
+- [x] **Step 3: README の spec 一覧にリンクを足す**
 
 `設計は以下を参照。` の箇条書き末尾に足す。
 
@@ -264,7 +264,7 @@ MSG
 - [`.claude/specs/2026-09-23-edit-mode-segments-design.md`](.claude/specs/2026-09-23-edit-mode-segments-design.md) — エディットモードと複数区間の結合
 ```
 
-- [ ] **Step 4: 手動確認に節を足す**
+- [x] **Step 4: 手動確認に節を足す**
 
 `docs/manual-check.md` の `## 制約の確認` の直前に節を足す。
 
@@ -297,7 +297,7 @@ MSG
 - [ ] popup に「2 区間 / 30 秒」のように出る
 ```
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add README.md docs/manual-check.md
@@ -331,7 +331,7 @@ MSG
 **`content/` ではなく `shared/` に置く。** `reduce` (background) が `normalize` を
 呼ぶため。
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `tests/shared/timeline.test.ts` を新規作成:
 
@@ -457,12 +457,12 @@ describe("toSourceTime", () => {
 });
 ```
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/shared/timeline.test.ts`
 期待: FAIL (`Failed to resolve import "@/shared/timeline"`)
 
-- [ ] **Step 3: 最小実装**
+- [x] **Step 3: 最小実装**
 
 `src/shared/timeline.ts` を新規作成:
 
@@ -586,12 +586,12 @@ export function toSourceTime(
 }
 ```
 
-- [ ] **Step 4: 実行して通過を確認**
+- [x] **Step 4: 実行して通過を確認**
 
 実行: `npx vitest run tests/shared/timeline.test.ts && npm run typecheck`
 期待: PASS (テスト 20 件前後) / 型エラーなし
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add src/shared/timeline.ts tests/shared/timeline.test.ts
@@ -626,7 +626,7 @@ MSG
 `input type="text"` を 1 つ作るだけで選択肢を出す道がない。モードは自由入力に
 できる値ではないので、先に枠を広げる。**モード項目そのものは Task 5 で足す。**
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `tests/content/settings-panel.test.ts` の末尾に `describe` を足す:
 
@@ -686,12 +686,12 @@ import {
 } from "@/shared/settings";
 ```
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/content/settings-panel.test.ts`
 期待: FAIL (`createFieldInput` が export されていない / `control` が型に無い)
 
-- [ ] **Step 3: `settings.ts` に `control` を足す**
+- [x] **Step 3: `settings.ts` に `control` を足す**
 
 `SettingsField` の定義の直前に型を足す:
 
@@ -725,7 +725,7 @@ export type FieldControl =
     control: { kind: "text" },
 ```
 
-- [ ] **Step 4: パネルを作り分ける**
+- [x] **Step 4: パネルを作り分ける**
 
 `src/content/settings-panel.ts` の import に `SettingsField` を足す:
 
@@ -799,12 +799,12 @@ export function createFieldInput(field: SettingsField): FieldInput {
 
 `label.htmlFor` は `id` を文字列で組み立てているのでそのままでよい。
 
-- [ ] **Step 5: 実行して通過を確認**
+- [x] **Step 5: 実行して通過を確認**
 
 実行: `npx vitest run tests/content/settings-panel.test.ts && npm run typecheck`
 期待: PASS / 型エラーなし
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add src/shared/settings.ts src/content/settings-panel.ts tests/content/settings-panel.test.ts
@@ -835,7 +835,7 @@ MSG
 - Consumes: Task 4 の `FieldControl`
 - Produces: `ClipMode`, `Settings.mode`, `parseMode(input)`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `tests/shared/settings.test.ts` の末尾に足す:
 
@@ -888,12 +888,12 @@ import {
 } from "@/shared/settings";
 ```
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/shared/settings.test.ts`
 期待: FAIL (`parseMode` が export されていない)
 
-- [ ] **Step 3: 最小実装**
+- [x] **Step 3: 最小実装**
 
 `src/shared/settings.ts` の `Settings` の直前に型を足す:
 
@@ -981,12 +981,12 @@ export function parseMode(input: string): FieldResult {
   },
 ```
 
-- [ ] **Step 4: 実行して通過を確認**
+- [x] **Step 4: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck`
 期待: PASS / 型エラーなし
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add src/shared/settings.ts tests/shared/settings.test.ts
@@ -1038,7 +1038,7 @@ commit すると型エラーを抱えた状態が残る。**このタスクで�
 **spec に書き漏らした影響範囲がある。** `StoredClip` と `renderTemplate` も
 `range` を持っていた。この 2 つの扱いを決めて spec に追記する (Step 1)。
 
-- [ ] **Step 1: spec の影響範囲表を直す**
+- [x] **Step 1: spec の影響範囲表を直す**
 
 `.claude/specs/2026-09-23-edit-mode-segments-design.md` の §2.1 の表に 2 行足し、
 表の直後に段落を足す。
@@ -1070,7 +1070,7 @@ IndexedDB に残っている古いクリップは `range` しか持たない。�
 | `{duration}` | **合計長** (`totalSec`)。元動画上の幅ではない |
 ```
 
-- [ ] **Step 2: 失敗するテストを書く**
+- [x] **Step 2: 失敗するテストを書く**
 
 `tests/background/state.test.ts` の先頭の共通定義を差し替える:
 
@@ -1282,12 +1282,12 @@ describe("複数区間の本文", () => {
 });
 ```
 
-- [ ] **Step 3: 実行して失敗を確認**
+- [x] **Step 3: 実行して失敗を確認**
 
 実行: `npx vitest run`
 期待: FAIL (型エラーおよび `segments` が存在しないことによる多数の失敗)
 
-- [ ] **Step 4: `types.ts` を書き換える**
+- [x] **Step 4: `types.ts` を書き換える**
 
 `ClipState` の各 kind の `range: ClipRange` を `segments: ClipRange[]` に置き換える。
 `failed` だけは形が変わるので明示する:
@@ -1331,7 +1331,7 @@ export type ClipEvent =
   ...
 ```
 
-- [ ] **Step 5: `state.ts` を書き換える**
+- [x] **Step 5: `state.ts` を書き換える**
 
 先頭の import に `normalize` を足す:
 
@@ -1443,7 +1443,7 @@ function hasIndex(segments: ClipRange[], index: number): boolean {
       }
 ```
 
-- [ ] **Step 6: 残りのモジュールを追従させる**
+- [x] **Step 6: 残りのモジュールを追従させる**
 
 型エラーの出る箇所を機械的に直す。`npm run typecheck` が案内になる。
 
@@ -1551,13 +1551,13 @@ function segmentsLabel(segments: ClipRange[]): string {
 | `state.kind === "ready" && sameRange(state.range, r)` | `state.kind === "ready" && state.segments[0] !== undefined && sameRange(state.segments[0], r)` |
 | `state.range.startSec` (prepare/run) | `state.segments[0].startSec` (先頭を変数に取る) |
 
-- [ ] **Step 7: 実行して通過を確認**
+- [x] **Step 7: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck`
 期待: PASS / 型エラーなし。**シンプルモードの既存テストがすべて通ること**が
 このタスクの受け入れ条件。
 
-- [ ] **Step 8: commit**
+- [x] **Step 8: commit**
 
 ```bash
 git add -A
@@ -1591,7 +1591,7 @@ MSG
 - Consumes: Task 1 の検証結果
 - Produces: `RecorderHandle.pause()`, `RecorderHandle.resume()`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `tests/content/recorder.test.ts` の末尾に足す:
 
@@ -1691,12 +1691,12 @@ describe("区間の間で一時停止する", () => {
 
 import に `startRecording` と `beforeEach` / `vi` を足す。
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/content/recorder.test.ts`
 期待: FAIL (`handle.pause is not a function`)
 
-- [ ] **Step 3: 最小実装**
+- [x] **Step 3: 最小実装**
 
 `src/content/recorder.ts` の `RecorderHandle` を置き換える:
 
@@ -1736,12 +1736,12 @@ export type RecorderHandle = {
       },
 ```
 
-- [ ] **Step 4: 実行して通過を確認**
+- [x] **Step 4: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck`
 期待: PASS / 型エラーなし
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add src/content/recorder.ts tests/content/recorder.test.ts
@@ -1774,7 +1774,7 @@ MSG
 `seeked` だけでは足りない。直後はデコードが追いつかず前のフレームが残って
 いることがあり、ここを雑にすると繋ぎ目に前の場面が数フレーム混入する。
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `tests/content/player.test.ts` の末尾に足す:
 
@@ -1818,12 +1818,12 @@ describe("waitForFreshFrame", () => {
 
 import に `waitForFreshFrame` を足す。
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/content/player.test.ts`
 期待: FAIL (`waitForFreshFrame` が export されていない)
 
-- [ ] **Step 3: 最小実装**
+- [x] **Step 3: 最小実装**
 
 `src/content/player.ts` の末尾に足す:
 
@@ -1871,12 +1871,12 @@ export function waitForFreshFrame(
 }
 ```
 
-- [ ] **Step 4: 実行して通過を確認**
+- [x] **Step 4: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck`
 期待: PASS / 型エラーなし
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add src/content/player.ts tests/content/player.test.ts
@@ -1913,7 +1913,7 @@ MSG
 **一覧は表示とコールバックだけを持ち、選択は `youtube.ts` が唯一の持ち主に
 する。** spec のモックも合わせて直す。
 
-- [ ] **Step 1: spec のモックを実装に合わせる**
+- [x] **Step 1: spec のモックを実装に合わせる**
 
 `.claude/specs/2026-09-23-edit-mode-segments-design.md` の §5.2 のモックを
 差し替える。**`[+ ここを追加]` を一覧から外す。** バーの IN ボタンが区間を
@@ -1942,7 +1942,7 @@ MSG
 ある。両方に置くと同期が要る。
 ```
 
-- [ ] **Step 2: 失敗するテストを書く**
+- [x] **Step 2: 失敗するテストを書く**
 
 `tests/content/segment-list.test.ts` を新規作成:
 
@@ -2055,12 +2055,12 @@ describe("区間の一覧", () => {
 });
 ```
 
-- [ ] **Step 3: 実行して失敗を確認**
+- [x] **Step 3: 実行して失敗を確認**
 
 実行: `npx vitest run tests/content/segment-list.test.ts`
 期待: FAIL (`Failed to resolve import "@/content/segment-list"`)
 
-- [ ] **Step 4: スタイルを足す**
+- [x] **Step 4: スタイルを足す**
 
 `src/content/styles.ts` の `PANEL_STYLE` の後に足す:
 
@@ -2081,7 +2081,7 @@ export const SEGMENT_STYLE = {
 } as const;
 ```
 
-- [ ] **Step 5: 一覧を実装する**
+- [x] **Step 5: 一覧を実装する**
 
 `src/content/segment-list.ts` を新規作成:
 
@@ -2222,12 +2222,12 @@ export function createSegmentList(
 }
 ```
 
-- [ ] **Step 6: 実行して通過を確認**
+- [x] **Step 6: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck`
 期待: PASS / 型エラーなし
 
-- [ ] **Step 7: commit**
+- [x] **Step 7: commit**
 
 ```bash
 git add src/content/segment-list.ts src/content/styles.ts tests/content/segment-list.test.ts .claude/specs/2026-09-23-edit-mode-segments-design.md
@@ -2260,7 +2260,7 @@ MSG
   Task 3 の `indexAt`
 - Produces: なし (UI の完成)
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `tests/content/youtube.test.ts` の末尾に足す。**このファイルは content script を
 1 度だけ import して使い回す**ので、新しい mount helper は作らず、既にある
@@ -2360,12 +2360,12 @@ describe("エディットモード", () => {
 });
 ```
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/content/youtube.test.ts`
 期待: FAIL
 
-- [ ] **Step 3: 状態の持ち方を変える**
+- [x] **Step 3: 状態の持ち方を変える**
 
 まず `src/content/youtube.ts` の import に足す:
 
@@ -2412,7 +2412,7 @@ function selectedSegment(): ClipRange | null {
 }
 ```
 
-- [ ] **Step 4: 状態の反映に一覧を混ぜる**
+- [x] **Step 4: 状態の反映に一覧を混ぜる**
 
 `applyStateToDisplay` の `stateRange` を区間列に置き換える:
 
@@ -2471,7 +2471,7 @@ function selectedSegment(): ClipRange | null {
 
 `rangeBar?.update(currentRange, ...)` は `selectedSegment()` を使う形に直す。
 
-- [ ] **Step 5: IN を分岐させる**
+- [x] **Step 5: IN を分岐させる**
 
 `onMarkIn` を置き換える:
 
@@ -2512,7 +2512,7 @@ function onMarkIn(): void {
 (Task 6 で `index: 0` 固定にしてあるところ)。どちらも先頭で
 `if (selectedIndex < 0) return;` を確かめる。
 
-- [ ] **Step 6: バーに一覧を組み込む**
+- [x] **Step 6: バーに一覧を組み込む**
 
 `buildBar` の中を直す。IN ボタンのラベルをモードで変え、一覧を差し込む:
 
@@ -2577,7 +2577,7 @@ function applyStateToSelection(): void {
 }
 ```
 
-- [ ] **Step 7: 設定の読み込みを直す**
+- [x] **Step 7: 設定の読み込みを直す**
 
 `loadInitialSettings` で `mode` も読む:
 
@@ -2630,12 +2630,12 @@ function applyMode(next: ClipMode): void {
 }
 ```
 
-- [ ] **Step 8: 実行して通過を確認**
+- [x] **Step 8: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck && npm run build`
 期待: PASS / 型エラーなし / ビルド成功
 
-- [ ] **Step 9: commit**
+- [x] **Step 9: commit**
 
 ```bash
 git add src/content/youtube.ts tests/content/youtube.test.ts
@@ -2669,7 +2669,7 @@ MSG
 - Consumes: Task 7 の `pause()` / `resume()`、Task 8 の `waitForFreshFrame`
 - Produces: なし (録画の完成)
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 まず `tests/content/youtube.test.ts` の `FakeRecorder` を拡張する。いまは
 `state: "inactive" | "recording"` しか持たず、一時停止を観測できない。
@@ -2783,12 +2783,12 @@ describe("複数区間の録画", () => {
 ※ 広告の仕込み方 (`ad-showing` を付けるセレクタ) は `src/content/player.ts` の
 `isAdPlaying` と `buildPage()` の DOM に合わせること。
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/content/youtube.test.ts`
 期待: FAIL (`recorder.calls` が存在しない / 2 区間目へ進まない)
 
-- [ ] **Step 3: 録画シーケンスを書き換える**
+- [x] **Step 3: 録画シーケンスを書き換える**
 
 `src/content/player.ts` からの import に `waitForFreshFrame` を足したうえで、
 `runRecording` を置き換え、2 つの関数を足す:
@@ -2895,7 +2895,7 @@ async function advanceToSegment(
 }
 ```
 
-- [ ] **Step 4: 呼び出し側を直す**
+- [x] **Step 4: 呼び出し側を直す**
 
 `chrome.runtime.onMessage` のリスナーを直す:
 
@@ -2938,12 +2938,12 @@ async function advanceToSegment(
       }
 ```
 
-- [ ] **Step 5: 実行して通過を確認**
+- [x] **Step 5: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck && npm run build`
 期待: PASS / 型エラーなし / ビルド成功
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add src/content/youtube.ts tests/content/youtube.test.ts
@@ -2977,7 +2977,7 @@ MSG
 - Consumes: Task 10 の `currentSegments`
 - Produces: なし (UI の完成)
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `tests/content/youtube.test.ts` に足す。既にある `overlay()` helper を使う。
 
@@ -3031,12 +3031,12 @@ describe("シークバーの帯", () => {
 });
 ```
 
-- [ ] **Step 2: 実行して失敗を確認**
+- [x] **Step 2: 実行して失敗を確認**
 
 実行: `npx vitest run tests/content/youtube.test.ts`
 期待: FAIL (帯が 1 本しか出ない)
 
-- [ ] **Step 3: 帯を描き直す**
+- [x] **Step 3: 帯を描き直す**
 
 `paintOverlay` と `refreshOverlay` を置き換える:
 
@@ -3094,7 +3094,7 @@ function refreshOverlay(): void {
 `paintOverlay(currentSegments, videoDurationSec)` に、`onRangeCommitted` の
 中の呼び出しも同様に直す。
 
-- [ ] **Step 4: 実行して通過を確認**
+- [x] **Step 4: 実行して通過を確認**
 
 実行: `npx vitest run && npm run typecheck && npm run build`
 期待: PASS / 型エラーなし / ビルド成功
@@ -3106,7 +3106,7 @@ function refreshOverlay(): void {
 項目をすべて確認する。**繋ぎ目の品質 (映像の混入・音ズレ) は自動テストで
 見ていないので、ここが唯一の砦。**
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add src/content/youtube.ts tests/content/youtube.test.ts
