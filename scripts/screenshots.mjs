@@ -93,9 +93,30 @@ try {
   await page.screenshot({ path: `${OUT_DIR}/1-range.png` });
   console.log(`${OUT_DIR}/1-range.png`);
 
+  /**
+   * バー全体 (開いているパネルも含む) が画面に収まるよう送る。
+   *
+   * **上端ではなく下端を基準にする。** 設定項目が増えるとパネルは下へ伸びるので、
+   * 上端を固定していると新しい項目が画面外へこぼれる (モードを足したときに
+   * 「最大秒数」が切れた)
+   */
+  const frameWholeBar = async (bottomMarginPx) => {
+    await page.evaluate((margin) => {
+      const element = document.getElementById("yt-clip-bar");
+      if (element === null) throw new Error("バーが見つかりません");
+      const bottom = element.getBoundingClientRect().bottom + window.scrollY;
+      window.scrollTo({
+        top: bottom - window.innerHeight + margin,
+        behavior: "instant",
+      });
+    }, bottomMarginPx);
+    // スクロール後の再描画を待つ
+    await page.waitForTimeout(500);
+  };
+
   // 設定パネルを開く。パネルのぶん背が伸びるので枠取りを取り直す
   await bar.getByRole("button", { name: "⚙" }).click();
-  await framePlayerAndBar(0.55);
+  await frameWholeBar(24);
   await page.screenshot({ path: `${OUT_DIR}/2-settings.png` });
   console.log(`${OUT_DIR}/2-settings.png`);
 } finally {
