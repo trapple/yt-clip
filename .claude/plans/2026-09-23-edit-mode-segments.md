@@ -3099,7 +3099,7 @@ function refreshOverlay(): void {
 実行: `npx vitest run && npm run typecheck && npm run build`
 期待: PASS / 型エラーなし / ビルド成功
 
-- [ ] **Step 5: 手動確認を通す**
+- [x] **Step 5: 手動確認を通す**
 
 `npm run build` した `dist/` を `chrome://extensions` から読み込み、
 `docs/manual-check.md` の **「## エディットモード (複数区間の結合)」** の
@@ -3125,12 +3125,22 @@ MSG
 
 ## 完了の条件
 
-- [ ] `npx vitest run` が通る
-- [ ] `npm run typecheck` が通る
-- [ ] `npm run build` が通る
-- [ ] `docs/manual-check.md` の「エディットモード (複数区間の結合)」を全項目確認した
-- [ ] **シンプルモードの挙動が変わっていない** (既存の手動確認項目も通る)
-- [ ] 全タスク完了後、branch 全体の cross-review (保守担当 + 攻撃者視点、
+- [x] `npx vitest run` が通る
+- [x] `npm run typecheck` が通る
+- [x] `npm run build` が通る
+- [x] `docs/manual-check.md` の「エディットモード (複数区間の結合)」を全項目確認した
+- [x] **シンプルモードの挙動が変わっていない** (既存の手動確認項目も通る)
+- [x] 全タスク完了後、branch 全体の cross-review (保守担当 + 攻撃者視点、
       別 Claude モデル) を 1 回通し、指摘を直した
+
+## plan を書いた後に決まったこと
+
+実機で使ってから、この plan の前提を 2 つ変えている。経緯は spec §2.3 と
+CHANGELOG を参照。
+
+- **IN を「＋ 区間を追加」に置き換えない。** OUT があるのに IN が無い状態になり、
+  一度作った区間の頭を詰められなくなる。3 つのボタンを並べる
+- **自動ソートと自動マージをやめた。** 区間の中で「追加」を押すと無反応になり、
+  同じ場面を 2 回使うこともできなかった。拾った順のまま持つ
 
 **push / PR 作成 / merge はユーザーの指示を待つ。**
