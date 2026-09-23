@@ -115,7 +115,10 @@ function migrateClip(stored: StoredClip | LegacyClip): StoredClip {
   console.info(
     `[yt-clip] 区間を持たない古いクリップを 1 区間として読みました: ${legacy.id}`,
   );
-  return { ...legacy, segments: [legacy.range] };
+  // **`range` は落とす。** 残すと `StoredClip` 型に無いプロパティを持った値が
+  // 出回り、型と実体がずれる。読み替えた後の形だけを渡す
+  const { range, ...rest } = legacy;
+  return { ...rest, segments: [range] };
 }
 
 /** クリップを取り出す。存在しない ID の参照はバグなので throw する */

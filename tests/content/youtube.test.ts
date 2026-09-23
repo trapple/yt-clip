@@ -1404,3 +1404,62 @@ describe("進行中のモード変更", () => {
     expect(segmentRows().length).toBe(1);
   });
 });
+
+describe("区間を足した直後の選択", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("足した区間が選ばれる", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 98 }], meta: META_A });
+    await flush();
+
+    video.element.currentTime = 300;
+    clickButton("＋ 区間を追加");
+    await flush();
+    // 状態機械が並べ替えた結果を返す
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 300, endSec: 315 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 「IN → OUT」の癖で OUT を押したとき、前の区間の終端が動くと事故になる
+    expect(segmentRows()[1]?.dataset.selected).toBe("true");
+  });
+});
+
+describe("合計が上限を超えた録画", () => {
+  test("内部エラーではなく区間を直せる状態へ戻す", async () => {
+    changeSettings({ mode: "edit", maxClipSec: 20 });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 0, endSec: 15 },
+        { startSec: 100, endSec: 115 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+    sent = [];
+
+    emit({
+      kind: "seeking",
+      segments: [
+        { startSec: 0, endSec: 15 },
+        { startSec: 100, endSec: 115 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 合計を減らせば直せる。「内部エラーが発生しました」では手の打ちようがない
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(statusText()).toContain("上限");
+  });
+});

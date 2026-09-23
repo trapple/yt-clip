@@ -284,11 +284,17 @@ content script に閉じる。** 状態に `mode` を持たせると、モード
 **`REMOVE_SEGMENT` で空になったら `idle` へ。** 区間が 0 個の `ready` は
 録画に進めない死に状態なので作らない。
 
-**`ADD_SEGMENT` は `idle` / `ready` / `posted` から受ける。** `idle` からは
-`MARK_IN` と同じ結果 (`[range]`) になる。`posted` から受けたときは `ready` に
-落とす (クリップを外す)。既存の `ADJUST_SEGMENT` / `MARK_OUT` と同じ理由で、
-**区間を変えたらクリップは外す**。画面に出ている区間と投稿される中身が
-食い違うのを防ぐ。
+**`ADD_SEGMENT` は `MARK_IN` と同じ広さで受ける。** つまり `BUSY_KINDS`
+(`seeking` / `recording` / `encoding`) 以外のすべてから受け、結果は `ready` に
+なる。`idle` からは `MARK_IN` と同じ結果 (`[range]`) になり、クリップを持つ
+状態 (`preview` / `posted` / `degraded`) からはクリップが外れる。既存の
+`ADJUST_SEGMENT` / `MARK_OUT` と同じ理由で、**区間を変えたらクリップは外す**。
+画面に出ている区間と投稿される中身が食い違うのを防ぐ。
+
+**別の動画の区間は混ぜない。** SPA 遷移で動画が変わってから足すと、B の映像を
+A の秒で切ったクリップに A のタイトルと URL が付く。`event.meta.videoId` が
+いまの `meta` と違えば、足さずに `[event.range]` で作り直す (`MARK_IN` と同じ
+結果)。**これは content script 側のガードに頼らない。** 状態機械が最後の砦になる。
 
 **`index` が範囲外なら `invalid`。** UI のバグを握り潰さない。既存の
 `internal-error` に倒す。
@@ -505,15 +511,20 @@ Fail Fast を守る。`normalize` が想定外の入力 (負の秒、`endSec <= 
 
 ### 7.2 E2E (`playwright`)
 
-`e2e/draft-editor.spec.ts` に倣い、実 YouTube で次を確認する。CI では
-実行しない。
+**今回は E2E を足さない。** 当初は次の 3 つを実 YouTube で確認するつもりだった。
 
 - エディットモードで IN を 2 回押すと一覧に 2 行出る
 - 合計が最大秒数を超えると録画ボタンが押せない
 - モードをシンプルに戻すと一覧が消え、区間も消える
 
-**繋ぎ目の品質は E2E で見ない。** フレーム単位の確認は自動化に見合わないので
-手動確認に回す。
+いずれも jsdom の単体テストで同じことを固定できており (`tests/content/youtube.test.ts`
+の「エディットモード」節)、E2E で増えるのは「実 YouTube の DOM に載るか」だけで
+ある。それは既存の `e2e/smoke.spec.ts` がバーの生成を見ているので、モード固有の
+E2E を足しても得られるものが薄い。
+
+**繋ぎ目の品質は E2E でも見られない。** フレーム単位の確認は自動化に見合わない
+ので、手動確認 (`docs/manual-check.md`) に回す。**ここがこの機能の唯一の砦**で
+あり、E2E を足してもその事実は変わらない。
 
 ---
 

@@ -9,6 +9,8 @@ import {
   seekTo,
   startPlayback,
   waitForFreshFrame,
+  assertFrameCallbackSupported,
+  FrameCallbackUnsupportedError,
 } from "@/content/player";
 import {
   ACTION_EVENTS,
@@ -93,6 +95,13 @@ let lastKind: ClipState["kind"] = "idle";
  * 直らない。落ち着いた時点で適用できるよう覚えておく
  */
 let pendingMode: ClipMode | null = null;
+/**
+ * 次に状態が届いたとき、この秒を含む区間を選び直す。
+ *
+ * 区間を足した直後は**足した区間**を選ぶ。前の区間が選ばれたままだと、
+ * 「IN → OUT」の癖で OUT を押したときに前の区間の終端が動いて事故になる
+ */
+let selectionAnchorSec: number | null = null;
 /** 範囲を作ったときの動画。SPA で動画が変わったら無効になる */
 let rangeVideoId: string | null = null;
 let busy = false;
@@ -307,6 +316,7 @@ function onMarkIn(): void {
   // 状態機械の答えを待ってから描く (applyStateToDisplay が反映する)。
   // シンプルは結果が自明なので今までどおり先に描く
   if (mode === "edit") {
+    selectionAnchorSec = range.startSec;
     send({ type: "ADD_SEGMENT", range, meta });
     return;
   }
@@ -390,9 +400,10 @@ function onMarkOut(): void {
     return;
   }
 
-  // IN を打った後に別の動画へ移動していた場合、その範囲はもう意味を持たない。
-  // ここで RESET_MARKS を送ってはいけない。録画済みで投稿待ちのときに届くと
-  // 状態機械が不正遷移として failed に落ち、クリップへの参照ごと失う
+  // IN を打った後に別の動画へ移動していた場合、その区間はもう意味を持たない。
+  // **ここで RESET_MARKS を送らない。** この画面の表示を畳むだけで足り、
+  // 状態機械が持っている区間とクリップまで捨てる理由がない (別のタブで
+  // 元の動画を開いていれば、そちらでは今も使える)
   if (getVideoMeta().videoId !== rangeVideoId) {
     currentSegments = [];
     selectedIndex = -1;
@@ -639,7 +650,9 @@ function applyStateToDisplay(state: ClipState): void {
   // 引き直せば、マージで消えた区間を選んでいた場合もマージ先が返るので、
   // 選択が迷子にならない (区間に ID を振らずに済ませる代わりの仕掛け)
   const previous = selectedSegment();
-  const anchorSec = previous?.startSec ?? null;
+  // 足したばかりの区間があればそちらを選ぶ。無ければいま選んでいる区間を追う
+  const anchorSec = selectionAnchorSec ?? previous?.startSec ?? null;
+  selectionAnchorSec = null;
 
   busy = BUSY_KINDS.has(state.kind);
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
@@ -757,6 +770,13 @@ async function prepareRecording(
     // 実時間を払い切ってから無駄と分かることのないよう、ここで弾く
     assertRecordable(getVideo());
 
+    // **繋ぎ目の検査もここで済ませる。** 区間の間で初めて気付くと、既に
+    // 実時間を払った後になる。同期 throw が advanceToSegment の catch に
+    // 飲まれて seek-failed に化ける経路も塞げる
+    if (currentSegments.length > 1) {
+      assertFrameCallbackSupported(getVideo());
+    }
+
     if (isAdPlaying()) {
       send({ type: "FAIL", reason: "ad-playing" });
       setStatus("広告の再生中です。終了後にやり直してください");
@@ -765,9 +785,12 @@ async function prepareRecording(
 
     // **合計で見る。区間ごとではない。** 区間ごとに上限を見ると、10 秒の
     // 区間を 10 個作れてしまい、X の上限を超えたクリップができる
-    const sum = Math.round(totalSec(currentSegments));
+    // **失敗にしない。** 合計を減らせば直せるので、区間を触れる `ready` へ
+    // 戻す。`FAIL` だと「内部エラーが発生しました」で上書きされ、何をすれば
+    // よいか画面のどこにも出なくなる
     if (isOverLimit(currentSegments, maxClipSec)) {
-      send({ type: "FAIL", reason: "internal-error" });
+      const sum = Math.round(totalSec(currentSegments));
+      send({ type: "CANCEL_RECORDING" });
       setStatus(`合計 ${sum} 秒は上限 ${maxClipSec} 秒を超えています`);
       return;
     }
@@ -790,6 +813,11 @@ async function prepareRecording(
   } catch (error) {
     if (error instanceof DrmProtectedError) {
       send({ type: "FAIL", reason: "drm-protected" });
+      setStatus(error.message);
+      return;
+    }
+    if (error instanceof FrameCallbackUnsupportedError) {
+      send({ type: "FAIL", reason: "internal-error" });
       setStatus(error.message);
       return;
     }
