@@ -4,11 +4,12 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   ElementNotFoundError,
   getChannel,
-  getVideoMeta,
   getVideo,
+  getVideoMeta,
   onReachTime,
   parseVideoId,
   seekTo,
+  waitForFreshFrame,
 } from "@/content/player";
 import { YT_SELECTORS } from "@/content/selectors";
 
@@ -265,5 +266,43 @@ describe("getChannel", () => {
     document.body.innerHTML = '<meta itemprop="channelId" content="UCabc123">';
 
     expect(getChannel()).toEqual({ id: "UCabc123", name: "UCabc123" });
+  });
+});
+
+describe("waitForFreshFrame", () => {
+  /** requestVideoFrameCallback を差し替えた video を作る */
+  function makeVideo(
+    request: ((callback: () => void) => number) | undefined,
+  ): HTMLVideoElement {
+    const video = document.createElement("video");
+    Object.defineProperty(video, "requestVideoFrameCallback", {
+      value: request,
+      configurable: true,
+    });
+    return video;
+  }
+
+  test("新しいフレームが出たら解決する", async () => {
+    const video = makeVideo((callback) => {
+      setTimeout(callback, 0);
+      return 1;
+    });
+
+    await expect(waitForFreshFrame(video)).resolves.toBeUndefined();
+  });
+
+  test("フレームが出なければ時間で諦める", async () => {
+    const video = makeVideo(() => 1);
+
+    await expect(waitForFreshFrame(video, 10)).rejects.toThrow(
+      /新しいフレームが出ませんでした/u,
+    );
+  });
+
+  test("使えない環境ではフォールバックせず throw する", () => {
+    // 繋ぎ目の品質を保証できないまま録画に実時間を払わせない
+    expect(() => waitForFreshFrame(makeVideo(undefined))).toThrow(
+      /区間の繋ぎ目を保証できません/u,
+    );
   });
 });
