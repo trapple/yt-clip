@@ -379,22 +379,34 @@ describe("複数区間", () => {
     });
   });
 
-  test("足した区間は動画の時間順に並ぶ", () => {
+  test("足した区間は拾った順に並ぶ。時間順へ並べ替えない", () => {
+    // 「オチを先に見せる」ような並べ方ができる
     const earlier: ClipRange = { startSec: 1, endSec: 5 };
     expect(reduce(ready, { type: "ADD_SEGMENT", range: earlier, meta })).toEqual({
       kind: "ready",
-      segments: [earlier, range],
+      segments: [range, earlier],
       meta,
     });
   });
 
-  test("重なる区間を足すと 1 つに繋がる", () => {
+  test("重なる区間もそのまま残る", () => {
+    // マージすると、区間の中で「追加」を押したときに無反応になる
     const overlapping: ClipRange = { startSec: 30, endSec: 60 };
     expect(
       reduce(ready, { type: "ADD_SEGMENT", range: overlapping, meta }),
     ).toEqual({
       kind: "ready",
-      segments: [{ startSec: 10, endSec: 60 }],
+      segments: [range, overlapping],
+      meta,
+    });
+  });
+
+  test("完全に含まれる区間を足しても増える", () => {
+    // 既存区間 10-40 の内側。マージしていた頃は結果が変わらず無反応だった
+    const inside: ClipRange = { startSec: 20, endSec: 30 };
+    expect(reduce(ready, { type: "ADD_SEGMENT", range: inside, meta })).toEqual({
+      kind: "ready",
+      segments: [range, inside],
       meta,
     });
   });

@@ -31,39 +31,20 @@ function assertValidRange(range: ClipRange): void {
 }
 
 /**
- * 区間を動画の時間順に並べ、重なり・隣接を 1 つに繋ぐ。
+ * 区間として成立しているか確かめる。
  *
- * **並べ替えを自動にするのは、録画中のシークを常に前進にするため。**
- * 巻き戻しシークはバッファの再読み込みが入りやすく、繋ぎ目の品質が落ちる。
- * 順序をユーザーに委ねる代わりに、繋ぎの確実さを取っている。
+ * **並べ替えもマージもしない。** 拾った順がそのまま出力順になる。当初は
+ * 時系列ソートと重なりのマージをしていたが、区間の中で「区間を追加」を押した
+ * ときに無反応になり (新しい区間が既存区間に完全に含まれると結果が変わらない)、
+ * 同じ場面を 2 回使うこともできなかった。
  *
- * **重なりをエラーにせずマージするのは、** 拡大バーのドラッグで隣の区間に
- * 触れるたびに手を止めさせないため。マージは情報を失わない (拾いたかった
- * 範囲はすべて出力に入る) ので、拒否する理由が弱い。
+ * 拾った順のままなら **index が動かない**ので、選択の同定に ID も要らない。
+ * 代償は録画中の巻き戻しシークだが、繋ぎ目の品質は `waitForFreshFrame` が守る。
  */
-export function normalize(segments: ClipRange[]): ClipRange[] {
+export function assertValidSegments(segments: ClipRange[]): void {
   for (const segment of segments) {
     assertValidRange(segment);
   }
-
-  // 引数の配列は呼び出し側 (状態機械の前の状態) のものなので複製してから並べる
-  const sorted = [...segments].sort((a, b) => a.startSec - b.startSec);
-
-  const merged: ClipRange[] = [];
-  for (const segment of sorted) {
-    const last = merged[merged.length - 1];
-    // `<=` にして隣接 (前の終わり === 次の始まり) も繋ぐ。間に切れ目はない
-    if (last !== undefined && segment.startSec <= last.endSec) {
-      merged[merged.length - 1] = {
-        startSec: last.startSec,
-        // 内側に完全に含まれる区間を飲み込んでも終端が縮まないようにする
-        endSec: Math.max(last.endSec, segment.endSec),
-      };
-      continue;
-    }
-    merged.push({ ...segment });
-  }
-  return merged;
 }
 
 /**
@@ -89,19 +70,6 @@ export function totalSec(segments: ClipRange[]): number {
  */
 export function isOverLimit(segments: ClipRange[], maxClipSec: number): boolean {
   return Math.round(totalSec(segments)) > maxClipSec;
-}
-
-/**
- * その秒を含む区間の index。含む区間が無ければ -1。
- *
- * **区間に ID を振る代わりにこれを使う。** 並べ替えとマージで index は動くが、
- * UI は「いま触っていた区間の開始秒」でこれを引き直せば選択を追える。
- * マージで消えた区間を選んでいた場合もマージ先が返る。
- */
-export function indexAt(segments: ClipRange[], sec: number): number {
-  return segments.findIndex(
-    (segment) => sec >= segment.startSec && sec <= segment.endSec,
-  );
 }
 
 /**

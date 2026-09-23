@@ -1543,3 +1543,143 @@ describe("エディットモードの IN", () => {
     expect(statusText()).toContain("区間を追加");
   });
 });
+
+describe("重なる位置での区間追加", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("区間の中で押しても区間が増える", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    await flush();
+    // 既存区間の内側
+    video.element.currentTime = 90;
+    sent = [];
+
+    clickButton("＋ 区間を追加");
+    await flush();
+
+    // マージしていた頃は結果が変わらず、押しても何も起きなかった
+    expect(clipEvents()).toContainEqual(
+      expect.objectContaining({ type: "ADD_SEGMENT" }),
+    );
+  });
+
+  test("足した区間が末尾で選ばれる", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    await flush();
+
+    video.element.currentTime = 90;
+    clickButton("＋ 区間を追加");
+    await flush();
+    // 並べ替えないので、足した区間は必ず末尾に来る
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 200 },
+        { startSec: 90, endSec: 105 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows()[1]?.dataset.selected).toBe("true");
+  });
+
+  test("途中の区間を消しても選択が飛ばない", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+    // 末尾を選ぶ
+    segmentRows()[2]?.click();
+    await flush();
+
+    // 先頭を消すと、選択していた区間は index 1 に詰まる
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows()[1]?.dataset.selected).toBe("true");
+    expect(statusText()).toContain("0:50");
+  });
+});
+
+describe("区間を消したときの選択", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  async function showThree(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+  }
+
+  test("選択より前を消すと 1 つ手前へずれる", async () => {
+    await showThree();
+    // 真ん中 (0:30) を選ぶ
+    segmentRows()[1]?.click();
+    await flush();
+
+    segmentRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 選んでいた 0:30 は index 0 へ移った。index 1 のままだと別の区間を指す
+    expect(segmentRows()[0]?.dataset.selected).toBe("true");
+    expect(statusText()).toContain("0:30");
+  });
+
+  test("選択より後ろを消しても動かない", async () => {
+    await showThree();
+    segmentRows()[0]?.click();
+    await flush();
+
+    segmentRows()[2]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows()[0]?.dataset.selected).toBe("true");
+    expect(statusText()).toContain("0:10");
+  });
+});

@@ -5,7 +5,7 @@ import {
   type ClipState,
   type VideoMeta,
 } from "@/shared/types";
-import { normalize } from "@/shared/timeline";
+import { assertValidSegments } from "@/shared/timeline";
 
 export const INITIAL_STATE: ClipState = { kind: "idle" };
 
@@ -32,15 +32,17 @@ function invalid(state: ClipState): ClipState {
 /**
  * 区間を差し替えて `ready` を作る。
  *
- * **`normalize` はここを必ず通す。** 呼び出し側に任せると、router 経由の
- * 経路で漏れたときに不正な `segments` が状態に入る。`reduce` は純粋関数の
- * ままなので、ここに置いても副作用はない
+ * **検証はここを必ず通す。** 呼び出し側に任せると、router 経由の経路で
+ * 漏れたときに不正な `segments` が状態に入る。`reduce` は純粋関数のままなので、
+ * ここに置いても副作用はない。
+ *
+ * **並べ替えもマージもしない。** 拾った順がそのまま出力順になる (spec §2.3)
  */
 function readyWith(segments: ClipRange[], meta: VideoMeta): ClipState {
-  const normalized = normalize(segments);
+  assertValidSegments(segments);
   // 区間が 0 個の ready は録画に進めない死に状態なので作らない
-  if (normalized.length === 0) return { kind: "idle" };
-  return { kind: "ready", segments: normalized, meta };
+  if (segments.length === 0) return { kind: "idle" };
+  return { kind: "ready", segments, meta };
 }
 
 /** UI から届いた index が実在するか。実在しなければ UI のバグ */

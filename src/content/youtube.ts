@@ -42,7 +42,7 @@ import {
   type SettingsContext,
 } from "@/shared/settings";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
-import { indexAt, isOverLimit, totalSec } from "@/shared/timeline";
+import { isOverLimit, totalSec } from "@/shared/timeline";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
   BUSY_KINDS,
@@ -73,8 +73,8 @@ let currentSegments: ClipRange[] = [];
 /**
  * 拡大バーがいま編集している区間の位置。区間が無ければ -1。
  *
- * **ここが選択の唯一の持ち主。** 一覧にも持たせると同期が要る。並べ替えと
- * マージで index は動くので、確定のたびに `indexAt` で引き直す
+ * **ここが選択の唯一の持ち主。** 一覧にも持たせると同期が要る。
+ * 並べ替えもマージもしないので index は動かず、数が変わったときだけ詰める
  */
 let selectedIndex = -1;
 /** 切り抜きの作り方。設定から読む */
@@ -96,12 +96,20 @@ let lastKind: ClipState["kind"] = "idle";
  */
 let pendingMode: ClipMode | null = null;
 /**
- * 次に状態が届いたとき、この秒を含む区間を選び直す。
+ * 次に状態が届いたとき、末尾の区間を選ぶ。
  *
  * 区間を足した直後は**足した区間**を選ぶ。前の区間が選ばれたままだと、
- * 「IN → OUT」の癖で OUT を押したときに前の区間の終端が動いて事故になる
+ * 「IN → OUT」の癖で OUT を押したときに前の区間の終端が動いて事故になる。
+ * 足した区間は必ず末尾に来る (並べ替えないため)
  */
-let selectionAnchorSec: number | null = null;
+let selectLastOnNextState = false;
+/**
+ * 次に状態が届いたとき、この位置が消えたものとして選択を詰める。
+ *
+ * 選択より前が消えると、選んでいた区間は 1 つ手前へ移る。位置を覚えずに
+ * 「範囲外なら末尾」だけで詰めると、別の区間を選んだまま IN/OUT を押すことになる
+ */
+let removedIndexOnNextState: number | null = null;
 /** 範囲を作ったときの動画。SPA で動画が変わったら無効になる */
 let rangeVideoId: string | null = null;
 let busy = false;
@@ -413,7 +421,7 @@ function onAddSegment(): void {
   rangeVideoId = meta.videoId;
   // 足した区間を選ぶ。前の区間が選ばれたままだと、続けて IN/OUT を押したとき
   // 別の区間が動く
-  selectionAnchorSec = range.startSec;
+  selectLastOnNextState = true;
   send({ type: "ADD_SEGMENT", range, meta });
 }
 
@@ -448,8 +456,7 @@ function onMarkSegmentStart(): void {
     return;
   }
 
-  // 頭を動かすと並び替えが起きうる。新しい開始秒で選択を追う
-  selectionAnchorSec = next.startSec;
+  // 並べ替えないので、頭を動かしても選択はその場に留まる
   send({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next });
 }
 
@@ -716,21 +723,33 @@ function applyStateToDisplay(state: ClipState): void {
   // 引き直せば、マージで消えた区間を選んでいた場合もマージ先が返るので、
   // 選択が迷子にならない (区間に ID を振らずに済ませる代わりの仕掛け)
   const previous = selectedSegment();
-  // 足したばかりの区間があればそちらを選ぶ。無ければいま選んでいる区間を追う
-  const anchorSec = selectionAnchorSec ?? previous?.startSec ?? null;
-  selectionAnchorSec = null;
 
   busy = BUSY_KINDS.has(state.kind);
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
   currentSegments = liveSegments;
-  selectedIndex = anchorSec === null ? -1 : indexAt(liveSegments, anchorSec);
-  // 引き直せなかった (区間ごと消えた / 初めて区間ができた) ときは末尾を選ぶ。
-  // 選択なしの状態を作ると、拡大バーが何も編集していないのに出ることになる
-  if (selectedIndex === -1 && liveSegments.length > 0) {
+  // **並べ替えないので index は動かない。** 足した直後だけ末尾へ移し、
+  // それ以外は今の位置を保つ。削除で数が減ったときだけ範囲内へ詰める
+  if (liveSegments.length === 0) {
+    selectedIndex = -1;
+  } else if (selectLastOnNextState || selectedIndex < 0) {
     selectedIndex = liveSegments.length - 1;
+  } else {
+    // 選択より前が消えたら、選んでいた区間は 1 つ手前へ移っている
+    if (
+      removedIndexOnNextState !== null &&
+      removedIndexOnNextState < selectedIndex
+    ) {
+      selectedIndex -= 1;
+    }
+    // 選択そのものが消えたときは、同じ位置に来た区間 (無ければ末尾) を選ぶ
+    if (selectedIndex >= liveSegments.length) {
+      selectedIndex = liveSegments.length - 1;
+    }
   }
+  selectLastOnNextState = false;
+  removedIndexOnNextState = null;
 
   const current = selectedSegment();
   const drifted =
@@ -1130,6 +1149,7 @@ function buildBar(): HTMLElement {
       void playRange();
     },
     onRemove: (index) => {
+      removedIndexOnNextState = index;
       send({ type: "REMOVE_SEGMENT", index });
     },
   });
