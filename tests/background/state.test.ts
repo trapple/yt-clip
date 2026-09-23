@@ -5,12 +5,13 @@ import type { ClipRange, ClipState } from "@/shared/types";
 
 const meta = makeVideoMeta();
 const range: ClipRange = { startSec: 10, endSec: 40 };
+const segments = [range];
 
-const ready: ClipState = { kind: "ready", range, meta };
+const ready: ClipState = { kind: "ready", segments, meta };
 const preview: ClipState = {
   kind: "preview",
   clipId: "clip-1",
-  range,
+  segments,
   meta,
   mimeType: "video/mp4",
 };
@@ -30,24 +31,24 @@ describe("マーク操作", () => {
     const next: ClipRange = { startSec: 20, endSec: 50 };
     expect(reduce(ready, { type: "MARK_IN", range: next, meta })).toEqual({
       kind: "ready",
-      range: next,
+      segments: [next],
       meta,
     });
   });
 
   test("OUT は終了位置だけを更新する", () => {
-    expect(reduce(ready, { type: "MARK_OUT", sec: 55 })).toEqual({
+    expect(reduce(ready, { type: "MARK_OUT", index: 0, sec: 55 })).toEqual({
       kind: "ready",
-      range: { startSec: 10, endSec: 55 },
+      segments: [{ startSec: 10, endSec: 55 }],
       meta,
     });
   });
 
   test("ドラッグ結果は範囲をまるごと置き換える", () => {
     const dragged: ClipRange = { startSec: 12.5, endSec: 38.25 };
-    expect(reduce(ready, { type: "ADJUST_RANGE", range: dragged })).toEqual({
+    expect(reduce(ready, { type: "ADJUST_SEGMENT", index: 0, range: dragged })).toEqual({
       kind: "ready",
-      range: dragged,
+      segments: [dragged],
       meta,
     });
   });
@@ -59,17 +60,17 @@ describe("マーク操作", () => {
     const other: ClipRange = { startSec: 0, endSec: 5 };
 
     for (const kind of ["seeking", "recording", "encoding"] as const) {
-      const busy: ClipState = { kind, range, meta };
+      const busy: ClipState = { kind, segments, meta };
 
       expect(
         reduce(busy, { type: "MARK_IN", range: other, meta }),
       ).toMatchObject({ kind: "failed", reason: "internal-error" });
-      expect(reduce(busy, { type: "MARK_OUT", sec: 5 })).toMatchObject({
+      expect(reduce(busy, { type: "MARK_OUT", index: 0, sec: 5 })).toMatchObject({
         kind: "failed",
         reason: "internal-error",
       });
       expect(
-        reduce(busy, { type: "ADJUST_RANGE", range: other }),
+        reduce(busy, { type: "ADJUST_SEGMENT", index: 0, range: other }),
       ).toMatchObject({ kind: "failed", reason: "internal-error" });
     }
   });
@@ -83,7 +84,7 @@ describe("録画フロー", () => {
   test("録画開始で seeking へ進む", () => {
     expect(reduce(ready, { type: "START_RECORDING" })).toEqual({
       kind: "seeking",
-      range,
+      segments,
       meta,
     });
   });
@@ -92,22 +93,22 @@ describe("録画フロー", () => {
     const seeking = reduce(ready, { type: "START_RECORDING" });
     expect(reduce(seeking, { type: "SEEK_DONE" })).toEqual({
       kind: "recording",
-      range,
+      segments,
       meta,
     });
   });
 
   test("OUT 到達で encoding へ進む", () => {
-    const recording: ClipState = { kind: "recording", range, meta };
+    const recording: ClipState = { kind: "recording", segments, meta };
     expect(reduce(recording, { type: "OUT_REACHED" })).toEqual({
       kind: "encoding",
-      range,
+      segments,
       meta,
     });
   });
 
   test("Blob 確定で preview へ進む", () => {
-    const encoding: ClipState = { kind: "encoding", range, meta };
+    const encoding: ClipState = { kind: "encoding", segments, meta };
     expect(
       reduce(encoding, {
         type: "BLOB_READY",
@@ -127,7 +128,7 @@ describe("投稿と degraded path", () => {
     expect(reduce(preview, { type: "POST" })).toEqual({
       kind: "composing",
       clipId: "clip-1",
-      range,
+      segments,
       meta,
       mimeType: "video/mp4",
     });
@@ -150,7 +151,7 @@ describe("投稿と degraded path", () => {
     ).toEqual({
       kind: "degraded",
       clipId: "clip-1",
-      range,
+      segments,
       meta,
       mimeType: "video/mp4",
       reason: "mp4-unsupported",
@@ -166,7 +167,7 @@ describe("投稿と degraded path", () => {
     expect(result).toEqual({
       kind: "degraded",
       clipId: "clip-1",
-      range,
+      segments,
       meta,
       mimeType: "video/mp4",
       reason: "x-attach-failed",
@@ -184,18 +185,18 @@ describe("投稿と degraded path", () => {
 
 describe("失敗と復帰", () => {
   test("録画中の失敗は範囲を保持したまま failed になる", () => {
-    const recording: ClipState = { kind: "recording", range, meta };
+    const recording: ClipState = { kind: "recording", segments, meta };
     expect(reduce(recording, { type: "FAIL", reason: "tab-lost" })).toEqual({
       kind: "failed",
       reason: "tab-lost",
-      range,
+      segments,
       meta,
     });
   });
 
   test("RETRY で ready に戻る", () => {
     const failed = reduce(
-      { kind: "seeking", range, meta },
+      { kind: "seeking", segments, meta },
       { type: "FAIL", reason: "seek-failed" },
     );
     expect(reduce(failed, { type: "RETRY" })).toEqual(ready);
@@ -205,7 +206,7 @@ describe("失敗と復帰", () => {
     const failed: ClipState = {
       kind: "failed",
       reason: "internal-error",
-      range: null,
+      segments: [],
       meta: null,
     };
     expect(reduce(failed, { type: "RETRY" })).toEqual({ kind: "idle" });
@@ -215,7 +216,7 @@ describe("失敗と復帰", () => {
     expect(reduce(INITIAL_STATE, { type: "OUT_REACHED" })).toEqual({
       kind: "failed",
       reason: "internal-error",
-      range: null,
+      segments: [],
       meta: null,
     });
   });
@@ -224,7 +225,7 @@ describe("失敗と復帰", () => {
     expect(reduce(ready, { type: "SEEK_DONE" })).toEqual({
       kind: "failed",
       reason: "internal-error",
-      range,
+      segments,
       meta,
     });
   });
@@ -233,7 +234,7 @@ describe("失敗と復帰", () => {
 describe("投稿した後", () => {
   const posted: ClipState = {
     kind: "posted",
-    range,
+    segments,
     meta,
     clipId: "clip-1",
     mimeType: "video/mp4",
@@ -244,7 +245,7 @@ describe("投稿した後", () => {
       kind: "composing",
       clipId: "clip-1",
       mimeType: "video/mp4",
-      range,
+      segments,
       meta,
     };
     expect(reduce(composing, { type: "ATTACHED" })).toEqual(posted);
@@ -255,7 +256,7 @@ describe("投稿した後", () => {
       kind: "composing",
       clipId: "clip-1",
       mimeType: "video/mp4",
-      range,
+      segments,
       meta,
     });
   });
@@ -263,7 +264,7 @@ describe("投稿した後", () => {
   test("取り直すと範囲は残しクリップを外す", () => {
     expect(reduce(posted, { type: "RETAKE" })).toEqual({
       kind: "ready",
-      range,
+      segments,
       meta,
     });
   });
@@ -272,17 +273,17 @@ describe("投稿した後", () => {
     // 古い範囲のクリップを持ち続けると、画面に出ている範囲と
     // 投稿される中身が食い違う
     const moved = { startSec: 30, endSec: 45 };
-    expect(reduce(posted, { type: "ADJUST_RANGE", range: moved })).toEqual({
+    expect(reduce(posted, { type: "ADJUST_SEGMENT", index: 0, range: moved })).toEqual({
       kind: "ready",
-      range: moved,
+      segments: [moved],
       meta,
     });
   });
 
   test("OUT を打ち直してもクリップを外す", () => {
-    expect(reduce(posted, { type: "MARK_OUT", sec: 40 })).toEqual({
+    expect(reduce(posted, { type: "MARK_OUT", index: 0, sec: 40 })).toEqual({
       kind: "ready",
-      range: { startSec: range.startSec, endSec: 40 },
+      segments: [{ startSec: range.startSec, endSec: 40 }],
       meta,
     });
   });
@@ -291,7 +292,7 @@ describe("投稿した後", () => {
     const next = { startSec: 100, endSec: 115 };
     expect(reduce(posted, { type: "MARK_IN", range: next, meta })).toEqual({
       kind: "ready",
-      range: next,
+      segments: [next],
       meta,
     });
   });
@@ -306,7 +307,7 @@ describe("添付に失敗した後", () => {
     kind: "degraded",
     clipId: "clip-1",
     mimeType: "video/mp4",
-    range,
+    segments,
     meta,
     reason: "x-attach-failed",
   };
@@ -316,7 +317,7 @@ describe("添付に失敗した後", () => {
       kind: "composing",
       clipId: "clip-1",
       mimeType: "video/mp4",
-      range,
+      segments,
       meta,
     });
   });
@@ -330,31 +331,208 @@ describe("添付に失敗した後", () => {
 
 describe("録画の中止", () => {
   test("シーク中に中止すると範囲を残して戻る", () => {
-    const seeking: ClipState = { kind: "seeking", range, meta };
+    const seeking: ClipState = { kind: "seeking", segments, meta };
     expect(reduce(seeking, { type: "CANCEL_RECORDING" })).toEqual({
       kind: "ready",
-      range,
+      segments,
       meta,
     });
   });
 
   test("録画中に中止すると範囲を残して戻る", () => {
     // 範囲を残すので、そのまま録り直せる
-    const recording: ClipState = { kind: "recording", range, meta };
+    const recording: ClipState = { kind: "recording", segments, meta };
     expect(reduce(recording, { type: "CANCEL_RECORDING" })).toEqual({
       kind: "ready",
-      range,
+      segments,
       meta,
     });
   });
 
   test("書き出し中は中止できない", () => {
     // ここで止めると、録り終えたものを捨てることになる
-    const encoding: ClipState = { kind: "encoding", range, meta };
+    const encoding: ClipState = { kind: "encoding", segments, meta };
     expect(reduce(encoding, { type: "CANCEL_RECORDING" }).kind).toBe("failed");
   });
 
   test("録画していないときの中止は失敗として表面化させる", () => {
     expect(reduce(ready, { type: "CANCEL_RECORDING" }).kind).toBe("failed");
+  });
+});
+
+describe("複数区間", () => {
+  const second: ClipRange = { startSec: 100, endSec: 120 };
+
+  test("idle から区間を足すと ready になる", () => {
+    expect(reduce(INITIAL_STATE, { type: "ADD_SEGMENT", range, meta })).toEqual({
+      kind: "ready",
+      segments: [range],
+      meta,
+    });
+  });
+
+  test("ready に区間を足すと並んで増える", () => {
+    expect(reduce(ready, { type: "ADD_SEGMENT", range: second, meta })).toEqual({
+      kind: "ready",
+      segments: [range, second],
+      meta,
+    });
+  });
+
+  test("足した区間は拾った順に並ぶ。時間順へ並べ替えない", () => {
+    // 「オチを先に見せる」ような並べ方ができる
+    const earlier: ClipRange = { startSec: 1, endSec: 5 };
+    expect(reduce(ready, { type: "ADD_SEGMENT", range: earlier, meta })).toEqual({
+      kind: "ready",
+      segments: [range, earlier],
+      meta,
+    });
+  });
+
+  test("重なる区間もそのまま残る", () => {
+    // マージすると、区間の中で「追加」を押したときに無反応になる
+    const overlapping: ClipRange = { startSec: 30, endSec: 60 };
+    expect(
+      reduce(ready, { type: "ADD_SEGMENT", range: overlapping, meta }),
+    ).toEqual({
+      kind: "ready",
+      segments: [range, overlapping],
+      meta,
+    });
+  });
+
+  test("完全に含まれる区間を足しても増える", () => {
+    // 既存区間 10-40 の内側。マージしていた頃は結果が変わらず無反応だった
+    const inside: ClipRange = { startSec: 20, endSec: 30 };
+    expect(reduce(ready, { type: "ADD_SEGMENT", range: inside, meta })).toEqual({
+      kind: "ready",
+      segments: [range, inside],
+      meta,
+    });
+  });
+
+  test("合計が長くなっても区間は足せる", () => {
+    // 超過は録画に進めないことで示す。先に縮めてから追加、を強制しない
+    const long: ClipRange = { startSec: 1000, endSec: 1200 };
+    expect(reduce(ready, { type: "ADD_SEGMENT", range: long, meta }).kind).toBe(
+      "ready",
+    );
+  });
+
+  test("投稿後に区間を足すとクリップは外れる", () => {
+    const posted: ClipState = {
+      kind: "posted",
+      segments,
+      meta,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    };
+    expect(reduce(posted, { type: "ADD_SEGMENT", range: second, meta })).toEqual({
+      kind: "ready",
+      segments: [range, second],
+      meta,
+    });
+  });
+
+  test("区間を消せる", () => {
+    const two: ClipState = { kind: "ready", segments: [range, second], meta };
+    expect(reduce(two, { type: "REMOVE_SEGMENT", index: 0 })).toEqual({
+      kind: "ready",
+      segments: [second],
+      meta,
+    });
+  });
+
+  test("最後の区間を消すと idle に戻る", () => {
+    // 区間が 0 個の ready は録画に進めない死に状態なので作らない
+    expect(reduce(ready, { type: "REMOVE_SEGMENT", index: 0 })).toEqual({
+      kind: "idle",
+    });
+  });
+
+  test("index を指して区間を動かせる", () => {
+    const two: ClipState = { kind: "ready", segments: [range, second], meta };
+    const moved: ClipRange = { startSec: 100, endSec: 130 };
+    expect(reduce(two, { type: "ADJUST_SEGMENT", index: 1, range: moved })).toEqual(
+      { kind: "ready", segments: [range, moved], meta },
+    );
+  });
+
+  test("index を指して終端だけ動かせる", () => {
+    const two: ClipState = { kind: "ready", segments: [range, second], meta };
+    expect(reduce(two, { type: "MARK_OUT", index: 1, sec: 130 })).toEqual({
+      kind: "ready",
+      segments: [range, { startSec: 100, endSec: 130 }],
+      meta,
+    });
+  });
+
+  test("投稿後も index を指して区間を動かせる", () => {
+    const posted: ClipState = {
+      kind: "posted",
+      segments: [range, second],
+      meta,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+    };
+    expect(reduce(posted, { type: "REMOVE_SEGMENT", index: 1 })).toEqual({
+      kind: "ready",
+      segments: [range],
+      meta,
+    });
+  });
+
+  test("範囲外の index は握り潰さず内部エラーにする", () => {
+    expect(reduce(ready, { type: "REMOVE_SEGMENT", index: 5 })).toEqual({
+      kind: "failed",
+      reason: "internal-error",
+      segments,
+      meta,
+    });
+    expect(reduce(ready, { type: "ADJUST_SEGMENT", index: -1, range })).toEqual({
+      kind: "failed",
+      reason: "internal-error",
+      segments,
+      meta,
+    });
+  });
+
+  test("録画中は区間を足せない", () => {
+    const recording: ClipState = { kind: "recording", segments, meta };
+    expect(
+      reduce(recording, { type: "ADD_SEGMENT", range: second, meta }).kind,
+    ).toBe("failed");
+  });
+
+  test("区間を作る前に落ちた失敗からは idle へ戻る", () => {
+    const failed: ClipState = {
+      kind: "failed",
+      reason: "internal-error",
+      segments: [],
+      meta: null,
+    };
+    expect(reduce(failed, { type: "RETRY" })).toEqual({ kind: "idle" });
+  });
+});
+
+describe("動画をまたいだ区間の追加", () => {
+  const otherMeta = makeVideoMeta({ videoId: "video-b", title: "動画 B" });
+  const otherRange: ClipRange = { startSec: 5, endSec: 15 };
+
+  test("別の動画の区間を足したら作り直す", () => {
+    // 結合できるのは同じ動画の中だけ。混ぜると、B の映像を A の秒で切った
+    // クリップに A のタイトルと URL が付いて投稿される
+    expect(
+      reduce(ready, { type: "ADD_SEGMENT", range: otherRange, meta: otherMeta }),
+    ).toEqual({ kind: "ready", segments: [otherRange], meta: otherMeta });
+  });
+
+  test("同じ動画なら今までどおり足す", () => {
+    const second: ClipRange = { startSec: 100, endSec: 120 };
+    expect(reduce(ready, { type: "ADD_SEGMENT", range: second, meta })).toEqual({
+      kind: "ready",
+      segments: [range, second],
+      meta,
+    });
   });
 });

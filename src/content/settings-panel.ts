@@ -5,6 +5,7 @@ import {
   saveSettings,
   type Settings,
   type SettingsContext,
+  type SettingsField,
 } from "@/shared/settings";
 
 /**
@@ -35,6 +36,41 @@ const defaultDeps: PanelDeps = {
   getContext: () => ({ channel: null }),
 };
 
+/** 入力欄として振る舞う要素。`value` と `disabled` はどちらも持つ */
+export type FieldInput = HTMLInputElement | HTMLSelectElement;
+
+/**
+ * 項目 1 つ分の入力欄を作る。
+ *
+ * **分岐するのは `control` だけ。** `key` を見て分岐すると、項目を足すたびに
+ * ここへ戻ってくることになる (`scope` による分岐が `fill` に 1 箇所あるのと
+ * 同じで、field 側が宣言した値しか見ない)
+ */
+export function createFieldInput(field: SettingsField): FieldInput {
+  const id = `yt-clip-setting-${field.key}`;
+
+  if (field.control.kind === "select") {
+    const select = document.createElement("select");
+    select.id = id;
+    select.style.cssText = PANEL_STYLE.input;
+    select.append(
+      ...field.control.options.map((option) => {
+        const element = document.createElement("option");
+        element.value = option.value;
+        element.textContent = option.label;
+        return element;
+      }),
+    );
+    return select;
+  }
+
+  const input = document.createElement("input");
+  input.id = id;
+  input.type = "text";
+  input.style.cssText = PANEL_STYLE.input;
+  return input;
+}
+
 export function createSettingsPanel(
   overrides: Partial<PanelDeps> = {},
 ): SettingsPanel {
@@ -54,10 +90,7 @@ export function createSettingsPanel(
     label.textContent = field.label;
     label.htmlFor = `yt-clip-setting-${field.key}`;
 
-    const input = document.createElement("input");
-    input.id = `yt-clip-setting-${field.key}`;
-    input.type = "text";
-    input.style.cssText = PANEL_STYLE.input;
+    const input = createFieldInput(field);
 
     // 文言は文脈で変わる (どのチャンネルのタグか)。中身は開くときに入れる
     const hint = document.createElement("div");

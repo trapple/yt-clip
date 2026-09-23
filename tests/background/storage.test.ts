@@ -14,7 +14,7 @@ function makeClip(id: string): StoredClip {
     id,
     blob: new Blob(["ダミー動画データ"], { type: "video/mp4" }),
     mimeType: "video/mp4",
-    range: { startSec: 10, endSec: 40 },
+    segments: [{ startSec: 10, endSec: 40 }],
     meta: makeVideoMeta(),
     createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
   };
@@ -31,7 +31,7 @@ describe("クリップ保管", () => {
 
     expect(found.id).toBe("clip-1");
     expect(found.mimeType).toBe("video/mp4");
-    expect(found.range).toEqual({ startSec: 10, endSec: 40 });
+    expect(found.segments).toEqual([{ startSec: 10, endSec: 40 }]);
     expect(found.meta).toEqual(makeVideoMeta());
     expect(found.createdAt).toBe(Date.UTC(2026, 8, 10, 3, 0, 0));
     expect(await found.blob.text()).toBe("ダミー動画データ");
@@ -92,5 +92,37 @@ describe("クリップ保管", () => {
 
     await expect(getClip("clip-1")).resolves.toMatchObject({ id: "clip-1" });
     await expect(getClip("clip-2")).rejects.toThrow(ClipNotFoundError);
+  });
+});
+
+describe("複数区間より前に保存されたクリップ", () => {
+  test("range 1 つ分の区間として読む", async () => {
+    // 投稿には先頭区間の秒しか要らないので、読み替えれば使える
+    await saveClip({
+      id: "legacy-1",
+      blob: new Blob(["x"]),
+      mimeType: "video/mp4",
+      range: { startSec: 10, endSec: 40 },
+      meta: makeVideoMeta(),
+      createdAt: 0,
+    } as unknown as StoredClip);
+
+    const found = await getClip("legacy-1");
+
+    expect(found.segments).toEqual([{ startSec: 10, endSec: 40 }]);
+    // 読み替えた後の形だけを渡す。残すと型と実体がずれる
+    expect("range" in found).toBe(false);
+  });
+
+  test("区間も range も無ければ握り潰さず throw する", async () => {
+    await saveClip({
+      id: "broken-1",
+      blob: new Blob(["x"]),
+      mimeType: "video/mp4",
+      meta: makeVideoMeta(),
+      createdAt: 0,
+    } as unknown as StoredClip);
+
+    await expect(getClip("broken-1")).rejects.toThrow(/区間を持たない/u);
   });
 });

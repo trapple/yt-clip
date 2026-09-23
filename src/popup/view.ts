@@ -1,6 +1,7 @@
 import { formatTime } from "@/shared/time";
+import { totalSec } from "@/shared/timeline";
 // 文言は content script (YouTube ページのバー) とも共有する
-import { FAILURE_MESSAGES, type ClipState } from "@/shared/types";
+import { FAILURE_MESSAGES, type ClipRange, type ClipState } from "@/shared/types";
 
 /**
  * popup が出すもの。**操作は持たない。**
@@ -34,8 +35,23 @@ const DEGRADED_MESSAGES = {
     "X への自動添付に失敗しました。「X にもう一度投稿」でやり直せます",
 } as const;
 
-function durationOf(startSec: number, endSec: number): number {
-  return Math.round(endSec - startSec);
+/** クリップの長さ (秒)。**合計で数える。元動画上の幅ではない** */
+function durationOf(segments: ClipRange[]): number {
+  return Math.round(totalSec(segments));
+}
+
+/**
+ * 区間を人が読める形にする。
+ *
+ * **1 区間なら今までどおり範囲で出す。** 区間数を常に出すと、シンプルモードで
+ * 使っている人に関係のない概念が見えることになる
+ */
+function segmentsLabel(segments: ClipRange[]): string {
+  const only = segments.length === 1 ? segments[0] : undefined;
+  if (only !== undefined) {
+    return `${formatTime(only.startSec)} 〜 ${formatTime(only.endSec)} (${durationOf(segments)}秒)`;
+  }
+  return `${segments.length} 区間 / ${durationOf(segments)} 秒`;
 }
 
 export function describeState(state: ClipState): PopupView {
@@ -49,7 +65,7 @@ export function describeState(state: ClipState): PopupView {
 
     case "ready":
       return {
-        message: `${formatTime(state.range.startSec)} 〜 ${formatTime(state.range.endSec)} (${durationOf(state.range.startSec, state.range.endSec)}秒) を録画できます`,
+        message: `${segmentsLabel(state.segments)} を録画できます`,
         busy: false,
         recordingSec: null,
       };
@@ -66,7 +82,7 @@ export function describeState(state: ClipState): PopupView {
       return {
         message: "録画中…",
         busy: true,
-        recordingSec: durationOf(state.range.startSec, state.range.endSec),
+        recordingSec: durationOf(state.segments),
       };
 
     case "encoding":
@@ -85,10 +101,7 @@ export function describeState(state: ClipState): PopupView {
 
     case "posted":
       return {
-        message: `X に添付しました (${durationOf(
-          state.range.startSec,
-          state.range.endSec,
-        )}秒)`,
+        message: `X に添付しました (${durationOf(state.segments)}秒)`,
         busy: false,
         recordingSec: null,
       };

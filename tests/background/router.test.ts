@@ -13,6 +13,7 @@ import type { ClipRange } from "@/shared/types";
 
 const meta = makeVideoMeta();
 const range: ClipRange = { startSec: 10, endSec: 40 };
+const segments = [range];
 
 /** 受け手が居ないときに Chrome が返す文言 */
 const UNREACHABLE =
@@ -101,7 +102,7 @@ async function markRange(router: Router, tabId = 7): Promise<void> {
     tabId,
   );
   await router.handle(
-    { type: "clip/event", event: { type: "MARK_OUT", sec: 40 } },
+    { type: "clip/event", event: { type: "MARK_OUT", index: 0, sec: 40 } },
     tabId,
   );
 }
@@ -311,7 +312,7 @@ describe("投稿画面が用意できないとき", () => {
     id: "clip-1",
     blob: new Blob(["動画データ"], { type: "video/mp4" }),
     mimeType: "video/mp4",
-    range,
+    segments,
     meta,
     createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
   };
@@ -405,7 +406,7 @@ describe("投稿待ちから離れたらタイマーを始末する", () => {
     id: "clip-1",
     blob: new Blob(["動画データ"], { type: "video/mp4" }),
     mimeType: "video/mp4",
-    range,
+    segments,
     meta,
     createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
   };
@@ -499,7 +500,7 @@ describe("受け付けられないメッセージで状態を壊さない", () =
     id: "clip-1",
     blob: new Blob(["動画データ"], { type: "video/mp4" }),
     mimeType: "video/mp4",
-    range,
+    segments,
     meta,
     createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
   };
@@ -846,7 +847,7 @@ describe("録画の終了と保存", () => {
     });
 
     expect(h.saved).toHaveLength(1);
-    expect(h.saved[0]).toMatchObject({ mimeType: "video/mp4", range, meta });
+    expect(h.saved[0]).toMatchObject({ mimeType: "video/mp4", segments, meta });
     expect(await h.saved[0]!.blob.arrayBuffer()).toEqual(
       new Uint8Array([0, 1, 2, 3]).buffer,
     );
@@ -887,7 +888,7 @@ describe("X への受け渡し", () => {
     id: "clip-1",
     blob: new Blob(["動画データ"], { type: "video/mp4" }),
     mimeType: "video/mp4",
-    range,
+    segments,
     meta,
     createdAt: Date.UTC(2026, 8, 10, 3, 0, 0),
   };
@@ -1117,6 +1118,28 @@ describe("content script の読み込み", () => {
 
     await h.router.handle({ type: "content/loaded" }, 7);
 
-    expect(h.router.getState()).toMatchObject({ kind: "ready", range, meta });
+    expect(h.router.getState()).toMatchObject({ kind: "ready", segments, meta });
+  });
+});
+
+describe("エディットモードの録画対象タブ", () => {
+  test("区間を足したタブが録画対象になる", async () => {
+    // エディットモードの最初の区間は MARK_IN ではなく ADD_SEGMENT で作られる。
+    // ここでタブを覚えないと、新しいブラウザセッション (session storage が空)
+    // では captureTabId が null のまま録画に進み、指示がどこへも飛ばない
+    const h = makeHarness();
+
+    await h.router.handle(
+      { type: "clip/event", event: { type: "ADD_SEGMENT", range, meta } },
+      7,
+    );
+    await h.router.handle(
+      { type: "clip/event", event: { type: "START_RECORDING" } },
+      7,
+    );
+
+    expect(h.sentToTab).toContainEqual(
+      expect.objectContaining({ tabId: 7 }),
+    );
   });
 });

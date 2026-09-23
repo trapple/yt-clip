@@ -105,3 +105,18 @@ export const RANGE_STYLE = {
     "position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;background:var(--ytc-text);pointer-events:none;border-radius:1px;",
   disabled: "opacity:0.4;pointer-events:none;",
 } as const;
+
+/** 区間の一覧。行は押せるので、押せることが分かる見た目にする */
+export const SEGMENT_STYLE = {
+  root: "display:flex;flex-direction:column;gap:4px;",
+  row: "display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;cursor:pointer;background:transparent;",
+  rowSelected:
+    "display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;cursor:pointer;background:var(--ytc-surface);",
+  label: "color:var(--ytc-text);font-size:12px;flex:1;",
+  // 行のクリックと混ざらないよう、小さくても押せる大きさを確保する
+  iconButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;min-width:28px;cursor:pointer;font-family:${FONT};font-size:12px;`,
+  total: "color:var(--ytc-text-sub);font-size:11px;text-align:right;",
+  // 超過は色だけで伝えない。文言でも「/ 60秒」と出しているので、
+  // 色が見えない環境でも判断できる
+  totalOver: "color:#f28b82;font-size:11px;text-align:right;font-weight:600;",
+} as const;

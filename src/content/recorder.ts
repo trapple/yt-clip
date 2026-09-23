@@ -6,6 +6,15 @@ export class DrmProtectedError extends Error {
 }
 
 export type RecorderHandle = {
+  /**
+   * 録画を一時停止する。
+   *
+   * **止めている間の時間は出力に含まれない。** 区間の間のシークを録画から
+   * 外すために使う (`MediaRecorder` が pause 中の時間をタイムラインから除く)
+   */
+  pause(): void;
+  /** 一時停止から再開する */
+  resume(): void;
   /** 録画を止めて Blob を確定させる */
   stop(): Promise<Blob>;
 };
@@ -176,6 +185,23 @@ export async function startRecording(
     recorder.start(1000);
 
     return {
+      pause(): void {
+        // 状態が合わないのは呼び出し側のバグ。MediaRecorder も
+        // InvalidStateError を投げるが、理由が読み取れる文言にしておく。
+        // 黙って無視すると、区間の境目がずれた録画が出来上がる
+        if (recorder.state !== "recording") {
+          throw new Error(
+            `録画中でないため一時停止できません: ${recorder.state}`,
+          );
+        }
+        recorder.pause();
+      },
+      resume(): void {
+        if (recorder.state !== "paused") {
+          throw new Error(`一時停止中でないため再開できません: ${recorder.state}`);
+        }
+        recorder.resume();
+      },
       stop() {
         return new Promise<Blob>((resolve, reject) => {
           const finish = (): void => {

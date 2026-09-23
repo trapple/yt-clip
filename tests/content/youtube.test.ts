@@ -54,10 +54,12 @@ let onMessage: TabListener | null = null;
 
 /** MediaRecorder のフェイク。録画が止まったかを実際の状態で確かめる */
 type FakeRecorder = {
-  state: "inactive" | "recording";
+  state: "inactive" | "recording" | "paused";
   ondataavailable: ((event: { data: Blob }) => void) | null;
   onerror: ((event: Event) => void) | null;
   onstop: (() => void) | null;
+  /** 呼ばれた順。区間の繋ぎ方を順序ごと確かめる */
+  calls: string[];
 };
 let recorders: FakeRecorder[] = [];
 /** captureStream のトラックが解放された回数 */
@@ -214,8 +216,19 @@ function buildPage(): void {
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
+  // 広告の判定は #movie_player の ad-showing を見る (player.ts の isAdPlaying)
+  const player = document.createElement("div");
+  player.id = "movie_player";
+
   video = installVideo();
-  document.body.append(below, title, author, progressBar, video.element);
+  document.body.append(
+    below,
+    title,
+    author,
+    progressBar,
+    player,
+    video.element,
+  );
 }
 
 type StorageListener = (
@@ -238,19 +251,30 @@ function installGlobals(): void {
     static isTypeSupported(): boolean {
       return true;
     }
-    state: "inactive" | "recording" = "inactive";
+    state: "inactive" | "recording" | "paused" = "inactive";
     ondataavailable: ((event: { data: Blob }) => void) | null = null;
     onerror: ((event: Event) => void) | null = null;
     onstop: (() => void) | null = null;
+    readonly calls: string[] = [];
 
     constructor() {
       recorders.push(this);
     }
     start(): void {
       this.state = "recording";
+      this.calls.push("start");
+    }
+    pause(): void {
+      this.state = "paused";
+      this.calls.push("pause");
+    }
+    resume(): void {
+      this.state = "recording";
+      this.calls.push("resume");
     }
     stop(): void {
       this.state = "inactive";
+      this.calls.push("stop");
       // 表示行列を直す経路を実際に通すため、MediaRecorder が出すものと
       // 同じ断片化 MP4 を流す。中身が MP4 でないと box の走査で弾かれる
       this.ondataavailable?.({ data: new Blob([RECORDED_BYTES]) });
@@ -403,7 +427,7 @@ beforeAll(async () => {
   installGlobals();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
-  swState = { kind: "ready", range: RANGE, meta: META_A };
+  swState = { kind: "ready", segments: [RANGE], meta: META_A };
 
   // chrome を用意してから読み込む。import 時に listener と observer を張る
   await import("@/content/youtube");
@@ -450,6 +474,8 @@ beforeEach(async () => {
   // DOM を作り直したので、observer に拾わせて操作 UI を載せ直す
   document.body.append(document.createElement("div"));
   await flush();
+  // モードも既定へ戻す。edit のまま次のテストに入るとバーの見た目が変わる
+  changeSettings({});
   // 前のテストの範囲・録画・監視をすべて捨てさせる
   emit({ kind: "idle" });
   await flush();
@@ -466,7 +492,7 @@ afterAll(async () => {
 
 describe("範囲再生の監視", () => {
   test("範囲を変えた後は、前の範囲の監視で録画が止まらない", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
 
     // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
     clickButton("▶ 範囲を見る");
@@ -479,15 +505,15 @@ describe("範囲再生の監視", () => {
     await flush();
     expect(swState).toMatchObject({
       kind: "ready",
-      range: { startSec: 10, endSec: 30 },
+      segments: [{ startSec: 10, endSec: 30 }],
     });
     // 旧 OUT を見ている監視は残っていない
     expect(video.pendingFrames()).toBe(0);
 
     const recording: ClipRange = { startSec: 10, endSec: 30 };
-    emit({ kind: "seeking", range: recording, meta: META_A });
+    emit({ kind: "seeking", segments: [recording], meta: META_A });
     await flush();
-    emit({ kind: "recording", range: recording, meta: META_A });
+    emit({ kind: "recording", segments: [recording], meta: META_A });
     await flush();
 
     const pausesBefore = video.pauseCount;
@@ -503,12 +529,12 @@ describe("範囲再生の監視", () => {
   });
 
   test("録画に入ると範囲再生の監視は解除される", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     clickButton("▶ 範囲を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
-    emit({ kind: "seeking", range: RANGE, meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(video.pendingFrames()).toBe(0);
@@ -519,12 +545,12 @@ describe("範囲再生の監視", () => {
 
 describe("動画の入れ替わり", () => {
   test("範囲を作った動画と違う動画では録画に入らない", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(overlay()).not.toBeNull();
 
     // 関連動画へ SPA 遷移してから popup で録画を始めた場合
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "seeking", range: RANGE, meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(clipEvents()).toContainEqual({
@@ -544,7 +570,7 @@ describe("動画の入れ替わり", () => {
     // 返ってくる。取り込むと、B のステータス行に A の範囲が出るうえ、
     // 「範囲を再生」で B を A の開始位置へ飛ばしてしまう
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(statusText()).not.toContain("0:10");
@@ -561,7 +587,7 @@ describe("動画の入れ替わり", () => {
   });
 
   test("別の動画へ移ると帯が消え、拡大バーも操作できなくなる", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(overlay()).not.toBeNull();
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
@@ -577,8 +603,8 @@ describe("動画の入れ替わり", () => {
 
 describe("録画の後始末", () => {
   test("失敗に落ちたら録画を止めてストリームを解放する", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     command("recorder/start");
     await flush();
 
@@ -591,7 +617,7 @@ describe("録画の後始末", () => {
     emit({
       kind: "failed",
       reason: "playback-failed",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
     await flush();
@@ -613,8 +639,8 @@ describe("録画の後始末", () => {
     // service worker は seeking の state/changed を送った後、SEEK_DONE を
     // 受けて recorder/start を送り、録画開始の通知を受けてから recording へ
     // 進める。この順序で「録画から離れた状態」の後始末が誤爆しないこと
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "seeking", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
     await flush();
     expect(clipEvents()).toContainEqual({ type: "SEEK_DONE" });
 
@@ -622,7 +648,7 @@ describe("録画の後始末", () => {
     await flush();
     expect(startedRecorder().state).toBe("recording");
 
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     await flush();
     // recording への遷移で録画を捨てていないこと
     expect(startedRecorder().state).toBe("recording");
@@ -630,7 +656,7 @@ describe("録画の後始末", () => {
     // OUT に到達 → 書き出し → 結果の送信まで通す
     video.advanceFrame(20.1);
     expect(clipEvents()).toContainEqual({ type: "OUT_REACHED" });
-    emit({ kind: "encoding", range: RANGE, meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
     command("recorder/stop");
     await flush();
 
@@ -652,12 +678,12 @@ describe("録画の後始末", () => {
   });
 
   test("録画結果を送れなかったら失敗として知らせる", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     command("recorder/start");
     await flush();
 
-    emit({ kind: "encoding", range: RANGE, meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
     // 60 秒 1080p の base64 がメッセージ長を超える場合を再現する
     rejectMessageType = "recorder/done";
     command("recorder/stop");
@@ -694,11 +720,11 @@ describe("失敗の提示", () => {
   test("失敗の理由はバーにも出す", () => {
     // 録画中にタブをリロードした場合、popup を開かない限り何が起きたのか
     // 分からない。文言は popup と同じものを使う
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     emit({
       kind: "failed",
       reason: "recording-aborted",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
 
@@ -733,14 +759,14 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("録画済みでポスト待ちの間は操作させない", () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
     emit({
       kind: "preview",
       clipId: "clip-1",
       mimeType: "video/mp4",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
     // service worker は preview での範囲変更を拒む。画面もそれに合わせる
@@ -748,12 +774,12 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("受け付けられなかった範囲変更は、画面を状態機械側へ戻す", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     emit({
       kind: "preview",
       clipId: "clip-1",
       mimeType: "video/mp4",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
 
@@ -780,16 +806,16 @@ describe("状態ごとの操作", () => {
     ).map((button) => button.textContent ?? "");
 
   test("状態が変わると出る操作も変わる", () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(labels()).toEqual(["● 録画"]);
 
     // 録り始めてからでも戻れる
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     expect(labels()).toEqual(["■ 中止"]);
 
     emit({
       kind: "posted",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -798,7 +824,7 @@ describe("状態ごとの操作", () => {
   });
 
   test("操作を押すと状態機械へイベントが飛ぶ", () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -811,7 +837,7 @@ describe("状態ごとの操作", () => {
     // 投稿のたびに範囲を作り直すのは使い方に合っていない
     emit({
       kind: "posted",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -823,7 +849,7 @@ describe("状態ごとの操作", () => {
 
 describe("録画の中止", () => {
   test("中止を押すと状態機械へ伝わる", () => {
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -835,14 +861,14 @@ describe("録画の中止", () => {
   test("録画から離れると録画も監視も止まる", async () => {
     // 中止の停止処理は「recording から外れた」ことを見て走る。
     // 中止のためだけの後始末は足していないので、ここが唯一の担保になる
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     command("recorder/start");
     await flush();
     const recorder = startedRecorder();
     expect(recorder.state).toBe("recording");
 
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(recorder.state).toBe("inactive");
@@ -969,7 +995,7 @@ describe("最大秒数の設定", () => {
     clickButton("IN");
     await flush();
     // 実機では service worker が state/changed を配る。それで拡大バーが有効になる
-    emit({ kind: "ready", range: { startSec: 100, endSec: 115 }, meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], meta: META_A });
     await flush();
 
     dragOutToEnd();
@@ -990,5 +1016,670 @@ describe("最大秒数の設定", () => {
 
     // 既定の 60 秒ではなく、設定した 10 秒が文言に出る
     expect(statusText()).toContain("10 秒までです");
+  });
+});
+
+describe("エディットモード", () => {
+  /** バーに出ているボタンの文言 */
+  function buttonLabels(): string[] {
+    return [...document.querySelectorAll("#yt-clip-bar button")].map(
+      (button) => button.textContent ?? "",
+    );
+  }
+
+  /** 一覧の行 */
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("シンプルでは一覧を出さない", async () => {
+    changeSettings({ mode: "simple" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+
+    expect(segmentRows()).toEqual([]);
+  });
+
+  test("エディットでは追加ボタンが増える。IN は消えない", async () => {
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    // IN を追加ボタンに置き換えると、一度作った区間の頭を詰められなくなる
+    expect(buttonLabels()).toContain("＋ 区間を追加");
+    expect(buttonLabels()).toContain("IN");
+    expect(buttonLabels()).toContain("OUT");
+  });
+
+  test("追加ボタンは区間を足すイベントを送る", async () => {
+    changeSettings({ mode: "edit" });
+    await flush();
+    sent = [];
+
+    clickButton("＋ 区間を追加");
+
+    expect(sent.at(-1)).toMatchObject({
+      type: "clip/event",
+      event: { type: "ADD_SEGMENT" },
+    });
+  });
+
+  test("シンプルの IN は今までどおり置き換える", async () => {
+    changeSettings({ mode: "simple" });
+    await flush();
+    sent = [];
+
+    clickButton("IN");
+
+    expect(sent.at(-1)).toMatchObject({
+      type: "clip/event",
+      event: { type: "MARK_IN" },
+    });
+  });
+
+  test("区間ごとに行が出る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows().length).toBe(2);
+    expect(segmentRows()[0]?.textContent).toContain("1:23");
+  });
+
+  test("行を押すとその区間が拡大バーに載る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    segmentRows()[1]?.click();
+    await flush();
+
+    expect(statusText()).toContain("4:02");
+  });
+
+  test("モードが変わると作りかけの区間を消す", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+
+    expect(sent.at(-1)).toMatchObject({
+      type: "clip/event",
+      event: { type: "RESET_MARKS" },
+    });
+  });
+
+  test("録画中はモードの変更を受け付けない", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+
+    // 状態機械だけが戻ると、録画が走り続けて取り残される
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("複数区間の録画", () => {
+  const TWO: ClipRange[] = [
+    { startSec: 83, endSec: 98 },
+    { startSec: 242, endSec: 250 },
+  ];
+
+  /** 録画が走っている状態まで進める */
+  async function startTwoSegments(): Promise<FakeRecorder> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: TWO, meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    return startedRecorder();
+  }
+
+  /**
+   * 区間の終端に到達させ、次の区間の頭で新しいフレームが出たことにする。
+   *
+   * **フレームを 2 回進めるのは仕様どおり。** 終端の到達で pause とシークが
+   * 起き、そこから「新しいフレームが描かれた」のを見て初めて resume する
+   */
+  async function reachEndAndSettle(
+    endSec: number,
+    nextStartSec: number,
+  ): Promise<void> {
+    video.advanceFrame(endSec);
+    await flush();
+    video.advanceFrame(nextStartSec);
+    await flush();
+  }
+
+  function setAd(showing: boolean): void {
+    document
+      .querySelector("#movie_player")
+      ?.classList.toggle("ad-showing", showing);
+  }
+
+  test("最初の区間の頭へ飛ぶ", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "seeking", segments: TWO, meta: META_A });
+    await flush();
+
+    expect(video.element.currentTime).toBe(83);
+  });
+
+  test("区間の終わりで録画を止め、次の頭へ飛んでから再開する", async () => {
+    const recorder = await startTwoSegments();
+
+    await reachEndAndSettle(98, 242);
+
+    // 止めてから飛び、映像が整ってから再開する。順序が崩れると繋ぎ目に
+    // 前の場面が混入する
+    expect(recorder.calls).toEqual(["start", "pause", "resume"]);
+    expect(video.element.currentTime).toBe(242);
+    expect(recorder.state).toBe("recording");
+  });
+
+  test("区間の間では書き出しへ進まない", async () => {
+    await startTwoSegments();
+    sent = [];
+
+    video.advanceFrame(98);
+    await flush();
+
+    expect(clipEvents()).not.toContainEqual({ type: "OUT_REACHED" });
+  });
+
+  test("最後の区間の終わりで書き出しへ進む", async () => {
+    await startTwoSegments();
+
+    await reachEndAndSettle(98, 242);
+    sent = [];
+    video.advanceFrame(250);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "OUT_REACHED" });
+  });
+
+  test("区間の間で広告が始まったら全体を落とす", async () => {
+    const recorder = await startTwoSegments();
+    sent = [];
+    setAd(true);
+
+    await reachEndAndSettle(98, 242);
+
+    // 部分的に広告が混ざったクリップを残すより、録り直させる方がましである
+    expect(clipEvents()).toContainEqual({
+      type: "FAIL",
+      reason: "ad-playing",
+    });
+    expect(recorder.calls).not.toContain("resume");
+    setAd(false);
+  });
+
+  test("区間の間で中止しても録画は止まる", async () => {
+    const recorder = await startTwoSegments();
+
+    video.advanceFrame(98);
+    await flush();
+    emit({ kind: "ready", segments: TWO, meta: META_A });
+    await flush();
+
+    // pause 中に中止されてもストリームを掴んだままにしない
+    expect(recorder.state).toBe("inactive");
+  });
+
+  test("区間の間で中止した後、シークが完了しても失敗にしない", async () => {
+    await startTwoSegments();
+
+    video.advanceFrame(98);
+    await flush();
+    emit({ kind: "ready", segments: TWO, meta: META_A });
+    await flush();
+    sent = [];
+
+    // 中止を待っている間にシークと再生が完了する。止まった recorder に
+    // resume を投げると throw し、ready に戻ったはずの状態が failed に落ちる
+    video.advanceFrame(242);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+  });
+
+  test("区間の進みを status に出す", async () => {
+    await startTwoSegments();
+
+    expect(statusText()).toContain("1 / 2 区間目");
+  });
+});
+
+describe("シークバーの帯", () => {
+  /** 帯 1 本ずつの左端 (%) */
+  function bandLefts(): number[] {
+    return [...(overlay()?.querySelectorAll<HTMLElement>("div") ?? [])].map(
+      (band) => Number.parseFloat(band.style.left),
+    );
+  }
+
+  async function showTwoSegments(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 60, endSec: 70 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+  }
+
+  test("区間の数だけ帯を描く", async () => {
+    await showTwoSegments();
+
+    // 1 本の帯で全体を覆うと、間の拾っていない部分まで切り抜くように見える
+    expect(bandLefts().length).toBe(2);
+  });
+
+  test("帯は動画の時間順に並ぶ", async () => {
+    await showTwoSegments();
+
+    const lefts = bandLefts();
+    expect(lefts[0]).toBeLessThan(lefts[1] ?? 0);
+  });
+
+  test("帯の幅は区間の長さに比例する", async () => {
+    await showTwoSegments();
+
+    // 動画の長さは 600 秒。10 秒の区間なので 1/60 = 約 1.67%
+    const widths = [
+      ...(overlay()?.querySelectorAll<HTMLElement>("div") ?? []),
+    ].map((band) => Number.parseFloat(band.style.width));
+    expect(widths[0]).toBeCloseTo(100 / 60, 1);
+  });
+
+  test("区間が無くなったら帯ごと消す", async () => {
+    await showTwoSegments();
+
+    emit({ kind: "idle" });
+    await flush();
+
+    expect(overlay()).toBeNull();
+  });
+});
+
+describe("エディットモードの OUT", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("選んでいる区間の index を送る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 2 番目を選んでから OUT を押す
+    segmentRows()[1]?.click();
+    await flush();
+    video.element.currentTime = 246;
+    sent = [];
+    clickButton("OUT");
+    await flush();
+
+    // index 0 を送ると先頭区間が 83-246 に伸び、全区間がマージされて
+    // 「OUT を押したら区間が全部 1 つに溶けた」ことになる
+    expect(clipEvents()).toContainEqual({
+      type: "MARK_OUT",
+      index: 1,
+      sec: 246,
+    });
+  });
+});
+
+describe("進行中のモード変更", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("録画が終わってから切り替わる", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+    // 状態機械だけが戻ると、録画が走り続けて取り残される
+    expect(clipEvents()).toEqual([]);
+
+    // 録画が終わったら追いつく。storage の変更通知は次に保存するまで来ないので、
+    // ここで拾わないとタブは開き直すまでエディットのままになる
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "RESET_MARKS" });
+  });
+
+  test("録画済みクリップを持つ間は切り替えない", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "degraded",
+      segments: [RANGE],
+      meta: META_A,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      reason: "x-attach-failed",
+    });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+
+    // RESET_MARKS は idle へ落とす。実時間を払った録画への参照ごと失う
+    expect(clipEvents()).toEqual([]);
+    expect(segmentRows().length).toBe(1);
+  });
+});
+
+describe("区間を足した直後の選択", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("足した区間が選ばれる", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 98 }], meta: META_A });
+    await flush();
+
+    video.element.currentTime = 300;
+    clickButton("＋ 区間を追加");
+    await flush();
+    // 状態機械が並べ替えた結果を返す
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 300, endSec: 315 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 「IN → OUT」の癖で OUT を押したとき、前の区間の終端が動くと事故になる
+    expect(segmentRows()[1]?.dataset.selected).toBe("true");
+  });
+});
+
+describe("合計が上限を超えた録画", () => {
+  test("内部エラーではなく区間を直せる状態へ戻す", async () => {
+    changeSettings({ mode: "edit", maxClipSec: 20 });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 0, endSec: 15 },
+        { startSec: 100, endSec: 115 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+    sent = [];
+
+    emit({
+      kind: "seeking",
+      segments: [
+        { startSec: 0, endSec: 15 },
+        { startSec: 100, endSec: 115 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 合計を減らせば直せる。「内部エラーが発生しました」では手の打ちようがない
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(statusText()).toContain("上限");
+  });
+});
+
+describe("エディットモードの IN", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  async function showTwo(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+  }
+
+  test("選んでいる区間の頭だけを動かす", async () => {
+    await showTwo();
+    segmentRows()[1]?.click();
+    await flush();
+    video.element.currentTime = 246;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    // 終端はそのまま。他の区間にも触らない
+    expect(clipEvents()).toContainEqual({
+      type: "ADJUST_SEGMENT",
+      index: 1,
+      range: { startSec: 246, endSec: 250 },
+    });
+  });
+
+  test("シンプルの IN は今までどおり作り直す", async () => {
+    changeSettings({ mode: "simple" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents().map((event) => (event as { type: string }).type)).toContain(
+      "MARK_IN",
+    );
+  });
+
+  test("頭が尻を追い越したら弾く", async () => {
+    await showTwo();
+    segmentRows()[1]?.click();
+    await flush();
+    // 終端 250 より後ろ
+    video.element.currentTime = 260;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).not.toBe("");
+  });
+
+  test("区間が無ければ先に追加するよう促す", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "idle" });
+    await flush();
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toContain("区間を追加");
+  });
+});
+
+describe("重なる位置での区間追加", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("区間の中で押しても区間が増える", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    await flush();
+    // 既存区間の内側
+    video.element.currentTime = 90;
+    sent = [];
+
+    clickButton("＋ 区間を追加");
+    await flush();
+
+    // マージしていた頃は結果が変わらず、押しても何も起きなかった
+    expect(clipEvents()).toContainEqual(
+      expect.objectContaining({ type: "ADD_SEGMENT" }),
+    );
+  });
+
+  test("足した区間が末尾で選ばれる", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    await flush();
+
+    video.element.currentTime = 90;
+    clickButton("＋ 区間を追加");
+    await flush();
+    // 並べ替えないので、足した区間は必ず末尾に来る
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 200 },
+        { startSec: 90, endSec: 105 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows()[1]?.dataset.selected).toBe("true");
+  });
+
+  test("途中の区間を消しても選択が飛ばない", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+    // 末尾を選ぶ
+    segmentRows()[2]?.click();
+    await flush();
+
+    // 先頭を消すと、選択していた区間は index 1 に詰まる
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows()[1]?.dataset.selected).toBe("true");
+    expect(statusText()).toContain("0:50");
+  });
+});
+
+describe("区間を消したときの選択", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  async function showThree(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+  }
+
+  test("選択より前を消すと 1 つ手前へずれる", async () => {
+    await showThree();
+    // 真ん中 (0:30) を選ぶ
+    segmentRows()[1]?.click();
+    await flush();
+
+    segmentRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 30, endSec: 40 },
+        { startSec: 50, endSec: 60 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 選んでいた 0:30 は index 0 へ移った。index 1 のままだと別の区間を指す
+    expect(segmentRows()[0]?.dataset.selected).toBe("true");
+    expect(statusText()).toContain("0:30");
+  });
+
+  test("選択より後ろを消しても動かない", async () => {
+    await showThree();
+    segmentRows()[0]?.click();
+    await flush();
+
+    segmentRows()[2]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows()[0]?.dataset.selected).toBe("true");
+    expect(statusText()).toContain("0:10");
   });
 });

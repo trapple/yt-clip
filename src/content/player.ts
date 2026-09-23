@@ -271,3 +271,58 @@ export function onReachTime(
     target.cancelVideoFrameCallback(handle);
   };
 }
+
+/** 新しいフレームが出るのを待つ上限 (ミリ秒) */
+export const FRESH_FRAME_TIMEOUT_MS = 5000;
+
+/** フレーム単位の監視が使えない環境。繋ぎ目の品質を保証できない */
+export class FrameCallbackUnsupportedError extends Error {
+  constructor() {
+    super("この環境では区間の繋ぎ目を保証できません");
+    this.name = "FrameCallbackUnsupportedError";
+  }
+}
+
+/**
+ * フレーム単位の監視が使えるか確かめる。
+ *
+ * **録画を始める前に呼ぶこと。** 繋ぎ目で初めて気付くと、実時間を払った後で
+ * 無駄だったと分かることになる (`assertRecordable` と同じ考え方)。
+ */
+export function assertFrameCallbackSupported(video: HTMLVideoElement): void {
+  const request = (video as Partial<VideoWithFrameCallback>)
+    .requestVideoFrameCallback;
+  if (typeof request !== "function") {
+    throw new FrameCallbackUnsupportedError();
+  }
+}
+
+/**
+ * 新しいフレームが実際に描かれるまで待つ。
+ *
+ * **`seeked` だけでは足りない。** 直後はデコードが追いつかず、前のフレームが
+ * 残っていることがある。区間の繋ぎ目でこれを怠ると、前の場面が数フレーム
+ * 混入した録画ができる。
+ *
+ * **取れない環境ではフォールバックしない。** この拡張は Chrome 専用であり、
+ * `requestVideoFrameCallback` が無いなら繋ぎ目の品質を保証できない。
+ * 保証できないまま実時間を払わせるより、始める前に止める方がよい。
+ */
+export function waitForFreshFrame(
+  video: HTMLVideoElement,
+  timeoutMs: number = FRESH_FRAME_TIMEOUT_MS,
+): Promise<void> {
+  assertFrameCallbackSupported(video);
+  const request = (video as VideoWithFrameCallback).requestVideoFrameCallback;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`新しいフレームが出ませんでした (${timeoutMs}ms)`));
+    }, timeoutMs);
+
+    request.call(video as VideoWithFrameCallback, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
