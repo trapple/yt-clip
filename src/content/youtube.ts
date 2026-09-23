@@ -290,7 +290,21 @@ function applyRange(range: ClipRange, videoDurationSec: number): void {
   setStatus(rangeLabel(range));
 }
 
+/**
+ * IN ボタン。モードで意味が変わる。
+ *
+ * - シンプル: 範囲を作り直す (`MARK_IN`)
+ * - エディット: **選択中の区間の頭だけ**を今の位置に動かす (`onMarkSegmentStart`)
+ *
+ * **エディットで IN を「区間を追加」に置き換えない。** OUT があるのに IN が
+ * 無い状態になり、一度作った区間の頭を詰められなくなる。
+ */
 function onMarkIn(): void {
+  if (mode === "edit") {
+    onMarkSegmentStart();
+    return;
+  }
+
   // 録画中に打ち直されると状態機械だけが範囲を作り直し、録画は走り続けて
   // 取り残される。状態機械と router にも同じガードがあるが、ここで止めれば
   // ユーザーに理由をすぐ返せる。
@@ -311,16 +325,6 @@ function onMarkIn(): void {
   const range = makeDefaultRange(video.currentTime, video.duration, maxClipSec);
 
   rangeVideoId = meta.videoId;
-
-  // **エディットでは楽観的に描かない。** 並べ替えとマージで結果が変わるので、
-  // 状態機械の答えを待ってから描く (applyStateToDisplay が反映する)。
-  // シンプルは結果が自明なので今までどおり先に描く
-  if (mode === "edit") {
-    selectionAnchorSec = range.startSec;
-    send({ type: "ADD_SEGMENT", range, meta });
-    return;
-  }
-
   applyRange(range, video.duration);
   send(
     { type: "MARK_IN", range, meta },
@@ -389,6 +393,66 @@ function applyMode(next: ClipMode): void {
   }
 }
 
+/**
+ * 「＋ 区間を追加」。今の再生位置から新しい区間を作る。
+ *
+ * **楽観的に描かない。** 並べ替えとマージで結果が変わるので、状態機械の答えを
+ * 待ってから描く (`applyStateToDisplay` が反映する)
+ */
+function onAddSegment(): void {
+  if (busy) {
+    setStatus("録画中は区間を変更できません");
+    return;
+  }
+
+  const video = getVideo();
+  const meta = getVideoMeta();
+  // 既定の長さの区間をここで作る。状態機械は長さの決め方を知らない
+  const range = makeDefaultRange(video.currentTime, video.duration, maxClipSec);
+
+  rangeVideoId = meta.videoId;
+  // 足した区間を選ぶ。前の区間が選ばれたままだと、続けて IN/OUT を押したとき
+  // 別の区間が動く
+  selectionAnchorSec = range.startSec;
+  send({ type: "ADD_SEGMENT", range, meta });
+}
+
+/**
+ * エディットモードの IN。選択中の区間の**頭だけ**を今の位置に動かす。
+ *
+ * **専用イベントを持たない。** `ADJUST_SEGMENT` (拡大バーのドラッグと同じ) が
+ * 既に「この区間をこの範囲にする」を表せているので、同じことをする経路を
+ * 2 本持つ理由がない
+ */
+function onMarkSegmentStart(): void {
+  if (busy) {
+    setStatus("録画中は区間を変更できません");
+    return;
+  }
+
+  const editing = selectedSegment();
+  if (editing === null) {
+    setStatus("先に区間を追加してください");
+    return;
+  }
+  if (getVideoMeta().videoId !== rangeVideoId) {
+    setStatus(FAILURE_MESSAGES["video-changed"]);
+    return;
+  }
+
+  const video = getVideo();
+  const next = { startSec: video.currentTime, endSec: editing.endSec };
+  const validation = validateRange(next.startSec, next.endSec, maxClipSec);
+  if (!validation.ok) {
+    setStatus(validation.message);
+    return;
+  }
+
+  // 頭を動かすと並び替えが起きうる。新しい開始秒で選択を追う
+  selectionAnchorSec = next.startSec;
+  send({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next });
+}
+
 function onMarkOut(): void {
   if (busy) {
     setStatus("録画中は範囲を変更できません");
@@ -396,7 +460,9 @@ function onMarkOut(): void {
   }
   const editing = selectedSegment();
   if (editing === null) {
-    setStatus("先に IN を指定してください");
+    setStatus(
+      mode === "edit" ? "先に区間を追加してください" : "先に IN を指定してください",
+    );
     return;
   }
 
@@ -1011,14 +1077,18 @@ function buildBar(): HTMLElement {
   row.style.cssText = BAR_STYLE.row;
 
   // 常に出ている操作。主操作は状態ごとに変わる側 (renderActions) が持つ
-  // ラベルだけを変える。区間を足す入口を 2 つ作らない
-  const inButton = makeButton(
-    mode === "edit" ? "＋ 区間を追加" : "IN",
-    false,
-    onMarkIn,
-  );
+  // **IN は残す。** 置き換えると、一度作った区間の頭を詰められなくなる
+  const addButton =
+    mode === "edit"
+      ? makeButton("＋ 区間を追加", false, onAddSegment)
+      : null;
+  const inButton = makeButton("IN", false, onMarkIn);
   const outButton = makeButton("OUT", false, onMarkOut);
-  const playButton = makeButton("▶ 範囲を見る", false, () => void playRange());
+  const playButton = makeButton(
+    mode === "edit" ? "▶ 区間を見る" : "▶ 範囲を見る",
+    false,
+    () => void playRange(),
+  );
 
   const status = document.createElement("span");
   status.id = `${BAR_ID}-status`;
@@ -1036,6 +1106,8 @@ function buildBar(): HTMLElement {
   // 右端へ寄せる。操作の並びから外して、押し間違いを減らす
   settingsButton.style.cssText += "margin-left:auto;";
 
+  // 「追加してから頭と尻を決める」順に並べる
+  if (addButton !== null) row.append(addButton);
   row.append(inButton, outButton, playButton, actions, status, settingsButton);
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される

@@ -1040,16 +1040,17 @@ describe("エディットモード", () => {
     expect(segmentRows()).toEqual([]);
   });
 
-  test("エディットでは IN のラベルが変わる", async () => {
+  test("エディットでは追加ボタンが増える。IN は消えない", async () => {
     changeSettings({ mode: "edit" });
     await flush();
 
-    // 区間を足す入口を 2 つ作らないので、IN 自体が追加ボタンになる
+    // IN を追加ボタンに置き換えると、一度作った区間の頭を詰められなくなる
     expect(buttonLabels()).toContain("＋ 区間を追加");
-    expect(buttonLabels()).not.toContain("IN");
+    expect(buttonLabels()).toContain("IN");
+    expect(buttonLabels()).toContain("OUT");
   });
 
-  test("エディットの IN は区間を足すイベントを送る", async () => {
+  test("追加ボタンは区間を足すイベントを送る", async () => {
     changeSettings({ mode: "edit" });
     await flush();
     sent = [];
@@ -1461,5 +1462,84 @@ describe("合計が上限を超えた録画", () => {
     // 合計を減らせば直せる。「内部エラーが発生しました」では手の打ちようがない
     expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
     expect(statusText()).toContain("上限");
+  });
+});
+
+describe("エディットモードの IN", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  async function showTwo(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+  }
+
+  test("選んでいる区間の頭だけを動かす", async () => {
+    await showTwo();
+    segmentRows()[1]?.click();
+    await flush();
+    video.element.currentTime = 246;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    // 終端はそのまま。他の区間にも触らない
+    expect(clipEvents()).toContainEqual({
+      type: "ADJUST_SEGMENT",
+      index: 1,
+      range: { startSec: 246, endSec: 250 },
+    });
+  });
+
+  test("シンプルの IN は今までどおり作り直す", async () => {
+    changeSettings({ mode: "simple" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents().map((event) => (event as { type: string }).type)).toContain(
+      "MARK_IN",
+    );
+  });
+
+  test("頭が尻を追い越したら弾く", async () => {
+    await showTwo();
+    segmentRows()[1]?.click();
+    await flush();
+    // 終端 250 より後ろ
+    video.element.currentTime = 260;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).not.toBe("");
+  });
+
+  test("区間が無ければ先に追加するよう促す", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "idle" });
+    await flush();
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toContain("区間を追加");
   });
 });
