@@ -1251,3 +1251,58 @@ describe("複数区間の録画", () => {
     expect(statusText()).toContain("1 / 2 区間目");
   });
 });
+
+describe("シークバーの帯", () => {
+  /** 帯 1 本ずつの左端 (%) */
+  function bandLefts(): number[] {
+    return [...(overlay()?.querySelectorAll<HTMLElement>("div") ?? [])].map(
+      (band) => Number.parseFloat(band.style.left),
+    );
+  }
+
+  async function showTwoSegments(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 60, endSec: 70 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+  }
+
+  test("区間の数だけ帯を描く", async () => {
+    await showTwoSegments();
+
+    // 1 本の帯で全体を覆うと、間の拾っていない部分まで切り抜くように見える
+    expect(bandLefts().length).toBe(2);
+  });
+
+  test("帯は動画の時間順に並ぶ", async () => {
+    await showTwoSegments();
+
+    const lefts = bandLefts();
+    expect(lefts[0]).toBeLessThan(lefts[1] ?? 0);
+  });
+
+  test("帯の幅は区間の長さに比例する", async () => {
+    await showTwoSegments();
+
+    // 動画の長さは 600 秒。10 秒の区間なので 1/60 = 約 1.67%
+    const widths = [
+      ...(overlay()?.querySelectorAll<HTMLElement>("div") ?? []),
+    ].map((band) => Number.parseFloat(band.style.width));
+    expect(widths[0]).toBeCloseTo(100 / 60, 1);
+  });
+
+  test("区間が無くなったら帯ごと消す", async () => {
+    await showTwoSegments();
+
+    emit({ kind: "idle" });
+    await flush();
+
+    expect(overlay()).toBeNull();
+  });
+});
