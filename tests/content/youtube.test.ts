@@ -450,6 +450,8 @@ beforeEach(async () => {
   // DOM を作り直したので、observer に拾わせて操作 UI を載せ直す
   document.body.append(document.createElement("div"));
   await flush();
+  // モードも既定へ戻す。edit のまま次のテストに入るとバーの見た目が変わる
+  changeSettings({});
   // 前のテストの範囲・録画・監視をすべて捨てさせる
   emit({ kind: "idle" });
   await flush();
@@ -990,5 +992,124 @@ describe("最大秒数の設定", () => {
 
     // 既定の 60 秒ではなく、設定した 10 秒が文言に出る
     expect(statusText()).toContain("10 秒までです");
+  });
+});
+
+describe("エディットモード", () => {
+  /** バーに出ているボタンの文言 */
+  function buttonLabels(): string[] {
+    return [...document.querySelectorAll("#yt-clip-bar button")].map(
+      (button) => button.textContent ?? "",
+    );
+  }
+
+  /** 一覧の行 */
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("シンプルでは一覧を出さない", async () => {
+    changeSettings({ mode: "simple" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+
+    expect(segmentRows()).toEqual([]);
+  });
+
+  test("エディットでは IN のラベルが変わる", async () => {
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    // 区間を足す入口を 2 つ作らないので、IN 自体が追加ボタンになる
+    expect(buttonLabels()).toContain("＋ 区間を追加");
+    expect(buttonLabels()).not.toContain("IN");
+  });
+
+  test("エディットの IN は区間を足すイベントを送る", async () => {
+    changeSettings({ mode: "edit" });
+    await flush();
+    sent = [];
+
+    clickButton("＋ 区間を追加");
+
+    expect(sent.at(-1)).toMatchObject({
+      type: "clip/event",
+      event: { type: "ADD_SEGMENT" },
+    });
+  });
+
+  test("シンプルの IN は今までどおり置き換える", async () => {
+    changeSettings({ mode: "simple" });
+    await flush();
+    sent = [];
+
+    clickButton("IN");
+
+    expect(sent.at(-1)).toMatchObject({
+      type: "clip/event",
+      event: { type: "MARK_IN" },
+    });
+  });
+
+  test("区間ごとに行が出る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    expect(segmentRows().length).toBe(2);
+    expect(segmentRows()[0]?.textContent).toContain("1:23");
+  });
+
+  test("行を押すとその区間が拡大バーに載る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    segmentRows()[1]?.click();
+    await flush();
+
+    expect(statusText()).toContain("4:02");
+  });
+
+  test("モードが変わると作りかけの区間を消す", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+
+    expect(sent.at(-1)).toMatchObject({
+      type: "clip/event",
+      event: { type: "RESET_MARKS" },
+    });
+  });
+
+  test("録画中はモードの変更を受け付けない", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+
+    // 状態機械だけが戻ると、録画が走り続けて取り残される
+    expect(sent).toEqual([]);
   });
 });

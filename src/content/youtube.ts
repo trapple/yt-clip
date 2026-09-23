@@ -27,6 +27,7 @@ import {
   startRecording,
   type RecorderHandle,
 } from "@/content/recorder";
+import { createSegmentList, type SegmentList } from "@/content/segment-list";
 import { YT_SELECTORS } from "@/content/selectors";
 import { encodeBase64 } from "@/shared/base64";
 import type { Message, MessageResponse } from "@/shared/messages";
@@ -34,9 +35,11 @@ import {
   loadSettings,
   mergeSettings,
   SETTINGS_KEY,
+  type ClipMode,
   type SettingsContext,
 } from "@/shared/settings";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
+import { indexAt, totalSec } from "@/shared/timeline";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
   BUSY_KINDS,
@@ -59,8 +62,21 @@ const OVERLAY_ID = "yt-clip-overlay";
  */
 const MIN_RECOMMENDED_HEIGHT = 720;
 
-/** いま指定されている範囲。service worker と同じものを持つ */
-let currentRange: ClipRange | null = null;
+/**
+ * いま画面に出ている区間列。**状態機械が正で、これはその写し。**
+ * シンプルモードでは常に 0 個か 1 個
+ */
+let currentSegments: ClipRange[] = [];
+/**
+ * 拡大バーがいま編集している区間の位置。区間が無ければ -1。
+ *
+ * **ここが選択の唯一の持ち主。** 一覧にも持たせると同期が要る。並べ替えと
+ * マージで index は動くので、確定のたびに `indexAt` で引き直す
+ */
+let selectedIndex = -1;
+/** 切り抜きの作り方。設定から読む */
+let mode: ClipMode = "simple";
+let segmentList: SegmentList | null = null;
 /** 範囲を作ったときの動画。SPA で動画が変わったら無効になる */
 let rangeVideoId: string | null = null;
 let busy = false;
@@ -163,10 +179,16 @@ function sameRange(a: ClipRange, b: ClipRange): boolean {
   return a.startSec === b.startSec && a.endSec === b.endSec;
 }
 
+/** 拡大バーが編集している区間。無ければ null */
+function selectedSegment(): ClipRange | null {
+  return currentSegments[selectedIndex] ?? null;
+}
+
 /**
  * 状態機械が持つ先頭の区間が、送った範囲と一致するか。
  *
- * **いまは常に区間 1 つ。** 複数区間の UI はこの後のタスクで入れる
+ * シンプルモードの確定待ちに使う。エディットでは並べ替えとマージで結果が
+ * 変わるため、そもそも確定を待たない (`onMarkIn` 参照)
  */
 function firstMatches(segments: ClipRange[], range: ClipRange): boolean {
   const first = segments[0];
@@ -234,9 +256,11 @@ function applyRange(range: ClipRange, videoDurationSec: number): void {
   // 範囲が変われば、前の範囲を見ている監視は用済み
   cancelPreviewWatch();
 
-  currentRange = range;
+  // シンプルモードの楽観描画。エディットは結果が並べ替えで変わるので通らない
+  currentSegments = [range];
+  selectedIndex = 0;
   rangeBar?.update(range, videoDurationSec);
-  paintOverlay(range, videoDurationSec);
+  paintOverlay(currentSegments, videoDurationSec);
   setStatus(rangeLabel(range));
 }
 
@@ -261,6 +285,15 @@ function onMarkIn(): void {
   const range = makeDefaultRange(video.currentTime, video.duration, maxClipSec);
 
   rangeVideoId = meta.videoId;
+
+  // **エディットでは楽観的に描かない。** 並べ替えとマージで結果が変わるので、
+  // 状態機械の答えを待ってから描く (applyStateToDisplay が反映する)。
+  // シンプルは結果が自明なので今までどおり先に描く
+  if (mode === "edit") {
+    send({ type: "ADD_SEGMENT", range, meta });
+    return;
+  }
+
   applyRange(range, video.duration);
   send(
     { type: "MARK_IN", range, meta },
@@ -268,12 +301,64 @@ function onMarkIn(): void {
   );
 }
 
+/**
+ * 選択だけを画面に反映する。状態機械には何も送らない。
+ *
+ * 選び直しは状態の変化ではないので、`send` を通すと往復のぶん反応が遅れる
+ */
+function applyStateToSelection(): void {
+  segmentList?.update(
+    mode === "edit" ? currentSegments : [],
+    selectedIndex,
+    maxClipSec,
+  );
+
+  const segment = selectedSegment();
+  if (segment === null) return;
+  try {
+    rangeBar?.update(segment, getVideo().duration);
+    setStatus(rangeLabel(segment));
+  } catch (error) {
+    // 選択は変わっている。拡大バーを描けないことは操作を止める理由にならない
+    console.warn(`拡大バーを選択に合わせられませんでした: ${String(error)}`);
+  }
+}
+
+/**
+ * モードの変更を取り込む。
+ *
+ * **作りかけの区間は全部消す。** エディット (2 区間) からシンプルへ戻したとき、
+ * 先頭だけ残すような半端な引き継ぎは何が消えたのか分からない。設定パネルの
+ * 説明にも「モードを変えると作りかけの区間は消えます」と書いてある。
+ *
+ * **録画中は変えない。** 状態機械だけが戻り、録画が走り続けて取り残される。
+ * 設定は既に保存されているので、録画が終われば次の変更通知で追いつく
+ */
+function applyMode(next: ClipMode): void {
+  if (next === mode) return;
+  if (busy) {
+    setStatus("録画中はモードを変更できません");
+    return;
+  }
+
+  mode = next;
+  // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
+  // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
+  document.getElementById(BAR_ID)?.remove();
+  mount();
+
+  if (currentSegments.length > 0) {
+    send({ type: "RESET_MARKS" });
+  }
+}
+
 function onMarkOut(): void {
   if (busy) {
     setStatus("録画中は範囲を変更できません");
     return;
   }
-  if (currentRange === null) {
+  const editing = selectedSegment();
+  if (editing === null) {
     setStatus("先に IN を指定してください");
     return;
   }
@@ -282,7 +367,8 @@ function onMarkOut(): void {
   // ここで RESET_MARKS を送ってはいけない。録画済みで投稿待ちのときに届くと
   // 状態機械が不正遷移として failed に落ち、クリップへの参照ごと失う
   if (getVideoMeta().videoId !== rangeVideoId) {
-    currentRange = null;
+    currentSegments = [];
+    selectedIndex = -1;
     rangeVideoId = null;
     clearOverlay();
     // 同じ状況を指す文言は 1 つにする (失敗として届く場合と同じ言い回し)
@@ -291,7 +377,7 @@ function onMarkOut(): void {
   }
 
   const video = getVideo();
-  const next = { startSec: currentRange.startSec, endSec: video.currentTime };
+  const next = { startSec: editing.startSec, endSec: video.currentTime };
   const validation = validateRange(next.startSec, next.endSec, maxClipSec);
   if (!validation.ok) {
     setStatus(validation.message);
@@ -300,8 +386,12 @@ function onMarkOut(): void {
 
   applyRange(next, video.duration);
   send(
-    { type: "MARK_OUT", index: 0, sec: next.endSec },
-    (state) => state.kind === "ready" && firstMatches(state.segments, next),
+    { type: "MARK_OUT", index: selectedIndex, sec: next.endSec },
+    // エディットでは並べ替えとマージで結果が変わる。確定は待たず、
+    // 状態機械から返る state/changed に任せる
+    mode === "edit"
+      ? undefined
+      : (state) => state.kind === "ready" && firstMatches(state.segments, next),
   );
 }
 
@@ -324,12 +414,17 @@ function onRangeCommitted(range: ClipRange): void {
     // 「画面と状態の食い違い」が起きる
     const durationSec = getVideo().duration;
 
-    currentRange = range;
-    paintOverlay(range, durationSec);
+    currentSegments = currentSegments.map((segment, index) =>
+      index === selectedIndex ? range : segment,
+    );
+    paintOverlay(currentSegments, durationSec);
     setStatus(rangeLabel(range));
     send(
-      { type: "ADJUST_SEGMENT", index: 0, range },
-      (state) => state.kind === "ready" && firstMatches(state.segments, range),
+      { type: "ADJUST_SEGMENT", index: selectedIndex, range },
+      mode === "edit"
+        ? undefined
+        : (state) =>
+            state.kind === "ready" && firstMatches(state.segments, range),
     );
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
@@ -387,8 +482,17 @@ async function seekAndPlay(sec: number): Promise<HTMLVideoElement | null> {
   }
 }
 
-/** YouTube のシークバーに範囲を帯で重ねて、動画全体のどこかを示す */
-function paintOverlay(range: ClipRange, videoDurationSec: number): void {
+/** 帯 1 本分のスタイル。区間ごとに同じものを並べる */
+const OVERLAY_BAND_STYLE =
+  "position:absolute;top:0;bottom:0;background:#3ea6ff;opacity:0.5;pointer-events:none;";
+
+/**
+ * YouTube のシークバーに区間を帯で重ねて、動画全体のどこかを示す。
+ *
+ * **区間ごとに子要素を並べる。** 1 本の帯を伸ばして全区間を覆うと、
+ * 間の拾っていない部分まで切り抜くように見える
+ */
+function paintOverlay(segments: ClipRange[], videoDurationSec: number): void {
   const bar = document.querySelector<HTMLElement>(YT_SELECTORS.progressBar);
   if (bar === null || videoDurationSec <= 0) return;
 
@@ -397,12 +501,19 @@ function paintOverlay(range: ClipRange, videoDurationSec: number): void {
     overlay = document.createElement("div");
     overlay.id = OVERLAY_ID;
     overlay.style.cssText =
-      "position:absolute;top:0;bottom:0;background:#3ea6ff;opacity:0.5;pointer-events:none;z-index:1;";
+      "position:absolute;top:0;bottom:0;left:0;right:0;pointer-events:none;z-index:1;";
     bar.appendChild(overlay);
   }
 
-  overlay.style.left = `${(range.startSec / videoDurationSec) * 100}%`;
-  overlay.style.width = `${((range.endSec - range.startSec) / videoDurationSec) * 100}%`;
+  overlay.replaceChildren(
+    ...segments.map((segment) => {
+      const band = document.createElement("div");
+      band.style.cssText = OVERLAY_BAND_STYLE;
+      band.style.left = `${(segment.startSec / videoDurationSec) * 100}%`;
+      band.style.width = `${((segment.endSec - segment.startSec) / videoDurationSec) * 100}%`;
+      return band;
+    }),
+  );
 }
 
 /** 帯を取り除く。範囲を失った状態や、別の動画を見ているときに残さない */
@@ -412,12 +523,12 @@ function clearOverlay(): void {
 
 /** 帯を今の範囲に合わせ直す。範囲が無い・別の動画を見ているなら消す */
 function refreshOverlay(): void {
-  if (currentRange === null || rangeVideoId !== currentVideoId()) {
+  if (currentSegments.length === 0 || rangeVideoId !== currentVideoId()) {
     clearOverlay();
     return;
   }
   try {
-    paintOverlay(currentRange, getVideo().duration);
+    paintOverlay(currentSegments, getVideo().duration);
   } catch (error) {
     // 帯は範囲の目安にすぎない。描けないことは録画を止める理由にならない
     console.warn(`範囲の帯を描き直せませんでした: ${String(error)}`);
@@ -455,16 +566,26 @@ function renderActions(kind: ClipState["kind"]): void {
   if (box === null) return;
 
   box.replaceChildren(
-    ...actionsFor(kind).map((action: BarAction) =>
-      makeButton(ACTION_LABELS[action], PRIMARY_ACTIONS.has(action), () => {
-        send(ACTION_EVENTS[action]);
-      }),
-    ),
+    ...actionsFor(kind).map((action: BarAction) => {
+      const button = makeButton(
+        ACTION_LABELS[action],
+        PRIMARY_ACTIONS.has(action),
+        () => {
+          send(ACTION_EVENTS[action]);
+        },
+      );
+      // 押しても弾かれるだけの録画は押させない。一覧の合計表示と理由を揃える
+      if (action === "record" && totalSec(currentSegments) > maxClipSec) {
+        button.disabled = true;
+        button.title = `合計が上限 ${maxClipSec} 秒を超えています`;
+      }
+      return button;
+    }),
   );
 }
 
 function applyStateToDisplay(state: ClipState): void {
-  const stateRange = "segments" in state ? (state.segments[0] ?? null) : null;
+  const stateSegments = "segments" in state ? state.segments : [];
   const stateMeta = "meta" in state ? state.meta : null;
   // idle と failed が持つ範囲は「もう操作できない過去のもの」。画面から消す。
   // failed から RETRY で戻るときは、ready の state/changed が範囲を持ってくる。
@@ -472,23 +593,37 @@ function applyStateToDisplay(state: ClipState): void {
   // **別の動画を見ているタブでは取り込まない。** 状態機械の範囲は他の動画の
   // ものなので、覚えてしまうとステータス行に別動画の範囲が出るうえ、
   // 「範囲を再生」でこの動画をその位置へ飛ばしてしまう (canAdjustRange と同じ規則)
-  const liveRange =
+  const liveSegments =
     state.kind === "idle" ||
     state.kind === "failed" ||
     stateMeta?.videoId !== currentVideoId()
-      ? null
-      : stateRange;
+      ? []
+      : stateSegments;
 
-  const drifted =
-    currentRange === null || liveRange === null
-      ? currentRange !== liveRange
-      : !sameRange(currentRange, liveRange);
+  // **並べ替えとマージで index は動く。** いま触っていた区間の開始秒で
+  // 引き直せば、マージで消えた区間を選んでいた場合もマージ先が返るので、
+  // 選択が迷子にならない (区間に ID を振らずに済ませる代わりの仕掛け)
+  const previous = selectedSegment();
+  const anchorSec = previous?.startSec ?? null;
 
   busy = BUSY_KINDS.has(state.kind);
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
-  currentRange = liveRange;
+  currentSegments = liveSegments;
+  selectedIndex = anchorSec === null ? -1 : indexAt(liveSegments, anchorSec);
+  // 引き直せなかった (区間ごと消えた / 初めて区間ができた) ときは末尾を選ぶ。
+  // 選択なしの状態を作ると、拡大バーが何も編集していないのに出ることになる
+  if (selectedIndex === -1 && liveSegments.length > 0) {
+    selectedIndex = liveSegments.length - 1;
+  }
+
+  const current = selectedSegment();
+  const drifted =
+    previous === null || current === null
+      ? previous !== current
+      : !sameRange(previous, current);
+
   // どの動画の範囲かも状態機械が持っている。content script が読み込み
   // 直された後でも、これで取り戻せる
   rangeVideoId = stateMeta?.videoId ?? null;
@@ -507,9 +642,18 @@ function applyStateToDisplay(state: ClipState): void {
   // 描き直すと窓が計算し直されてハンドルが跳ねる。
   // ただし録画中は、打ち切られたドラッグの見た目が最後の位置に残るため、
   // ずれていなくても確定済みの範囲で描き直す
-  if (currentRange !== null && (drifted || busy)) {
+  // 一覧はエディットモードでだけ出す。シンプルで使っている人に、関係のない
+  // 概念を見せない
+  segmentList?.setEnabled(!busy);
+  segmentList?.update(
+    mode === "edit" ? currentSegments : [],
+    selectedIndex,
+    maxClipSec,
+  );
+
+  if (current !== null && (drifted || busy)) {
     try {
-      rangeBar?.update(currentRange, getVideo().duration);
+      rangeBar?.update(current, getVideo().duration);
     } catch (error) {
       // ここは同期リスナーの中。投げると呼び出し元の録画処理まで届かず、
       // SEEK_DONE が送られないまま録画が無音で止まる。
@@ -521,11 +665,10 @@ function applyStateToDisplay(state: ClipState): void {
 
 /** 指定した範囲を通しで再生して内容を確認する */
 async function playRange(): Promise<void> {
-  if (currentRange === null || busy) return;
+  const range = selectedSegment();
+  if (range === null || busy) return;
 
   cancelPreviewWatch();
-
-  const range = currentRange;
   const video = await seekAndPlay(range.startSec);
   if (video === null) return;
 
@@ -535,7 +678,8 @@ async function playRange(): Promise<void> {
       cancelPreview = null;
       // 登録したときの範囲を今も使っているかを確かめる。解除が漏れていた
       // 場合にここで止めると、別の範囲の再生や録画まで巻き込んで止める
-      if (busy || currentRange === null || !sameRange(currentRange, range)) {
+      const still = selectedSegment();
+      if (busy || still === null || !sameRange(still, range)) {
         return;
       }
       video.pause();
@@ -706,7 +850,12 @@ function buildBar(): HTMLElement {
   row.style.cssText = BAR_STYLE.row;
 
   // 常に出ている操作。主操作は状態ごとに変わる側 (renderActions) が持つ
-  const inButton = makeButton("IN", false, onMarkIn);
+  // ラベルだけを変える。区間を足す入口を 2 つ作らない
+  const inButton = makeButton(
+    mode === "edit" ? "＋ 区間を追加" : "IN",
+    false,
+    onMarkIn,
+  );
   const outButton = makeButton("OUT", false, onMarkOut);
   const playButton = makeButton("▶ 範囲を見る", false, () => void playRange());
 
@@ -736,8 +885,29 @@ function buildBar(): HTMLElement {
     maxClipSec: () => maxClipSec,
   });
   rangeBar.element.id = RANGE_ID;
-  // 拡大バーを上、操作を下に置く。範囲を見ながらボタンへ手を伸ばす順番
-  bar.append(rangeBar.element, row, settingsPanel.element);
+
+  segmentList = createSegmentList({
+    onSelect: (index) => {
+      selectedIndex = index;
+      applyStateToSelection();
+    },
+    onPlay: (index) => {
+      selectedIndex = index;
+      applyStateToSelection();
+      void playRange();
+    },
+    onRemove: (index) => {
+      send({ type: "REMOVE_SEGMENT", index });
+    },
+  });
+
+  // 一覧を上、拡大バー、操作の順。区間を選んでからバーで調整する流れに合わせる
+  bar.append(
+    segmentList.element,
+    rangeBar.element,
+    row,
+    settingsPanel.element,
+  );
   return bar;
 }
 
@@ -787,10 +957,11 @@ function mount(): void {
 
   // 作り直したバーは空で無効の状態。確定済みの範囲があれば載せ直す
   rangeBar?.setEnabled(canAdjustRange());
-  if (currentRange !== null) {
+  const restored = selectedSegment();
+  if (restored !== null) {
     try {
-      rangeBar?.update(currentRange, getVideo().duration);
-      setStatus(rangeLabel(currentRange));
+      rangeBar?.update(restored, getVideo().duration);
+      setStatus(rangeLabel(restored));
     } catch (error) {
       // 表示を戻せないだけで、範囲そのものは service worker が持っている
       console.warn(`拡大バーを復元できませんでした: ${String(error)}`);
@@ -884,8 +1055,9 @@ function recoverFromState(): void {
         return;
       }
       applyStateToDisplay(response.state);
-      if (currentRange !== null) {
-        setStatus(rangeLabel(currentRange));
+      const current = selectedSegment();
+      if (current !== null) {
+        setStatus(rangeLabel(current));
       }
     })
     .catch((error: unknown) => {
@@ -905,6 +1077,7 @@ function loadInitialSettings(): void {
   void loadSettings()
     .then((settings) => {
       maxClipSec = settings.maxClipSec;
+      applyMode(settings.mode);
     })
     .catch((error: unknown) => {
       console.warn(`設定を読めませんでした: ${String(error)}`);
@@ -920,7 +1093,9 @@ function loadInitialSettings(): void {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   const change = areaName === "sync" ? changes[SETTINGS_KEY] : undefined;
   if (change === undefined) return;
-  maxClipSec = mergeSettings(change.newValue).maxClipSec;
+  const settings = mergeSettings(change.newValue);
+  maxClipSec = settings.maxClipSec;
+  applyMode(settings.mode);
 });
 
 /** 直前に見ていた URL。SPA 遷移の検出に使う */
