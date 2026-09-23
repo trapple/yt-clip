@@ -5,6 +5,7 @@ import {
   MAX_AUDIO_CHANNELS,
   assertRecordable,
   buildRecordingStream,
+  startRecording,
 } from "@/content/recorder";
 
 /** mediaKeys は読み取り専用なので、テストからは定義し直して差し替える */
@@ -191,5 +192,96 @@ describe("buildRecordingStream", () => {
       expect.stringContaining("音声をステレオに落とせませんでした"),
     );
     warn.mockRestore();
+  });
+});
+
+/** jsdom は MediaRecorder を持たないので、状態遷移だけを真似る */
+class FakeRecorder {
+  state: "inactive" | "recording" | "paused" = "inactive";
+  ondataavailable: ((event: { data: Blob }) => void) | null = null;
+  onerror: ((event: { type: string }) => void) | null = null;
+  onstop: (() => void) | null = null;
+  /** 呼ばれた順。区間の繋ぎ方を順序ごと確かめる */
+  readonly calls: string[] = [];
+
+  start(): void {
+    this.state = "recording";
+    this.calls.push("start");
+  }
+  pause(): void {
+    this.state = "paused";
+    this.calls.push("pause");
+  }
+  resume(): void {
+    this.state = "recording";
+    this.calls.push("resume");
+  }
+  stop(): void {
+    this.state = "inactive";
+    this.calls.push("stop");
+    this.onstop?.();
+  }
+}
+
+describe("区間の間で一時停止する", () => {
+  let created: FakeRecorder[] = [];
+
+  beforeEach(() => {
+    created = [];
+    vi.stubGlobal(
+      "MediaRecorder",
+      class extends FakeRecorder {
+        constructor(_stream: unknown, _options: { mimeType: string }) {
+          super();
+          created.push(this);
+        }
+      },
+    );
+  });
+
+  /** captureStream を持つ video を用意する */
+  function makeCapturable(): HTMLVideoElement {
+    const video = document.createElement("video");
+    Object.defineProperty(video, "captureStream", {
+      value: () => new FakeStream([new FakeTrack("video")]),
+      configurable: true,
+    });
+    return video;
+  }
+
+  function start(): Promise<{ pause(): void; resume(): void; stop(): Promise<Blob> }> {
+    return startRecording(makeCapturable(), "video/mp4", {
+      onUnexpectedStop: () => undefined,
+    });
+  }
+
+  test("一時停止と再開を MediaRecorder に渡す", async () => {
+    const handle = await start();
+
+    handle.pause();
+    handle.resume();
+    await handle.stop();
+
+    expect(created[0]?.calls).toEqual(["start", "pause", "resume", "stop"]);
+  });
+
+  test("一時停止中でも止められる", async () => {
+    const handle = await start();
+
+    handle.pause();
+
+    // 区間の間で中止されてもストリームを掴んだままにしない
+    await expect(handle.stop()).resolves.toBeInstanceOf(Blob);
+    expect(created[0]?.state).toBe("inactive");
+  });
+
+  test("録画中でないのに一時停止したら握り潰さず throw する", async () => {
+    const handle = await start();
+
+    handle.pause();
+    // 呼び出し側のバグ。黙って無視すると、区間の境目がずれた録画ができる
+    expect(() => handle.pause()).toThrow(/一時停止できません/u);
+    expect(() => handle.resume()).not.toThrow();
+    expect(() => handle.resume()).toThrow(/再開できません/u);
   });
 });
