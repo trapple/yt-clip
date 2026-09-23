@@ -58,7 +58,8 @@ describe("createSettingsPanel", () => {
     const { deps } = makeDeps();
     const panel = createSettingsPanel(deps);
 
-    expect(panel.element.querySelectorAll("input")).toHaveLength(
+    // select の項目もあるので input だけを数えない
+    expect(panel.element.querySelectorAll("input, select")).toHaveLength(
       SETTINGS_FIELDS.length,
     );
   });

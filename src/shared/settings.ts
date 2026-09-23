@@ -17,6 +17,15 @@ import {
 
 export const SETTINGS_KEY = "settings";
 
+/**
+ * 切り抜きの作り方。
+ *
+ * **往復するトグルではなく設定にしてある。** 往復を許すと「シンプルで作った
+ * 範囲をエディットに引き継ぐか」という問いが常に付きまとう。固定モードなら
+ * 切り替えは稀な操作として扱える。
+ */
+export type ClipMode = "simple" | "edit";
+
 export type Settings = {
   /** 投稿本文のテンプレート。いまは画面から編集できないが設定ではある */
   template: string;
@@ -28,6 +37,8 @@ export type Settings = {
   hashtagsByChannel: Record<string, string[]>;
   /** 1 クリップの最大長 (秒) */
   maxClipSec: number;
+  /** 切り抜きの作り方。エディットでは複数の区間を結合できる */
+  mode: ClipMode;
 };
 
 /** チャンネル。`id` が設定の鍵、`name` は表示用 */
@@ -49,6 +60,7 @@ export const DEFAULT_SETTINGS: Settings = {
   template: DEFAULT_TEMPLATE,
   hashtagsByChannel: {},
   maxClipSec: DEFAULT_MAX_CLIP_SEC,
+  mode: "simple",
 };
 
 /** 区切りとして扱う文字。全角空白と読点も含める */
@@ -118,6 +130,20 @@ export function parseMaxClipSec(input: string): FieldResult {
 }
 
 /**
+ * 入力欄の文字列をモードの差分にする。
+ *
+ * **既定値に倒さない。** 選択肢しか出していないのに別の値が来たら、それは
+ * UI のバグである。黙って `simple` にすると、エディットに切り替えたつもりで
+ * シンプルのまま録画に進む
+ */
+export function parseMode(input: string): FieldResult {
+  if (!isClipMode(input)) {
+    return { ok: false, message: `知らないモードです: ${input}` };
+  }
+  return { ok: true, patch: { mode: input } };
+}
+
+/**
  * そのチャンネルに付けるタグ。
  *
  * **`channelId` が欠けていることを許す。** IndexedDB に残っている古いクリップの
@@ -144,6 +170,11 @@ function isSettableClipSec(value: unknown): value is number {
     value >= MIN_CLIP_SEC &&
     value <= MAX_SETTABLE_CLIP_SEC
   );
+}
+
+/** 保存されている値がモードとして読めるか */
+function isClipMode(value: unknown): value is ClipMode {
+  return value === "simple" || value === "edit";
 }
 
 /** 保存されている値が期待する型かどうか */
@@ -203,6 +234,14 @@ export function mergeSettings(stored: unknown): Settings {
   } else if (source.maxClipSec !== undefined) {
     console.warn(
       `[yt-clip] 保存された maxClipSec が使えないため既定値を使います: ${String(source.maxClipSec)}`,
+    );
+  }
+
+  if (isClipMode(source.mode)) {
+    settings.mode = source.mode;
+  } else if (source.mode !== undefined) {
+    console.warn(
+      `[yt-clip] 保存された mode が使えないため既定値を使います: ${String(source.mode)}`,
     );
   }
 
@@ -282,6 +321,22 @@ export type SettingsField = {
  * パネルはこれを並べるだけで、項目ごとの分岐を持たない
  */
 export const SETTINGS_FIELDS: readonly SettingsField[] = [
+  // **先頭に置く。** 他の項目の意味がモードによって変わる (最大秒数は合計に効く)
+  {
+    key: "mode",
+    label: "モード",
+    scope: "global",
+    control: {
+      kind: "select",
+      options: [
+        { value: "simple", label: "シンプル (1 区間を切り抜く)" },
+        { value: "edit", label: "エディット (複数区間を結合する)" },
+      ],
+    },
+    hint: () => "モードを変えると作りかけの区間は消えます",
+    toText: (settings) => settings.mode,
+    fromText: (text) => parseMode(text),
+  },
   {
     key: "hashtags",
     label: "ハッシュタグ",

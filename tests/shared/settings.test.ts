@@ -9,6 +9,7 @@ import {
   normalizeHashtags,
   hashtagsFor,
   parseMaxClipSec,
+  parseMode,
   saveSettings,
   tagsVariable,
   type Settings,
@@ -375,5 +376,41 @@ describe("チャンネル別にする前の共通タグ", () => {
     });
 
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("モード", () => {
+  test("既定はシンプル", () => {
+    expect(DEFAULT_SETTINGS.mode).toBe("simple");
+  });
+
+  test("保存された値を読む", () => {
+    expect(mergeSettings({ mode: "edit" }).mode).toBe("edit");
+  });
+
+  test("知らない値は既定に倒して理由を残す", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    expect(mergeSettings({ mode: "advanced" }).mode).toBe("simple");
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  test("項目として画面に出る", () => {
+    const field = SETTINGS_FIELDS.find((item) => item.key === "mode");
+    expect(field?.control.kind).toBe("select");
+  });
+});
+
+describe("parseMode", () => {
+  test("受け付ける値", () => {
+    expect(parseMode("simple")).toEqual({ ok: true, patch: { mode: "simple" } });
+    expect(parseMode("edit")).toEqual({ ok: true, patch: { mode: "edit" } });
+  });
+
+  test("知らない値は既定に倒さず理由を返す", () => {
+    // 選択肢しか出していないのに別の値が来たら、それは UI のバグ
+    expect(parseMode("advanced").ok).toBe(false);
   });
 });
