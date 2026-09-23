@@ -68,14 +68,14 @@ export const FAILURE_MESSAGES: Record<FailureReason, string> = {
 
 export type ClipState =
   | { kind: "idle" }
-  | { kind: "ready"; range: ClipRange; meta: VideoMeta }
-  | { kind: "seeking"; range: ClipRange; meta: VideoMeta }
-  | { kind: "recording"; range: ClipRange; meta: VideoMeta }
-  | { kind: "encoding"; range: ClipRange; meta: VideoMeta }
+  | { kind: "ready"; segments: ClipRange[]; meta: VideoMeta }
+  | { kind: "seeking"; segments: ClipRange[]; meta: VideoMeta }
+  | { kind: "recording"; segments: ClipRange[]; meta: VideoMeta }
+  | { kind: "encoding"; segments: ClipRange[]; meta: VideoMeta }
   | {
       kind: "preview";
       clipId: string;
-      range: ClipRange;
+      segments: ClipRange[];
       meta: VideoMeta;
       mimeType: string;
     }
@@ -88,7 +88,7 @@ export type ClipState =
    */
   | {
       kind: "posted";
-      range: ClipRange;
+      segments: ClipRange[];
       meta: VideoMeta;
       clipId: string;
       mimeType: string;
@@ -96,23 +96,28 @@ export type ClipState =
   | {
       kind: "composing";
       clipId: string;
-      range: ClipRange;
+      segments: ClipRange[];
       meta: VideoMeta;
       mimeType: string;
     }
   | {
       kind: "degraded";
       clipId: string;
-      range: ClipRange;
+      segments: ClipRange[];
       meta: VideoMeta;
       mimeType: string;
       reason: DegradedReason;
     }
-  /** range / meta が null なのは、マーク確定前に起きた内部エラーの場合だけ */
+  /**
+   * 区間を作る前に落ちた場合は `segments` が空配列になる。
+   *
+   * **nullable にしない。** 空配列と `null` の両方が「区間なし」を意味する
+   * 状態を作ると、判定が 2 通りに割れる
+   */
   | {
       kind: "failed";
       reason: FailureReason;
-      range: ClipRange | null;
+      segments: ClipRange[];
       meta: VideoMeta | null;
     };
 
@@ -127,12 +132,20 @@ export const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
 ]);
 
 export type ClipEvent =
-  /** 範囲の作成。既定の長さを決めるのは content script の責務 */
+  /** 範囲の作成 (シンプルモード)。今ある区間を置き換える */
   | { type: "MARK_IN"; range: ClipRange; meta: VideoMeta }
-  /** 終了位置だけを今の再生位置に合わせる */
-  | { type: "MARK_OUT"; sec: number }
-  /** 拡大バーでのドラッグ結果。取りこぼしで両者がずれないよう常に両端を送る */
-  | { type: "ADJUST_RANGE"; range: ClipRange }
+  /**
+   * 区間の追加 (エディットモード)。
+   *
+   * `idle` から受けたときは `MARK_IN` と同じ結果になるので、
+   * 「最初の 1 回だけ MARK_IN」という分岐は content script に要らない
+   */
+  | { type: "ADD_SEGMENT"; range: ClipRange; meta: VideoMeta }
+  /** 指した区間の終了位置だけを今の再生位置に合わせる */
+  | { type: "MARK_OUT"; index: number; sec: number }
+  /** 拡大バーでのドラッグ結果。取りこぼしでずれないよう常に両端を送る */
+  | { type: "ADJUST_SEGMENT"; index: number; range: ClipRange }
+  | { type: "REMOVE_SEGMENT"; index: number }
   | { type: "RESET_MARKS" }
   | { type: "START_RECORDING" }
   | { type: "SEEK_DONE" }

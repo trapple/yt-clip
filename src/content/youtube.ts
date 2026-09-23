@@ -164,6 +164,16 @@ function sameRange(a: ClipRange, b: ClipRange): boolean {
 }
 
 /**
+ * 状態機械が持つ先頭の区間が、送った範囲と一致するか。
+ *
+ * **いまは常に区間 1 つ。** 複数区間の UI はこの後のタスクで入れる
+ */
+function firstMatches(segments: ClipRange[], range: ClipRange): boolean {
+  const first = segments[0];
+  return first !== undefined && sameRange(first, range);
+}
+
+/**
  * いま開いている動画の videoId。動画ページでなければ null。
  * 再生画面から離れること自体は異常ではないので、例外にはしない。
  */
@@ -254,7 +264,7 @@ function onMarkIn(): void {
   applyRange(range, video.duration);
   send(
     { type: "MARK_IN", range, meta },
-    (state) => state.kind === "ready" && sameRange(state.range, range),
+    (state) => state.kind === "ready" && firstMatches(state.segments, range),
   );
 }
 
@@ -290,8 +300,8 @@ function onMarkOut(): void {
 
   applyRange(next, video.duration);
   send(
-    { type: "MARK_OUT", sec: next.endSec },
-    (state) => state.kind === "ready" && sameRange(state.range, next),
+    { type: "MARK_OUT", index: 0, sec: next.endSec },
+    (state) => state.kind === "ready" && firstMatches(state.segments, next),
   );
 }
 
@@ -318,8 +328,8 @@ function onRangeCommitted(range: ClipRange): void {
     paintOverlay(range, durationSec);
     setStatus(rangeLabel(range));
     send(
-      { type: "ADJUST_RANGE", range },
-      (state) => state.kind === "ready" && sameRange(state.range, range),
+      { type: "ADJUST_SEGMENT", index: 0, range },
+      (state) => state.kind === "ready" && firstMatches(state.segments, range),
     );
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
@@ -454,7 +464,7 @@ function renderActions(kind: ClipState["kind"]): void {
 }
 
 function applyStateToDisplay(state: ClipState): void {
-  const stateRange = "range" in state ? state.range : null;
+  const stateRange = "segments" in state ? (state.segments[0] ?? null) : null;
   const stateMeta = "meta" in state ? state.meta : null;
   // idle と failed が持つ範囲は「もう操作できない過去のもの」。画面から消す。
   // failed から RETRY で戻るときは、ready の state/changed が範囲を持ってくる。
@@ -833,11 +843,21 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
   }
 
   if (state.kind === "seeking") {
-    void prepareRecording(state.range.startSec, state.meta.videoId);
+    const first = state.segments[0];
+    if (first === undefined) {
+      send({ type: "FAIL", reason: "internal-error" });
+      return;
+    }
+    void prepareRecording(first.startSec, state.meta.videoId);
     return;
   }
   if (state.kind === "recording") {
-    void runRecording(state.range.startSec, state.range.endSec);
+    const first = state.segments[0];
+    if (first === undefined) {
+      send({ type: "FAIL", reason: "internal-error" });
+      return;
+    }
+    void runRecording(first.startSec, first.endSec);
   }
 });
 

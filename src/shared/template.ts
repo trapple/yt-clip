@@ -1,5 +1,6 @@
 import { tagsVariable } from "@/shared/settings";
 import { formatTime, toUrlSeconds } from "@/shared/time";
+import { totalSec } from "@/shared/timeline";
 import type { ClipRange, VideoMeta } from "@/shared/types";
 
 // 既定のテンプレートは設定の一部なので settings.ts が持つ
@@ -14,16 +15,23 @@ export function buildYouTubeUrl(videoId: string, startSec: number): string {
 export function renderTemplate(
   template: string,
   meta: VideoMeta,
-  range: ClipRange,
+  segments: ClipRange[],
   hashtags: string[] = [],
 ): string {
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  if (first === undefined || last === undefined) {
+    throw new Error("区間を持たないクリップの本文は組み立てられません");
+  }
+
   const vars: Record<string, string> = {
     title: meta.title,
     videoId: meta.videoId,
-    url: buildYouTubeUrl(meta.videoId, range.startSec),
-    start: formatTime(range.startSec),
-    end: formatTime(range.endSec),
-    duration: String(Math.round(range.endSec - range.startSec)),
+    url: buildYouTubeUrl(meta.videoId, first.startSec),
+    start: formatTime(first.startSec),
+    end: formatTime(last.endSec),
+    // **合計長。元動画上の幅ではない。** 区間が 1 つなら結果は従来と同じ
+    duration: String(Math.round(totalSec(segments))),
     // **自分で区切りを持つ。** テンプレート側に改行を書くと、タグが
     // 未設定のときに本文が空行 2 つで終わる
     tags: tagsVariable(hashtags),

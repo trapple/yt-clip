@@ -403,7 +403,7 @@ beforeAll(async () => {
   installGlobals();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
-  swState = { kind: "ready", range: RANGE, meta: META_A };
+  swState = { kind: "ready", segments: [RANGE], meta: META_A };
 
   // chrome を用意してから読み込む。import 時に listener と observer を張る
   await import("@/content/youtube");
@@ -466,7 +466,7 @@ afterAll(async () => {
 
 describe("範囲再生の監視", () => {
   test("範囲を変えた後は、前の範囲の監視で録画が止まらない", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
 
     // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
     clickButton("▶ 範囲を見る");
@@ -479,15 +479,15 @@ describe("範囲再生の監視", () => {
     await flush();
     expect(swState).toMatchObject({
       kind: "ready",
-      range: { startSec: 10, endSec: 30 },
+      segments: [{ startSec: 10, endSec: 30 }],
     });
     // 旧 OUT を見ている監視は残っていない
     expect(video.pendingFrames()).toBe(0);
 
     const recording: ClipRange = { startSec: 10, endSec: 30 };
-    emit({ kind: "seeking", range: recording, meta: META_A });
+    emit({ kind: "seeking", segments: [recording], meta: META_A });
     await flush();
-    emit({ kind: "recording", range: recording, meta: META_A });
+    emit({ kind: "recording", segments: [recording], meta: META_A });
     await flush();
 
     const pausesBefore = video.pauseCount;
@@ -503,12 +503,12 @@ describe("範囲再生の監視", () => {
   });
 
   test("録画に入ると範囲再生の監視は解除される", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     clickButton("▶ 範囲を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
-    emit({ kind: "seeking", range: RANGE, meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(video.pendingFrames()).toBe(0);
@@ -519,12 +519,12 @@ describe("範囲再生の監視", () => {
 
 describe("動画の入れ替わり", () => {
   test("範囲を作った動画と違う動画では録画に入らない", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(overlay()).not.toBeNull();
 
     // 関連動画へ SPA 遷移してから popup で録画を始めた場合
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "seeking", range: RANGE, meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(clipEvents()).toContainEqual({
@@ -544,7 +544,7 @@ describe("動画の入れ替わり", () => {
     // 返ってくる。取り込むと、B のステータス行に A の範囲が出るうえ、
     // 「範囲を再生」で B を A の開始位置へ飛ばしてしまう
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(statusText()).not.toContain("0:10");
@@ -561,7 +561,7 @@ describe("動画の入れ替わり", () => {
   });
 
   test("別の動画へ移ると帯が消え、拡大バーも操作できなくなる", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(overlay()).not.toBeNull();
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
@@ -577,8 +577,8 @@ describe("動画の入れ替わり", () => {
 
 describe("録画の後始末", () => {
   test("失敗に落ちたら録画を止めてストリームを解放する", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     command("recorder/start");
     await flush();
 
@@ -591,7 +591,7 @@ describe("録画の後始末", () => {
     emit({
       kind: "failed",
       reason: "playback-failed",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
     await flush();
@@ -613,8 +613,8 @@ describe("録画の後始末", () => {
     // service worker は seeking の state/changed を送った後、SEEK_DONE を
     // 受けて recorder/start を送り、録画開始の通知を受けてから recording へ
     // 進める。この順序で「録画から離れた状態」の後始末が誤爆しないこと
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "seeking", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
     await flush();
     expect(clipEvents()).toContainEqual({ type: "SEEK_DONE" });
 
@@ -622,7 +622,7 @@ describe("録画の後始末", () => {
     await flush();
     expect(startedRecorder().state).toBe("recording");
 
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     await flush();
     // recording への遷移で録画を捨てていないこと
     expect(startedRecorder().state).toBe("recording");
@@ -630,7 +630,7 @@ describe("録画の後始末", () => {
     // OUT に到達 → 書き出し → 結果の送信まで通す
     video.advanceFrame(20.1);
     expect(clipEvents()).toContainEqual({ type: "OUT_REACHED" });
-    emit({ kind: "encoding", range: RANGE, meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
     command("recorder/stop");
     await flush();
 
@@ -652,12 +652,12 @@ describe("録画の後始末", () => {
   });
 
   test("録画結果を送れなかったら失敗として知らせる", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     command("recorder/start");
     await flush();
 
-    emit({ kind: "encoding", range: RANGE, meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
     // 60 秒 1080p の base64 がメッセージ長を超える場合を再現する
     rejectMessageType = "recorder/done";
     command("recorder/stop");
@@ -694,11 +694,11 @@ describe("失敗の提示", () => {
   test("失敗の理由はバーにも出す", () => {
     // 録画中にタブをリロードした場合、popup を開かない限り何が起きたのか
     // 分からない。文言は popup と同じものを使う
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     emit({
       kind: "failed",
       reason: "recording-aborted",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
 
@@ -733,14 +733,14 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("録画済みでポスト待ちの間は操作させない", () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
     emit({
       kind: "preview",
       clipId: "clip-1",
       mimeType: "video/mp4",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
     // service worker は preview での範囲変更を拒む。画面もそれに合わせる
@@ -748,12 +748,12 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("受け付けられなかった範囲変更は、画面を状態機械側へ戻す", async () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     emit({
       kind: "preview",
       clipId: "clip-1",
       mimeType: "video/mp4",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
     });
 
@@ -780,16 +780,16 @@ describe("状態ごとの操作", () => {
     ).map((button) => button.textContent ?? "");
 
   test("状態が変わると出る操作も変わる", () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     expect(labels()).toEqual(["● 録画"]);
 
     // 録り始めてからでも戻れる
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     expect(labels()).toEqual(["■ 中止"]);
 
     emit({
       kind: "posted",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -798,7 +798,7 @@ describe("状態ごとの操作", () => {
   });
 
   test("操作を押すと状態機械へイベントが飛ぶ", () => {
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -811,7 +811,7 @@ describe("状態ごとの操作", () => {
     // 投稿のたびに範囲を作り直すのは使い方に合っていない
     emit({
       kind: "posted",
-      range: RANGE,
+      segments: [RANGE],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -823,7 +823,7 @@ describe("状態ごとの操作", () => {
 
 describe("録画の中止", () => {
   test("中止を押すと状態機械へ伝わる", () => {
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -835,14 +835,14 @@ describe("録画の中止", () => {
   test("録画から離れると録画も監視も止まる", async () => {
     // 中止の停止処理は「recording から外れた」ことを見て走る。
     // 中止のためだけの後始末は足していないので、ここが唯一の担保になる
-    emit({ kind: "ready", range: RANGE, meta: META_A });
-    emit({ kind: "recording", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
     command("recorder/start");
     await flush();
     const recorder = startedRecorder();
     expect(recorder.state).toBe("recording");
 
-    emit({ kind: "ready", range: RANGE, meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
     await flush();
 
     expect(recorder.state).toBe("inactive");
@@ -969,7 +969,7 @@ describe("最大秒数の設定", () => {
     clickButton("IN");
     await flush();
     // 実機では service worker が state/changed を配る。それで拡大バーが有効になる
-    emit({ kind: "ready", range: { startSec: 100, endSec: 115 }, meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], meta: META_A });
     await flush();
 
     dragOutToEnd();

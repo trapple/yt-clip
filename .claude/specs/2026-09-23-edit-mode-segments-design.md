@@ -154,7 +154,25 @@ export function parseMode(input: string): FieldResult;
 | `background/router.ts` | 状態を組み立てている箇所 |
 | `popup/view.ts` | 表示文言 (§5.4) |
 | `content/youtube.ts` | 配線 |
+| `background/storage.ts` | `StoredClip.range` → `segments` |
+| `shared/template.ts` | `renderTemplate` が区間列を受ける |
 | 対応するテスト | すべて |
+
+**保存済みクリップも `segments` を持つ。** `StoredClip.range` は投稿本文の URL と
+ファイル名の開始秒に使われている。先頭区間の秒で足りるので `range` のままでも
+動くが、**2 区間目以降を持たないものを `range` と呼び続けると型が嘘になる**。
+
+IndexedDB に残っている古いクリップは `range` しか持たない。読み出し時に
+`[range]` として扱い、理由をログに残す。**黙って落とさない。**
+
+`renderTemplate` の変数はこう変わる。`{duration}` の意味が変わるが、**区間が
+1 つなら結果は従来と同じ**である。
+
+| 変数 | 複数区間での値 |
+|---|---|
+| `{url}` / `{start}` | 先頭区間の `startSec` |
+| `{end}` | 最終区間の `endSec` |
+| `{duration}` | **合計長** (`totalSec`)。元動画上の幅ではない |
 
 ### 2.2 `shared/timeline.ts` を新設する
 

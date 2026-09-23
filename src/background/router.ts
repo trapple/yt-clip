@@ -296,7 +296,7 @@ export function createRouter(
       id: clipId,
       blob: new Blob([decodeBase64(base64)], { type: storedMime }),
       mimeType: storedMime,
-      range: state.range,
+      segments: state.segments,
       meta: state.meta,
       createdAt: deps.now(),
     });
@@ -328,19 +328,25 @@ export function createRouter(
 
     const clip = await deps.getClip(state.clipId);
     const settings = await deps.loadSettings();
+    const firstSegment = clip.segments[0];
+    if (firstSegment === undefined) {
+      throw new Error(`区間を持たないクリップです: ${clip.id}`);
+    }
     const delivery = await commandTab(composeTabId, {
       type: "x/payload",
       base64: encodeBase64(new Uint8Array(await clip.blob.arrayBuffer())),
       mimeType: clip.mimeType,
       fileName: buildClipFileName(
         clip.meta.videoId,
-        clip.range.startSec,
+        // ファイル名に入れるのは先頭区間の開始秒。migrateClip が空配列を
+        // 許さないので必ず存在する
+        firstSegment.startSec,
         clip.mimeType,
       ),
       text: renderTemplate(
         settings.template,
         clip.meta,
-        clip.range,
+        clip.segments,
         // 保存済みのクリップには channelId が無いことがある。
         // hashtagsFor が欠けを許す
         hashtagsFor(settings, clip.meta.channelId),
