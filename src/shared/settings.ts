@@ -230,6 +230,20 @@ export type FieldResult =
   | { ok: true; patch: Partial<Settings> }
   | { ok: false; message: string };
 
+/** 選択肢 1 つ分 */
+export type SelectOption = { value: string; label: string };
+
+/**
+ * 入力欄の種類。
+ *
+ * **パネルはこれを見て作り分ける。`key` を見て分岐しない。** key で分岐すると、
+ * 項目を足すたびにパネルへ戻ってくることになり、「触るのは `Settings` と
+ * `SETTINGS_FIELDS` の 2 箇所だけ」という性質が崩れる。
+ */
+export type FieldControl =
+  | { kind: "text" }
+  | { kind: "select"; options: readonly SelectOption[] };
+
 export type SettingsField = {
   /** 入力欄を識別する。DOM の id にも使う */
   key: string;
@@ -240,6 +254,8 @@ export type SettingsField = {
    * **パネルが分岐するのはここだけ。** `key` を見て分岐してはいけない
    */
   scope: "global" | "channel";
+  /** 入力欄の種類。パネルはこれを見て作り分ける */
+  control: FieldControl;
   /**
    * 入力欄の下に出す短い説明。
    * 「どのチャンネルのタグか」を出すので文脈を受け取る
@@ -270,6 +286,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: "hashtags",
     label: "ハッシュタグ",
     scope: "channel",
+    control: { kind: "text" },
     hint: (context) => {
       if (context.channel === null) {
         return "チャンネルを特定できないため設定できません";
@@ -302,6 +319,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: "maxClipSec",
     label: "最大秒数",
     scope: "global",
+    control: { kind: "text" },
     hint: () =>
       `${MIN_CLIP_SEC}〜${MAX_SETTABLE_CLIP_SEC} 秒。X の動画の上限が ${MAX_SETTABLE_CLIP_SEC} 秒です`,
 

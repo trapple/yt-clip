@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import { describe, expect, test } from "vitest";
 import { CHANNEL } from "../helpers/fixtures";
-import { createSettingsPanel } from "@/content/settings-panel";
+import { createFieldInput, createSettingsPanel } from "@/content/settings-panel";
 import {
   DEFAULT_SETTINGS,
   SETTINGS_FIELDS,
   type Settings,
   type SettingsContext,
+  type SettingsField,
 } from "@/shared/settings";
 
 
@@ -264,5 +265,46 @@ describe("どのチャンネルの設定かを見せる", () => {
     await flush();
 
     expect(panel.element.textContent).toContain(CHANNEL.name);
+  });
+});
+
+describe("入力欄の種類", () => {
+  test("text の項目は input として出る", () => {
+    const { deps } = makeDeps();
+    const panel = createSettingsPanel(deps);
+    document.body.append(panel.element);
+
+    expect(inputOf(panel, "maxClipSec").tagName).toBe("INPUT");
+  });
+
+  test("select の項目は option つきの select として出る", () => {
+    // 実際の項目は別途足す。ここでは作り分けの枠組みだけを確かめる
+    const field: SettingsField = {
+      key: "dummy",
+      label: "ダミー",
+      scope: "global",
+      control: {
+        kind: "select",
+        options: [
+          { value: "a", label: "あ" },
+          { value: "b", label: "い" },
+        ],
+      },
+      hint: () => "",
+      toText: () => "b",
+      fromText: () => ({ ok: true, patch: {} }),
+    };
+
+    const element = createFieldInput(field);
+
+    expect(element.tagName).toBe("SELECT");
+    expect(element.id).toBe("yt-clip-setting-dummy");
+    expect([...element.querySelectorAll("option")].map((o) => o.value)).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(
+      [...element.querySelectorAll("option")].map((o) => o.textContent),
+    ).toEqual(["あ", "い"]);
   });
 });
