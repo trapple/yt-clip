@@ -80,6 +80,18 @@ export function totalSec(segments: ClipRange[]): number {
 }
 
 /**
+ * 合計が上限を超えているか。
+ *
+ * **丸めてから比べる。** 画面に出す合計は `Math.round` した値なので、
+ * 生の秒で比べると「一覧は 60秒 / 60秒 と出ているのに録画ボタンだけ押せない」
+ * 食い違いが生まれる (OUT の秒は `currentTime` 由来で小数を持つ)。
+ * 判定を 1 箇所に集めて、表示と操作の可否を必ず一致させる
+ */
+export function isOverLimit(segments: ClipRange[], maxClipSec: number): boolean {
+  return Math.round(totalSec(segments)) > maxClipSec;
+}
+
+/**
  * その秒を含む区間の index。含む区間が無ければ -1。
  *
  * **区間に ID を振る代わりにこれを使う。** 並べ替えとマージで index は動くが、

@@ -11,7 +11,7 @@
 
 import { SEGMENT_STYLE } from "@/content/styles";
 import { formatTime } from "@/shared/time";
-import { totalSec } from "@/shared/timeline";
+import { isOverLimit, totalSec } from "@/shared/timeline";
 import type { ClipRange } from "@/shared/types";
 
 export type SegmentListCallbacks = {
@@ -118,7 +118,7 @@ export function createSegmentList(
       );
 
       const sum = Math.round(totalSec(segments));
-      const over = sum > maxClipSec;
+      const over = isOverLimit(segments, maxClipSec);
       total.textContent = `合計 ${sum}秒 / ${maxClipSec}秒`;
       total.dataset.over = over ? "true" : "false";
       total.style.cssText = over ? SEGMENT_STYLE.totalOver : SEGMENT_STYLE.total;

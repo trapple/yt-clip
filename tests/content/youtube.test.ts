@@ -1358,3 +1358,49 @@ describe("エディットモードの OUT", () => {
     });
   });
 });
+
+describe("進行中のモード変更", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("録画が終わってから切り替わる", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+    // 状態機械だけが戻ると、録画が走り続けて取り残される
+    expect(clipEvents()).toEqual([]);
+
+    // 録画が終わったら追いつく。storage の変更通知は次に保存するまで来ないので、
+    // ここで拾わないとタブは開き直すまでエディットのままになる
+    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "RESET_MARKS" });
+  });
+
+  test("録画済みクリップを持つ間は切り替えない", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "degraded",
+      segments: [RANGE],
+      meta: META_A,
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      reason: "x-attach-failed",
+    });
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "simple" });
+    await flush();
+
+    // RESET_MARKS は idle へ落とす。実時間を払った録画への参照ごと失う
+    expect(clipEvents()).toEqual([]);
+    expect(segmentRows().length).toBe(1);
+  });
+});

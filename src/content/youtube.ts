@@ -40,7 +40,7 @@ import {
   type SettingsContext,
 } from "@/shared/settings";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
-import { indexAt, totalSec } from "@/shared/timeline";
+import { indexAt, isOverLimit, totalSec } from "@/shared/timeline";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
   BUSY_KINDS,
@@ -78,6 +78,21 @@ let selectedIndex = -1;
 /** 切り抜きの作り方。設定から読む */
 let mode: ClipMode = "simple";
 let segmentList: SegmentList | null = null;
+/**
+ * 状態機械から最後に届いた種類。
+ *
+ * モードを切り替えてよいかの判定に使う。`busy` だけでは、録画済みクリップを
+ * 抱えた `preview` / `posted` / `degraded` を見分けられない
+ */
+let lastKind: ClipState["kind"] = "idle";
+/**
+ * 適用を待っているモード。
+ *
+ * **`chrome.storage.onChanged` は次に設定を保存するまで来ない。** 切り替えを
+ * その場で捨てると、設定はエディットなのにタブはシンプルのまま、開き直すまで
+ * 直らない。落ち着いた時点で適用できるよう覚えておく
+ */
+let pendingMode: ClipMode | null = null;
 /** 範囲を作ったときの動画。SPA で動画が変わったら無効になる */
 let rangeVideoId: string | null = null;
 let busy = false;
@@ -337,12 +352,22 @@ function applyStateToSelection(): void {
  * 設定は既に保存されているので、録画が終われば次の変更通知で追いつく
  */
 function applyMode(next: ClipMode): void {
-  if (next === mode) return;
-  if (busy) {
-    setStatus("録画中はモードを変更できません");
+  if (next === mode) {
+    pendingMode = null;
     return;
   }
 
+  // **区間を捨ててよいのは、まだ何も録れていないときだけ。** 録画中に変えると
+  // 状態機械だけが idle へ戻って録画が取り残され、録画済みクリップを持つ状態
+  // (preview / posted / degraded) で変えると、実時間を払った成果物への参照ごと
+  // 失う。捨てられる状態になるまで待つ
+  if (lastKind !== "idle" && lastKind !== "ready") {
+    pendingMode = next;
+    setStatus("いまは切り替えられません。録画や投稿が済んでから切り替えます");
+    return;
+  }
+
+  pendingMode = null;
   mode = next;
   // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
   // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
@@ -585,7 +610,7 @@ function renderActions(kind: ClipState["kind"]): void {
         },
       );
       // 押しても弾かれるだけの録画は押させない。一覧の合計表示と理由を揃える
-      if (action === "record" && totalSec(currentSegments) > maxClipSec) {
+      if (action === "record" && isOverLimit(currentSegments, maxClipSec)) {
         button.disabled = true;
         button.title = `合計が上限 ${maxClipSec} 秒を超えています`;
       }
@@ -661,6 +686,13 @@ function applyStateToDisplay(state: ClipState): void {
     maxClipSec,
   );
 
+  lastKind = state.kind;
+  // 待たせていた切り替えを拾う。`applyMode` はバーを作り直すので、
+  // 画面の更新をひととおり終えてから呼ぶ
+  if (pendingMode !== null) {
+    applyMode(pendingMode);
+  }
+
   if (current !== null && (drifted || busy)) {
     try {
       rangeBar?.update(current, getVideo().duration);
@@ -734,7 +766,7 @@ async function prepareRecording(
     // **合計で見る。区間ごとではない。** 区間ごとに上限を見ると、10 秒の
     // 区間を 10 個作れてしまい、X の上限を超えたクリップができる
     const sum = Math.round(totalSec(currentSegments));
-    if (sum > maxClipSec) {
+    if (isOverLimit(currentSegments, maxClipSec)) {
       send({ type: "FAIL", reason: "internal-error" });
       setStatus(`合計 ${sum} 秒は上限 ${maxClipSec} 秒を超えています`);
       return;

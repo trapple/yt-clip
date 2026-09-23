@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { indexAt, normalize, toSourceTime, totalSec } from "@/shared/timeline";
+import {
+  indexAt,
+  isOverLimit,
+  normalize,
+  toSourceTime,
+  totalSec,
+} from "@/shared/timeline";
 import type { ClipRange } from "@/shared/types";
 
 const seg = (startSec: number, endSec: number): ClipRange => ({
@@ -120,5 +126,22 @@ describe("toSourceTime", () => {
 
   test("空配列なら null", () => {
     expect(toSourceTime([], 0)).toBeNull();
+  });
+});
+
+describe("isOverLimit", () => {
+  test("合計が上限以内なら通す", () => {
+    expect(isOverLimit([seg(0, 30), seg(100, 130)], 60)).toBe(false);
+  });
+
+  test("合計が上限を超えたら弾く", () => {
+    expect(isOverLimit([seg(0, 30), seg(100, 131)], 60)).toBe(true);
+  });
+
+  test("丸めてから比べる", () => {
+    // 表示は「合計 60秒 / 60秒」になる。ここで弾くと、押せない理由が
+    // 画面のどこにも出ない状態ができる
+    expect(isOverLimit([seg(0, 60.4)], 60)).toBe(false);
+    expect(isOverLimit([seg(0, 60.5)], 60)).toBe(true);
   });
 });
