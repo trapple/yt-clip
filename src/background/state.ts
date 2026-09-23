@@ -121,6 +121,15 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
 
   if (event.type === "ADD_SEGMENT") {
     if (BUSY_KINDS.has(state.kind)) return invalid(state);
+
+    // **結合できるのは同じ動画の中だけ。** SPA 遷移で別の動画へ移ってから
+    // 足すと、B の映像を A の秒で切ったクリップに A のタイトルと URL が
+    // 付いて投稿される。混ぜずに作り直す (MARK_IN と同じ結果)
+    const previousMeta = metaOf(state);
+    if (previousMeta !== null && previousMeta.videoId !== event.meta.videoId) {
+      return readyWith([event.range], event.meta);
+    }
+
     // idle からは MARK_IN と同じ結果になる。posted からはクリップが外れる
     return readyWith([...segmentsOf(state), event.range], event.meta);
   }

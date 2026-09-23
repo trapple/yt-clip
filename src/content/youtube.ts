@@ -257,7 +257,8 @@ function applyRange(range: ClipRange, videoDurationSec: number): void {
   // 範囲が変われば、前の範囲を見ている監視は用済み
   cancelPreviewWatch();
 
-  // シンプルモードの楽観描画。エディットは結果が並べ替えで変わるので通らない
+  // **シンプルモードの楽観描画専用。** `currentSegments` を 1 つに倒して
+  // `selectedIndex` を 0 にするので、エディットからは呼ばない
   currentSegments = [range];
   selectedIndex = 0;
   rangeBar?.update(range, videoDurationSec);
@@ -385,14 +386,22 @@ function onMarkOut(): void {
     return;
   }
 
+  // **`applyRange` より先に index を取る。** `applyRange` は単一区間の
+  // 楽観描画なので `selectedIndex` を 0 に倒す。後で読むと、2 番目の区間を
+  // 選んで OUT を押しても先頭区間が伸び、全区間がマージされて溶ける
+  const index = selectedIndex;
+
+  // エディットでは楽観的に描かない。並べ替えとマージで結果が変わるので、
+  // 状態機械の答えを待ってから描く (`onMarkIn` と同じ理由)
+  if (mode === "edit") {
+    send({ type: "MARK_OUT", index, sec: next.endSec });
+    return;
+  }
+
   applyRange(next, video.duration);
   send(
-    { type: "MARK_OUT", index: selectedIndex, sec: next.endSec },
-    // エディットでは並べ替えとマージで結果が変わる。確定は待たず、
-    // 状態機械から返る state/changed に任せる
-    mode === "edit"
-      ? undefined
-      : (state) => state.kind === "ready" && firstMatches(state.segments, next),
+    { type: "MARK_OUT", index, sec: next.endSec },
+    (state) => state.kind === "ready" && firstMatches(state.segments, next),
   );
 }
 
@@ -852,6 +861,12 @@ async function advanceToSegment(
     await seekTo(video, segment.startSec);
     await startPlayback(video);
     await waitForFreshFrame(video);
+
+    // **待っている間に録画が捨てられていないか確かめる。** 中止や失敗で
+    // `abortRecording` が走ると `handle` は差し替わる。止まった recorder に
+    // `resume()` を投げると throw し、`ready` へ戻ったはずの状態が
+    // `seek-failed` に落ちる。録り直しで始まった新しい録画を巻き込むこともある
+    if (handle !== recorder) return;
 
     // **区間ごとに広告を見る。** 録画開始前の 1 回だけでは、この間に始まった
     // ミッドロールを拾えない。部分的に広告が混ざったクリップを残すより、

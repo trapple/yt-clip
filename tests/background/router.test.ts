@@ -1121,3 +1121,25 @@ describe("content script の読み込み", () => {
     expect(h.router.getState()).toMatchObject({ kind: "ready", segments, meta });
   });
 });
+
+describe("エディットモードの録画対象タブ", () => {
+  test("区間を足したタブが録画対象になる", async () => {
+    // エディットモードの最初の区間は MARK_IN ではなく ADD_SEGMENT で作られる。
+    // ここでタブを覚えないと、新しいブラウザセッション (session storage が空)
+    // では captureTabId が null のまま録画に進み、指示がどこへも飛ばない
+    const h = makeHarness();
+
+    await h.router.handle(
+      { type: "clip/event", event: { type: "ADD_SEGMENT", range, meta } },
+      7,
+    );
+    await h.router.handle(
+      { type: "clip/event", event: { type: "START_RECORDING" } },
+      7,
+    );
+
+    expect(h.sentToTab).toContainEqual(
+      expect.objectContaining({ tabId: 7 }),
+    );
+  });
+});

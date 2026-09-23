@@ -502,3 +502,25 @@ describe("複数区間", () => {
     expect(reduce(failed, { type: "RETRY" })).toEqual({ kind: "idle" });
   });
 });
+
+describe("動画をまたいだ区間の追加", () => {
+  const otherMeta = makeVideoMeta({ videoId: "video-b", title: "動画 B" });
+  const otherRange: ClipRange = { startSec: 5, endSec: 15 };
+
+  test("別の動画の区間を足したら作り直す", () => {
+    // 結合できるのは同じ動画の中だけ。混ぜると、B の映像を A の秒で切った
+    // クリップに A のタイトルと URL が付いて投稿される
+    expect(
+      reduce(ready, { type: "ADD_SEGMENT", range: otherRange, meta: otherMeta }),
+    ).toEqual({ kind: "ready", segments: [otherRange], meta: otherMeta });
+  });
+
+  test("同じ動画なら今までどおり足す", () => {
+    const second: ClipRange = { startSec: 100, endSec: 120 };
+    expect(reduce(ready, { type: "ADD_SEGMENT", range: second, meta })).toEqual({
+      kind: "ready",
+      segments: [range, second],
+      meta,
+    });
+  });
+});

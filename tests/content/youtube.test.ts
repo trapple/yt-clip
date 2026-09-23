@@ -1245,6 +1245,23 @@ describe("複数区間の録画", () => {
     expect(recorder.state).toBe("inactive");
   });
 
+  test("区間の間で中止した後、シークが完了しても失敗にしない", async () => {
+    await startTwoSegments();
+
+    video.advanceFrame(98);
+    await flush();
+    emit({ kind: "ready", segments: TWO, meta: META_A });
+    await flush();
+    sent = [];
+
+    // 中止を待っている間にシークと再生が完了する。止まった recorder に
+    // resume を投げると throw し、ready に戻ったはずの状態が failed に落ちる
+    video.advanceFrame(242);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+  });
+
   test("区間の進みを status に出す", async () => {
     await startTwoSegments();
 
@@ -1304,5 +1321,40 @@ describe("シークバーの帯", () => {
     await flush();
 
     expect(overlay()).toBeNull();
+  });
+});
+
+describe("エディットモードの OUT", () => {
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  test("選んでいる区間の index を送る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 83, endSec: 98 },
+        { startSec: 242, endSec: 250 },
+      ],
+      meta: META_A,
+    });
+    await flush();
+
+    // 2 番目を選んでから OUT を押す
+    segmentRows()[1]?.click();
+    await flush();
+    video.element.currentTime = 246;
+    sent = [];
+    clickButton("OUT");
+    await flush();
+
+    // index 0 を送ると先頭区間が 83-246 に伸び、全区間がマージされて
+    // 「OUT を押したら区間が全部 1 つに溶けた」ことになる
+    expect(clipEvents()).toContainEqual({
+      type: "MARK_OUT",
+      index: 1,
+      sec: 246,
+    });
   });
 });
