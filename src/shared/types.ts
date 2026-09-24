@@ -59,6 +59,11 @@ export type FailureReason =
    * SPA 遷移で動画が入れ替わると、範囲もタイトルも URL も別の動画のものになる
    */
   | "video-changed"
+  /**
+   * テロップを描く canvas に動画を描けない。**テロップなしで録って続行しない。**
+   * 実時間を払った後で「テロップが入っていない」と気付くことになる
+   */
+  | "telop-render-failed"
   /** 状態機械の不正遷移など、ユーザー起因ではない内部エラー */
   | "internal-error";
 
@@ -77,19 +82,25 @@ export const FAILURE_MESSAGES: Record<FailureReason, string> = {
   "recording-aborted": "録画が中断されました",
   "drm-protected": "この動画は保護されているため録画できません",
   "video-changed": "動画が切り替わりました。IN を押し直してください",
+  "telop-render-failed": "テロップを動画に描けませんでした",
   "internal-error": "内部エラーが発生しました",
 };
 
 export type ClipState =
   | { kind: "idle" }
-  | { kind: "ready"; segments: ClipRange[]; meta: VideoMeta }
-  | { kind: "seeking"; segments: ClipRange[]; meta: VideoMeta }
-  | { kind: "recording"; segments: ClipRange[]; meta: VideoMeta }
-  | { kind: "encoding"; segments: ClipRange[]; meta: VideoMeta }
+  /**
+   * `telops` は `segments` と同じ階層に置く (エディット spec §0.1 で予告していた形)。
+   * 区間と違い、空配列でも `ready` になれる (テロップの無いクリップは普通)
+   */
+  | { kind: "ready"; segments: ClipRange[]; telops: Telop[]; meta: VideoMeta }
+  | { kind: "seeking"; segments: ClipRange[]; telops: Telop[]; meta: VideoMeta }
+  | { kind: "recording"; segments: ClipRange[]; telops: Telop[]; meta: VideoMeta }
+  | { kind: "encoding"; segments: ClipRange[]; telops: Telop[]; meta: VideoMeta }
   | {
       kind: "preview";
       clipId: string;
       segments: ClipRange[];
+      telops: Telop[];
       meta: VideoMeta;
       mimeType: string;
     }
@@ -103,6 +114,7 @@ export type ClipState =
   | {
       kind: "posted";
       segments: ClipRange[];
+      telops: Telop[];
       meta: VideoMeta;
       clipId: string;
       mimeType: string;
@@ -111,6 +123,7 @@ export type ClipState =
       kind: "composing";
       clipId: string;
       segments: ClipRange[];
+      telops: Telop[];
       meta: VideoMeta;
       mimeType: string;
     }
@@ -118,6 +131,7 @@ export type ClipState =
       kind: "degraded";
       clipId: string;
       segments: ClipRange[];
+      telops: Telop[];
       meta: VideoMeta;
       mimeType: string;
       reason: DegradedReason;
@@ -132,6 +146,7 @@ export type ClipState =
       kind: "failed";
       reason: FailureReason;
       segments: ClipRange[];
+      telops: Telop[];
       meta: VideoMeta | null;
     };
 
@@ -160,6 +175,11 @@ export type ClipEvent =
   /** 拡大バーでのドラッグ結果。取りこぼしでずれないよう常に両端を送る */
   | { type: "ADJUST_SEGMENT"; index: number; range: ClipRange }
   | { type: "REMOVE_SEGMENT"; index: number }
+  /** テロップを 1 つ足す。末尾に付く */
+  | { type: "ADD_TELOP"; telop: Telop }
+  /** 指したテロップを丸ごと差し替える。取りこぼしでずれないよう常に全項目を送る */
+  | { type: "UPDATE_TELOP"; index: number; telop: Telop }
+  | { type: "REMOVE_TELOP"; index: number }
   | { type: "RESET_MARKS" }
   | { type: "START_RECORDING" }
   | { type: "SEEK_DONE" }

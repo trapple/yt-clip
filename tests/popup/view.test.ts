@@ -14,20 +14,20 @@ describe("マーク前後", () => {
   });
 
   test("ready では録画と取り消しができる", () => {
-    const view = describeState({ kind: "ready", segments, meta });
+    const view = describeState({ kind: "ready", segments, telops: [], meta });
     expect(view.message).toBe("0:10 〜 0:40 (30秒) を録画できます");
   });
 });
 
 describe("録画中", () => {
   test("seeking は準備中として操作を止める", () => {
-    const view = describeState({ kind: "seeking", segments, meta });
+    const view = describeState({ kind: "seeking", segments, telops: [], meta });
     expect(view.message).toBe("開始位置へ移動しています…");
     expect(view.busy).toBe(true);
   });
 
   test("recording はクリップの長さを返し popup が残りを数える", () => {
-    const view = describeState({ kind: "recording", segments, meta });
+    const view = describeState({ kind: "recording", segments, telops: [], meta });
     expect(view.message).toBe("録画中…");
     expect(view.busy).toBe(true);
     expect(view.recordingSec).toBe(30);
@@ -36,15 +36,15 @@ describe("録画中", () => {
   test("録画中以外は残り時間を数えない", () => {
     expect(describeState({ kind: "idle" }).recordingSec).toBeNull();
     expect(
-      describeState({ kind: "seeking", segments, meta }).recordingSec,
+      describeState({ kind: "seeking", segments, telops: [], meta }).recordingSec,
     ).toBeNull();
     expect(
-      describeState({ kind: "encoding", segments, meta }).recordingSec,
+      describeState({ kind: "encoding", segments, telops: [], meta }).recordingSec,
     ).toBeNull();
   });
 
   test("encoding は書き出し中として扱う", () => {
-    const view = describeState({ kind: "encoding", segments, meta });
+    const view = describeState({ kind: "encoding", segments, telops: [], meta });
     expect(view.message).toBe("録画を書き出しています…");
     expect(view.busy).toBe(true);
   });
@@ -55,6 +55,7 @@ describe("プレビューと投稿", () => {
     kind: "preview",
     clipId: "clip-1",
     segments,
+    telops: [],
     meta,
     mimeType: "video/mp4",
   };
@@ -69,6 +70,7 @@ describe("プレビューと投稿", () => {
       kind: "composing",
       clipId: "clip-1",
       segments,
+      telops: [],
       meta,
       mimeType: "video/mp4",
     });
@@ -83,6 +85,7 @@ describe("degraded path", () => {
       kind: "degraded",
       clipId: "clip-1",
       segments,
+      telops: [],
       meta,
       mimeType: "video/webm",
       reason: "mp4-unsupported",
@@ -98,6 +101,7 @@ describe("degraded path", () => {
       kind: "degraded",
       clipId: "clip-1",
       segments,
+      telops: [],
       meta,
       mimeType: "video/mp4",
       reason: "x-attach-failed",
@@ -122,7 +126,7 @@ describe("失敗", () => {
     ] as const;
 
     for (const [reason, message] of cases) {
-      const view = describeState({ kind: "failed", reason, segments, meta });
+      const view = describeState({ kind: "failed", reason, segments, telops: [], meta });
       expect(view.message).toBe(message);
     }
   });
@@ -134,10 +138,10 @@ describe("popup は操作を持たない", () => {
     // 状態を見る場所として残している
     const states: ClipState[] = [
       { kind: "idle" },
-      { kind: "ready", segments, meta },
-      { kind: "preview", segments, meta, clipId: "c", mimeType: "video/mp4" },
-      { kind: "posted", segments, meta, clipId: "c", mimeType: "video/mp4" },
-      { kind: "failed", reason: "internal-error", segments, meta },
+      { kind: "ready", segments, telops: [], meta },
+      { kind: "preview", segments, telops: [], meta, clipId: "c", mimeType: "video/mp4" },
+      { kind: "posted", segments, telops: [], meta, clipId: "c", mimeType: "video/mp4" },
+      { kind: "failed", reason: "internal-error", segments, telops: [], meta },
     ];
 
     for (const state of states) {
@@ -151,6 +155,7 @@ describe("popup は操作を持たない", () => {
       describeState({
         kind: "posted",
         segments,
+        telops: [],
         meta,
         clipId: "c",
         mimeType: "video/mp4",
@@ -166,19 +171,19 @@ describe("複数区間の表示", () => {
   ];
 
   test("1 区間なら今までどおり範囲で出す", () => {
-    const view = describeState({ kind: "ready", segments, meta });
+    const view = describeState({ kind: "ready", segments, telops: [], meta });
     expect(view.message).toContain("0:10");
     expect(view.message).toContain("0:40");
   });
 
   test("複数区間なら区間数と合計で出す", () => {
-    const view = describeState({ kind: "ready", segments: two, meta });
+    const view = describeState({ kind: "ready", segments: two, telops: [], meta });
     expect(view.message).toBe("2 区間 / 23 秒 を録画できます");
   });
 
   test("録画中の長さは合計で数える", () => {
     // 元動画上の幅 (242-83=159) ではない
-    const view = describeState({ kind: "recording", segments: two, meta });
+    const view = describeState({ kind: "recording", segments: two, telops: [], meta });
     expect(view.recordingSec).toBe(23);
   });
 
@@ -186,6 +191,7 @@ describe("複数区間の表示", () => {
     const view = describeState({
       kind: "posted",
       segments: two,
+      telops: [],
       meta,
       clipId: "c",
       mimeType: "video/mp4",

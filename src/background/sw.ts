@@ -1,4 +1,5 @@
 import { createRouter, type RouterSnapshot } from "@/background/router";
+import { normalizeSnapshot } from "@/background/snapshot";
 import { getClip, saveClip } from "@/background/storage";
 import type { Message } from "@/shared/messages";
 import { loadSettings } from "@/shared/settings";
@@ -8,7 +9,7 @@ const COMPOSE_URL = "https://x.com/compose/post";
 
 async function loadSnapshot(): Promise<RouterSnapshot | undefined> {
   const stored = await chrome.storage.session.get(SESSION_KEY);
-  return stored[SESSION_KEY] as RouterSnapshot | undefined;
+  return normalizeSnapshot(stored[SESSION_KEY] as RouterSnapshot | undefined);
 }
 
 // service worker は停止しうるため、保存済みの状態から復元して組み立てる
