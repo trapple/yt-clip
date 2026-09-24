@@ -655,3 +655,8 @@ Phase 2 の spec で扱うことが分かっている論点 (ここでは決め�
 - [未決] 非表示タブで止まるかは §9-4 で検証する — 暫定: 止まるなら中断 (可逆)
 - [選択] 実装スタイル: D (branch + SDD) — 独立タスクが 3 つ以上 (状態機械 / 設定 / 描画 / 合成 / UI)、
   main の作業ツリーは spec 以外きれいで並行作業も無い
+- [plan] `.claude/plans/2026-09-24-telop-phase1.md` (12 タスク)。ユーザーの要望で Task 1 (実機検証) と Task 12 (通し確認) を
+  Claude in Chrome による自動実行にした (映像に元動画の秒を格子で書き込み、出力から読み戻して判定する)
+- [review:plan/ゼロ context の実装者/fable] 1 往復目 Issues 3 件 (normalizeSnapshot の型エラー / Task 11 で Task 8 のテストが
+  落ちる / Task 10 の「両方止まる」分岐にコードが無い) → 修正。2 往復目 Issues 2 件 (DOM に無い video では rVFC が
+  ほとんど来ない / 新タブが前面に出る保証が無い) → 修正。3 往復目 Approved。Recommendations は全て取り込み
