@@ -1095,10 +1095,11 @@ test("テロップの実機確認", async () => {
       };
     });
     const saved = await readWindowLayout();
-    // バーの最初の位置: プレイヤーの下端 + 8px。収まらなければ画面の下端から 16px
-    // (window-layout.ts の initialBarRect)。パネルは右 16px・上 68px・幅 400px (side-panel.ts)
+    // バーの最初の位置: プレイヤーの下端 + 8px。収まらなければ画面の下端から 16px。
+    // ヘッダーの下 (68px) より上には置かない (window-layout.ts の initialBarRect)。
+    // パネルは右 16px・上 68px・幅 400px (side-panel.ts)
     const expectedBarTop = Math.max(
-      0,
+      68,
       Math.min(measured.player.bottom + 8, measured.innerHeight - 16 - measured.bar.height),
     );
     record(
