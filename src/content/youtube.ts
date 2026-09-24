@@ -973,6 +973,13 @@ async function prepareRecording(
       : null;
     if (recordingTelops !== null) {
       assertTelopRenderable(getVideo());
+      // 隠れたまま始めると、最初のフレームから映像が止まる
+      if (document.hidden) {
+        recordingTelops = null;
+        send({ type: "FAIL", reason: "telop-tab-hidden" });
+        setStatus(FAILURE_MESSAGES["telop-tab-hidden"]);
+        return;
+      }
     }
 
     // **繋ぎ目の検査もここで済ませる。** 区間の間で初めて気付くと、既に
@@ -1053,7 +1060,14 @@ async function beginRecording(): Promise<void> {
     videoOverride =
       telops === null
         ? undefined
-        : startCompositor(video, telops.telops, telops.style);
+        : startCompositor(video, telops.telops, telops.style, undefined, {
+            // 区間の間の広告検査と同じく FAIL で落とす。状態が recording を離れると
+            // state/changed の処理が abortRecording を呼び、合成も解放される
+            onHidden: () => {
+              send({ type: "FAIL", reason: "telop-tab-hidden" });
+              setStatus(FAILURE_MESSAGES["telop-tab-hidden"]);
+            },
+          });
     handle = await startRecording(video, mimeType, {
       videoOverride,
       onUnexpectedStop: (error) => {

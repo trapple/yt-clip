@@ -1840,6 +1840,50 @@ describe("テロップ付きの録画", () => {
     expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
     expect(statusText()).toContain("テロップを動画に描けませんでした");
   });
+
+  function setHidden(hidden: boolean): void {
+    Object.defineProperty(document, "hidden", { configurable: true, value: hidden });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  afterEach(() => {
+    setHidden(false);
+  });
+
+  test("録画を始める前にタブが隠れていたら始めない", async () => {
+    // 隠れたまま始めると、最初のフレームから映像が止まる
+    installCanvas();
+    setHidden(true);
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
+  });
+
+  test("録画中にタブが隠れたら中断する", async () => {
+    installCanvas();
+    await recordWith([TELOP]);
+    sent = [];
+
+    setHidden(true);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+  });
+
+  test("テロップの無い録画では隠れても中断しない", async () => {
+    // 今の経路は隠れても映像が止まらない (§9.1)
+    await recordWith([]);
+    sent = [];
+
+    setHidden(true);
+    await flush();
+
+    expect(clipEvents()).not.toContainEqual(expect.objectContaining({ type: "FAIL" }));
+  });
 });
 
 describe("テロップの一覧", () => {

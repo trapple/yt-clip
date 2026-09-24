@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   TelopRenderError,
   assertTelopRenderable,
@@ -182,5 +182,40 @@ describe("startCompositor", () => {
     compositor.release();
     fake.frame(7);
     expect(log.requested).toBe(before);
+  });
+});
+
+describe("タブが隠れたとき", () => {
+  function setHidden(hidden: boolean): void {
+    Object.defineProperty(document, "hidden", { configurable: true, value: hidden });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  test("隠れたら onHidden を呼ぶ", () => {
+    const fake = makeVideo();
+    const { canvas } = makeCanvas();
+    const onHidden = vi.fn();
+    startCompositor(fake.video, [], STYLE, { createCanvas: () => canvas }, { onHidden });
+    setHidden(true);
+    expect(onHidden).toHaveBeenCalledOnce();
+    setHidden(false);
+  });
+
+  test("release の後は呼ばない", () => {
+    // 録画が終わった後に FAIL を送らない
+    const fake = makeVideo();
+    const { canvas } = makeCanvas();
+    const onHidden = vi.fn();
+    const compositor = startCompositor(
+      fake.video,
+      [],
+      STYLE,
+      { createCanvas: () => canvas },
+      { onHidden },
+    );
+    compositor.release();
+    setHidden(true);
+    expect(onHidden).not.toHaveBeenCalled();
+    setHidden(false);
   });
 });

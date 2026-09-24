@@ -64,6 +64,12 @@ export type FailureReason =
    * 実時間を払った後で「テロップが入っていない」と気付くことになる
    */
   | "telop-render-failed"
+  /**
+   * テロップ付きの録画中にタブが隠れた。隠れたタブでは canvas の映像が止まり、
+   * 音声だけ進むクリップになる (テロップ spec §4.3、§9.1 で確認)。壊れたクリップを
+   * 作ってから気付かせるより、中断して録り直させる
+   */
+  | "telop-tab-hidden"
   /** 状態機械の不正遷移など、ユーザー起因ではない内部エラー */
   | "internal-error";
 
@@ -83,6 +89,8 @@ export const FAILURE_MESSAGES: Record<FailureReason, string> = {
   "drm-protected": "この動画は保護されているため録画できません",
   "video-changed": "動画が切り替わりました。IN を押し直してください",
   "telop-render-failed": "テロップを動画に描けませんでした",
+  "telop-tab-hidden":
+    "テロップ付きの録画中はタブを表示したままにしてください。もう一度録り直してください",
   "internal-error": "内部エラーが発生しました",
 };
 

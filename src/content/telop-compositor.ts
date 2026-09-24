@@ -16,6 +16,11 @@ export type CompositorDeps = {
   createCanvas(): HTMLCanvasElement;
 };
 
+export type CompositorOptions = {
+  /** 録画中にタブが隠れた。呼ばれるのは release の前だけ */
+  onHidden(): void;
+};
+
 const defaultDeps: CompositorDeps = {
   createCanvas: () => document.createElement("canvas"),
 };
@@ -105,6 +110,7 @@ export function startCompositor(
   telops: Telop[],
   style: TelopStyle,
   deps: CompositorDeps = defaultDeps,
+  options?: CompositorOptions,
 ): Compositor {
   const { canvas, ctx, width, height } = prepareSurface(video, deps);
   const resolved = resolveTelopStyle(ctx, style);
@@ -135,6 +141,13 @@ export function startCompositor(
   paint(video.currentTime);
   handle = target.requestVideoFrameCallback(tick);
 
+  // **監視は release で外す。** 外し忘れると、録画が終わった後にタブを切り替えた
+  // だけで FAIL が飛ぶ
+  const onVisibilityChange = (): void => {
+    if (!released && document.hidden) options?.onHidden();
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
   return {
     track,
     release(): void {
@@ -142,6 +155,7 @@ export function startCompositor(
       released = true;
       target.cancelVideoFrameCallback(handle);
       track.stop();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     },
   };
 }
