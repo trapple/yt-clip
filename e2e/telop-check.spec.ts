@@ -49,6 +49,13 @@ const SEGMENTS = [
  * よう 30 秒ずつ離す。合計は上限 (60 秒) を超えるが、録画はしないので構わない
  */
 const LAYOUT_SEGMENT_STARTS = [200, 230, 260, 290, 320];
+/**
+ * 受け入れ条件の確認で足す 5 つのテロップの頭 (フロートの窓の spec A.4 / B)。**後ろの 3 つは同じ時刻に
+ * 重ねる**: 最後に足した区間 (320〜335) が拡大バーに選ばれていて、その窓 (312.5〜342.5) に 3 つが
+ * 重なって入るので、帯の段が最大 (2 段 + 「+1」) になる。前の 2 つのうち 201 は帯の確認 (区間 1 を
+ * 選び直して動かす) に使う。231 は区間 2 の中に置き、5 つの数を揃えるだけ
+ */
+const LAYOUT_TELOP_STARTS = [201, 231, 321, 321, 321];
 /** 1 つは 2 行にして、行の積み方も画像で見られるようにする */
 const TELOPS = [
   { startSec: 60.5, text: "テロップの確認\n2 行目です" },
@@ -863,7 +870,7 @@ test("テロップの実機確認", async () => {
   // プレイヤーの下に重ならずに収まり、一覧はパネルの窓の中で届く -----------------------------
   // 1920x1080 の確認がすべて済んでから切り替え、最後に戻す
   await check(
-    "受け入れ条件 1440x795: バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
+    "受け入れ条件 1440x795: 帯の段が最大 (2 段 + 「+N」) でも、バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
     async () => {
       // **先にページを先頭へ戻す。** 動かしていない窓は viewport が変わったときのプレイヤーの
       // 画面上の位置で最初の位置を取り直し、スクロールでは取り直さない (spec A.2)
@@ -878,8 +885,9 @@ test("テロップの実機確認", async () => {
           await button("＋ 区間を追加").click();
           await expect(segmentRows).toHaveCount(i + 1);
         }
-        for (const [i, startSec] of LAYOUT_SEGMENT_STARTS.entries()) {
-          await seekPaused(startSec + 1);
+        // 3 つを同じ時刻に重ねて、帯の段を最大 (2 段 + 「+1」) にしてから測る (spec A.4)
+        for (const [i, startSec] of LAYOUT_TELOP_STARTS.entries()) {
+          await seekPaused(startSec);
           await panel.locator("[data-role=add-telop]").click();
           await expect(telopRows).toHaveCount(i + 1);
         }
@@ -914,6 +922,16 @@ test("テロップの実機確認", async () => {
             playerRight: p.right,
             bodyScrollHeight: body.scrollHeight,
             bodyClientHeight: body.clientHeight,
+            // 帯の段 (spec B): 出ている帯の数・使っている段の数・「+N」。最大 (2 段 + 「+1」) の
+            // 状態で測っていることを確かめる (段が出ていないまま通ると、B の予算を測っていない)
+            telopBands: document.querySelectorAll("#yt-clip-bar [data-role=telop-band]").length,
+            telopLanes: new Set(
+              [
+                ...document.querySelectorAll<HTMLElement>("#yt-clip-bar [data-role=telop-band]"),
+              ].map((band) => band.dataset.lane),
+            ).size,
+            telopOverflow:
+              document.querySelector("#yt-clip-bar [data-role=telop-overflow]")?.textContent ?? "",
           };
         });
         // **記録だけ (合否には入れない)。** 落ちたときに「最初の位置のままか、動かした窓か」を
@@ -925,7 +943,7 @@ test("テロップの実機確認", async () => {
         const file = join(OUT_DIR, "layout-1440x795.png");
         await page.screenshot({ path: file });
         record(
-          "受け入れ条件 1440x795: バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
+          "受け入れ条件 1440x795: 帯の段が最大 (2 段 + 「+N」) でも、バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
           measured.scrollY === 0 &&
             measured.playerBottom <= measured.bar.top &&
             measured.bar.bottom <= measured.innerHeight &&
@@ -933,7 +951,10 @@ test("テロップの実機確認", async () => {
             measured.panel.left >= 0 &&
             measured.panel.right <= measured.innerWidth &&
             measured.panel.bottom <= measured.innerHeight &&
-            measured.bodyScrollHeight > measured.bodyClientHeight,
+            measured.bodyScrollHeight > measured.bodyClientHeight &&
+            measured.telopBands === 2 &&
+            measured.telopLanes === 2 &&
+            measured.telopOverflow === "+1",
           { ...measured, windowLayout, file },
         );
       } finally {
@@ -1114,6 +1135,121 @@ test("テロップの実機確認", async () => {
         !("bar" in saved) &&
         !("panel" in saved),
       { ...measured, expectedBarTop, saved },
+    );
+  });
+
+  // --- 拡大バー上のテロップの帯 (フロートの窓の spec B.4) ---------------------------------
+  // 窓の確認の後 (2 つの窓は最初の位置に戻っている)。受け入れ条件の確認で足した区間 5 つと
+  // テロップ 5 つ (201・231・321×3) が残っている。区間 1 (200〜215) を選び直すと拡大バーの窓は
+  // 192.5〜222.5 になり、テロップ 1 (201〜204) だけが帯で出る (ほかの帯と重ならない)
+  type TelopTimes = { startSec: number; endSec: number; text: string };
+
+  /** 状態機械が持つテロップ (service worker が chrome.storage.session に置く写し。sw.ts の SESSION_KEY) */
+  async function readTelops(): Promise<TelopTimes[]> {
+    const worker = await getWorker();
+    return worker.evaluate(async () => {
+      const stored = await chrome.storage.session.get("router-snapshot");
+      const snapshot = stored["router-snapshot"] as
+        | { state?: { telops?: { startSec: number; endSec: number; text: string }[] } }
+        | undefined;
+      return snapshot?.state?.telops ?? [];
+    });
+  }
+
+  async function firstTelop(): Promise<TelopTimes> {
+    const telop = (await readTelops())[0];
+    if (telop === undefined) throw new Error("テロップ 1 がありません");
+    return telop;
+  }
+
+  /**
+   * テロップ 1 の時刻が before から変わるまで待って返す (10 秒で諦めて、その時点の値を返す。合否は
+   * 呼び出し側の record が決める)。**dragFromTo の末尾の 500ms は窓の位置の保存 (chrome.storage.local)
+   * を待つためのもの**で、帯の UPDATE_TELOP が状態機械に届いて chrome.storage.session に保存される
+   * までを待つ保証にはならない。遅い環境で古い値を読まないよう、変わるまで読み直す
+   */
+  async function waitTelopChanged(before: TelopTimes): Promise<TelopTimes> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const now = await firstTelop();
+      if (now.startSec !== before.startSec || now.endSec !== before.endSec) return now;
+      if (Date.now() > deadline) return now;
+      await page.waitForTimeout(200);
+    }
+  }
+
+  /** m:ss (拡大バー・一覧と同じ書き方。この動画は 1 時間未満) */
+  const clock = (sec: number) =>
+    `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+  const firstBand = bar.locator("[data-role=telop-band][data-index='0']");
+
+  await check("帯の中をドラッグすると長さを保って動き、一覧の時刻も変わる", async () => {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    // 区間 1 を選ぶ。行の左の文字 (区間の時刻) を押す。右の ▶ / ✕ を押すと再生・削除になる
+    await segmentRows.nth(0).locator("span").first().click();
+    await expect(firstBand).toBeVisible({ timeout: 10_000 });
+    // 帯のドラッグ中のシークは video.currentTime への直接の書き込み (拡大バーのハンドルと同じ onScrub)。
+    // 直前の項目でページを読み込み直しているので、読み込んでいない位置へ直接飛ぶと YouTube のプレイヤーが
+    // 止まりうる (seekPaused のコメント)。先にプレイヤーの seekTo で近くを読み込ませておく
+    await seekPaused(201);
+    const before = await firstTelop();
+    const box = await boxOf(firstBand);
+    const from = centerOf(box);
+    // 帯の段は約 1180px で 30 秒 (約 39px/秒)。60px で 1.5 秒ほど後ろへ
+    await dragFromTo(from, { x: from.x + 60, y: from.y });
+    const after = await waitTelopChanged(before);
+    // 一覧の行の文言も状態の通知で描き直される。変わるまで待ってから読む (待ちきれなくても合否は record で見る)
+    await expect(telopRows.nth(0))
+      .toContainText(`${clock(after.startSec)} 〜 ${clock(after.endSec)}`, { timeout: 10_000 })
+      .catch(() => undefined);
+    const label = (await telopRows.nth(0).textContent()) ?? "";
+    record(
+      "帯の中をドラッグすると長さを保って動き、一覧の時刻も変わる",
+      after.startSec > before.startSec + 0.5 &&
+        Math.abs(after.endSec - after.startSec - (before.endSec - before.startSec)) < 0.01 &&
+        label.includes(`${clock(after.startSec)} 〜 ${clock(after.endSec)}`),
+      { before, after, label, box },
+    );
+  });
+
+  await check("帯の端をドラッグすると開始 / 終了だけが変わる", async () => {
+    const before = await firstTelop();
+    // 右端。端として掴めるのは min(6px, 帯の幅の 1/3)。端から 2px の所を掴む
+    const endBox = await boxOf(firstBand);
+    const endAt = { x: endBox.x + endBox.width - 2, y: endBox.y + endBox.height / 2 };
+    await dragFromTo(endAt, { x: endAt.x + 60, y: endAt.y });
+    const afterEnd = await waitTelopChanged(before);
+    // 左端
+    const startBox = await boxOf(firstBand);
+    const startAt = { x: startBox.x + 2, y: startBox.y + startBox.height / 2 };
+    await dragFromTo(startAt, { x: startAt.x - 40, y: startAt.y });
+    const afterStart = await waitTelopChanged(afterEnd);
+    record(
+      "帯の端をドラッグすると開始 / 終了だけが変わる",
+      afterEnd.startSec === before.startSec &&
+        afterEnd.endSec > before.endSec + 0.5 &&
+        afterStart.endSec === afterEnd.endSec &&
+        afterStart.startSec < afterEnd.startSec - 0.5,
+      { before, afterEnd, afterStart, endBox, startBox },
+    );
+  });
+
+  await check("帯を押して離すと、そのテロップの頭から再生する", async () => {
+    const telop = await firstTelop();
+    // テロップから離れた位置で止めておく (再生が始まった場所で、頭から再生したことを見分ける)
+    await seekPaused(212);
+    await firstBand.click();
+    await page.waitForTimeout(1000);
+    const played = await videoState();
+    await page.evaluate(() =>
+      document.querySelector<HTMLVideoElement>("video.html5-main-video")?.pause(),
+    );
+    record(
+      "帯を押して離すと、そのテロップの頭から再生する",
+      !played.paused &&
+        played.currentTime >= telop.startSec - 0.1 &&
+        played.currentTime < telop.startSec + 3,
+      { telop, ...played },
     );
   });
 
