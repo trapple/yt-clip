@@ -83,6 +83,9 @@ export type Telop = {
 - 検証は区間と同じ規則 (`startSec >= 0`、`endSec > startSec`、有限値)。不正な値は
   UI のバグなので throw する (握り潰さない。エディット spec の `assertValidRange` と同じ方針)
 - **ID は振らない。** 区間と同じく、作った順のまま持ち並べ替えないので index が動かない
+- **文言は 500 文字まで** (UTF-16 の長さ。絵文字は 2 と数える)。状態ごと `chrome.storage.session` に
+  保存され、毎フレーム描かれるため。状態機械 (`assertValidTelops`) と一覧 (送る前に理由を出す) の両側で守る
+  (whole-branch review で追加)
 - **どの区間にも入らないテロップも持てる。** 区間の外なので録画には出ない。一覧で
   「区間外」と示す (§5.2)。区間を後から伸ばせば出るようになるので、消さない
 
@@ -210,6 +213,8 @@ export function drawTelops(
   (依頼に無く、UI が大きく増える)
 - **複数が同時に出るときは、作った順に下から積む。** 重ねて描くと読めない
 - 改行 (`\n`) で行を分ける。行間はフォントサイズの 1.2 倍
+- **canvas の上に完全に出た行は描かない** (改行だらけの文言でも、描く行が「高さ ÷ 行間」で頭打ちになる。
+  whole-branch review で追加)
 - **自動折り返しはしない。** 幅からはみ出した分は切れる。はみ出しの判定と折り返しは
   日本語の禁則まで含めると重く、Phase 1 では手で改行してもらう (README の制約に書く)
 - 縁取りは `strokeText` を先に、`fillText` を後に描く (文字の内側が縁に食われない)。
@@ -686,3 +691,6 @@ Phase 2 の spec で扱うことが分かっている論点 (ここでは決め�
   ほとんど来ない / 新タブが前面に出る保証が無い) → 修正。3 往復目 Approved。Recommendations は全て取り込み
 - [検証] Task 1 を Claude in Chrome で実施。1〜3 は通過、4 は canvas 経由だけ止まる → Task 10 の A を実施。
   タブを隠す操作はツールでは効かなかったため、その 1 点だけユーザーに手で行ってもらった
+- [SDD] Task 2〜11 を subagent 駆動で実装 (各 task で spec + 品質のレビュー、指摘は fix して再レビュー)。
+  whole-branch review (fable / 保守担当 + 攻撃者) は 1 往復目 Needs fixes (Important 4) → まとめて修正 → Approved。
+  文言の上限 500 文字はこのとき採用 (可逆)。直さないと決めた Minor は .claude/sdd/telop/progress.md に記録
