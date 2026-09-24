@@ -439,10 +439,19 @@ function applyMode(next: ClipMode): void {
 
   pendingMode = null;
   mode = next;
+  // 作り直す前に開いていたかを覚えておく。バーを作り直すと設定パネルも
+  // 新しい隠れたものに替わるので、覚えておかないとモードを変えた瞬間に
+  // 設定 (シンプルならパネルごと) が消える。1 つのパネルを使い回す設計に
+  // なったので、開いたままにする
+  const settingsWasOpen = settingsPanel?.element.hidden === false;
   // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
   // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
   document.getElementById(BAR_ID)?.remove();
   mount();
+  // 開いていたなら、⚙ と同じ経路 (開く → refreshSidePanel → reveal → scrollTo)
+  // で新しい設定パネルを開き直す。保存済みの値は toggle の fill が入れ直すので、
+  // 未保存の入力は失われてよい (モード変更は設定の保存を経由するため保存済み)
+  if (settingsWasOpen) onToggleSettings();
 
   if (currentSegments.length > 0) {
     send({ type: "RESET_MARKS" });

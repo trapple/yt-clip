@@ -2418,6 +2418,28 @@ describe("右側のパネル", () => {
     expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
   });
 
+  test("設定を開いた状態でモードを変えても、設定は開いたまま", async () => {
+    // シンプルで ⚙ を開く
+    clickButton("⚙");
+    expect(settingsRoot().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    // バーを作り直すと設定パネルも新しいものに替わるが、開いていたなら
+    // 開き直しておく (1 つのパネルを使い回す設計で、モードを変えた瞬間に
+    // 設定が消えるのは驚きが大きい)
+    expect(settingsRoot().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+
+    changeSettings({ mode: "simple" });
+    await flush();
+
+    expect(settingsRoot().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+  });
+
   test("バーを作り直しても、手元の区間で一覧を描き直す", async () => {
     await showEdit([TELOP]);
 
