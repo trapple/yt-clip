@@ -11,6 +11,7 @@ const RECORDED_BYTES = buildFragmentedMp4({
 });
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -24,6 +25,7 @@ import {
   FAILURE_MESSAGES,
   type ClipRange,
   type ClipState,
+  type Telop,
 } from "@/shared/types";
 
 /**
@@ -60,6 +62,8 @@ type FakeRecorder = {
   onstop: (() => void) | null;
   /** 呼ばれた順。区間の繋ぎ方を順序ごと確かめる */
   calls: string[];
+  /** 録画に渡されたストリーム */
+  stream: unknown;
 };
 let recorders: FakeRecorder[] = [];
 /** captureStream のトラックが解放された回数 */
@@ -256,8 +260,10 @@ function installGlobals(): void {
     onerror: ((event: Event) => void) | null = null;
     onstop: (() => void) | null = null;
     readonly calls: string[] = [];
+    readonly stream: unknown;
 
-    constructor() {
+    constructor(stream: unknown) {
+      this.stream = stream;
       recorders.push(this);
     }
     start(): void {
@@ -1702,5 +1708,136 @@ describe("区間を消したときの選択", () => {
 
     expect(segmentRows()[0]?.dataset.selected).toBe("true");
     expect(statusText()).toContain("0:10");
+  });
+});
+
+describe("テロップ付きの録画", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+  let restoreCanvas: (() => void) | null = null;
+
+  /** canvas を描ける状態にする。tainted なら getImageData が SecurityError */
+  function installCanvas(options: { tainted?: boolean } = {}) {
+    const track = { kind: "video", requestFrame: () => undefined, stop: () => undefined };
+    const ctx = {
+      font: "10px sans-serif",
+      drawImage: () => undefined,
+      getImageData: () => {
+        if (options.tainted) throw new DOMException("tainted", "SecurityError");
+        return {};
+      },
+      clearRect: () => undefined,
+      save: () => undefined,
+      restore: () => undefined,
+      strokeText: () => undefined,
+      fillText: () => undefined,
+    };
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+    Object.defineProperty(HTMLCanvasElement.prototype, "captureStream", {
+      configurable: true,
+      value: () => ({ getVideoTracks: () => [track] }),
+    });
+    // mockRestore にしない。Task 11 で installGlobals に置く「既定は null」の spy まで
+    // 外れて jsdom の実装に戻り、以降のテストの出力に "Not implemented" が混ざる
+    restoreCanvas = () => getContext.mockReturnValue(null);
+    return { track };
+  }
+
+  beforeEach(() => {
+    // 合成の canvas は録画開始時の動画の大きさで作る。フェイクは高さしか持たない
+    Object.defineProperty(video.element, "videoWidth", {
+      configurable: true,
+      value: 1920,
+    });
+    vi.stubGlobal(
+      "MediaStream",
+      class {
+        constructor(readonly tracks: { kind: string }[] = []) {}
+        getTracks() {
+          return this.tracks;
+        }
+        getVideoTracks() {
+          return this.tracks.filter((track) => track.kind === "video");
+        }
+        getAudioTracks() {
+          return this.tracks.filter((track) => track.kind === "audio");
+        }
+      },
+    );
+  });
+
+  afterEach(() => {
+    restoreCanvas?.();
+    restoreCanvas = null;
+  });
+
+  /**
+   * seeking → recording → recorder/start と進める。
+   *
+   * **seeking を通すこと。** 経路の判定と描けるかの検査は prepareRecording
+   * (seeking を受けたとき) で行うので、recording から始めると合成を通らない
+   */
+  async function recordWith(telops: Telop[]): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops });
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops });
+    await flush();
+    command("recorder/start");
+    await flush();
+  }
+
+  test("区間に重なるテロップがあると canvas の映像で録る", async () => {
+    const { track } = installCanvas();
+
+    await recordWith([TELOP]);
+
+    const stream = startedRecorder().stream as { getVideoTracks(): unknown[] };
+    expect(stream.getVideoTracks()).toEqual([track]);
+  });
+
+  /**
+   * 録画が今の経路 (video.captureStream の映像) で録っているか。
+   *
+   * **canvas が作られたかでは見ない。** プレビュー (Task 11) は区間外のテロップ
+   * でも canvas を作るので、録画の経路とは関係なく canvas は現れる
+   */
+  function recordsCapturedVideo(): boolean {
+    const stream = startedRecorder().stream as {
+      getVideoTracks(): object[];
+    };
+    const tracks = stream.getVideoTracks();
+    return tracks.length === 1 && !tracks.some((track) => "requestFrame" in track);
+  }
+
+  test("テロップが無ければ今の経路のまま", async () => {
+    installCanvas();
+
+    await recordWith([]);
+
+    expect(recordsCapturedVideo()).toBe(true);
+  });
+
+  test("区間外のテロップしか無ければ今の経路のまま", async () => {
+    // canvas を挟む負荷を、録画に出ないテロップのために払わない
+    installCanvas();
+
+    await recordWith([{ startSec: 100, endSec: 103, text: "外" }]);
+
+    expect(recordsCapturedVideo()).toBe(true);
+  });
+
+  test("canvas に描けなければ録画を始めずに telop-render-failed で落とす", async () => {
+    // テロップなしで録って続行すると、実時間を払った後で気付くことになる
+    installCanvas({ tainted: true });
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-render-failed" });
+    expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
+    expect(statusText()).toContain("テロップを動画に描けませんでした");
   });
 });

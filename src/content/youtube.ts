@@ -32,15 +32,25 @@ import {
 } from "@/content/recorder";
 import { createSegmentList, type SegmentList } from "@/content/segment-list";
 import { YT_SELECTORS } from "@/content/selectors";
+import {
+  TelopRenderError,
+  assertTelopRenderable,
+  startCompositor,
+  type Compositor,
+} from "@/content/telop-compositor";
 import { encodeBase64 } from "@/shared/base64";
 import type { Message, MessageResponse } from "@/shared/messages";
 import {
   loadSettings,
   mergeSettings,
   SETTINGS_KEY,
+  DEFAULT_SETTINGS,
   type ClipMode,
+  type Settings,
   type SettingsContext,
 } from "@/shared/settings";
+import { hasRenderableTelops } from "@/shared/telop";
+import { telopStyleOf, type TelopStyle } from "@/shared/telop-style";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 import { isOverLimit, totalSec } from "@/shared/timeline";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
@@ -50,6 +60,7 @@ import {
   type ClipEvent,
   type ClipRange,
   type ClipState,
+  type Telop,
 } from "@/shared/types";
 
 const BAR_ID = "yt-clip-bar";
@@ -70,6 +81,18 @@ const MIN_RECOMMENDED_HEIGHT = 720;
  * シンプルモードでは常に 0 個か 1 個
  */
 let currentSegments: ClipRange[] = [];
+/**
+ * いま画面に出ているテロップ。**状態機械が正で、これはその写し。**
+ * 別の動画を見ているタブでは空 (区間と同じ規則)
+ */
+let currentTelops: Telop[] = [];
+/** テロップの見た目。設定から組み立てる */
+let telopStyle: TelopStyle = telopStyleOf(DEFAULT_SETTINGS);
+/**
+ * 録画するテロップと見た目。**録画開始時に固定する。** 録画中に ⚙ で見た目を
+ * 変えても、途中で見た目が変わるクリップを作らない。null なら今の経路で録る
+ */
+let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
 /**
  * 拡大バーがいま編集している区間の位置。区間が無ければ -1。
  *
@@ -729,6 +752,8 @@ function applyStateToDisplay(state: ClipState): void {
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
   currentSegments = liveSegments;
+  currentTelops =
+    liveSegments.length === 0 || !("telops" in state) ? [] : state.telops;
   // **並べ替えないので index は動かない。** 足した直後だけ末尾へ移し、
   // それ以外は今の位置を保つ。削除で数が減ったときだけ範囲内へ詰める
   if (liveSegments.length === 0) {
@@ -855,6 +880,16 @@ async function prepareRecording(
     // 実時間を払い切ってから無駄と分かることのないよう、ここで弾く
     assertRecordable(getVideo());
 
+    // **テロップの有無で録画の経路を決め、描けるかをここで確かめる。**
+    // `beginRecording` で気付くと、router が理由を問わず recording-aborted に
+    // 落とすので専用の文言が出ない。見た目もここで固定する (録画中に変えても効かない)
+    recordingTelops = hasRenderableTelops(currentTelops, currentSegments)
+      ? { telops: currentTelops, style: telopStyle }
+      : null;
+    if (recordingTelops !== null) {
+      assertTelopRenderable(getVideo());
+    }
+
     // **繋ぎ目の検査もここで済ませる。** 区間の間で初めて気付くと、既に
     // 実時間を払った後になる。同期 throw が advanceToSegment の catch に
     // 飲まれて seek-failed に化ける経路も塞げる
@@ -901,6 +936,12 @@ async function prepareRecording(
       setStatus(error.message);
       return;
     }
+    if (error instanceof TelopRenderError) {
+      recordingTelops = null;
+      send({ type: "FAIL", reason: "telop-render-failed" });
+      setStatus(error.message);
+      return;
+    }
     if (error instanceof FrameCallbackUnsupportedError) {
       send({ type: "FAIL", reason: "internal-error" });
       setStatus(error.message);
@@ -913,10 +954,23 @@ async function prepareRecording(
 
 /** service worker からの指示で録画を始める */
 async function beginRecording(): Promise<void> {
+  // 録画が始まらなかったときに合成を残さないよう、try の外で持つ
+  let videoOverride: Compositor | undefined;
   try {
     const video = getVideo();
     const { mimeType } = pickMimeType();
+    const telops = recordingTelops;
+    // 使い切ったら空にする。seeking を通らずに recorder/start が来たとき
+    // (実機の順序の食い違いやテスト) に、前の録画のテロップで合成しない
+    recordingTelops = null;
+    // 合成は録画の解放 (buildRecordingStream の release) に繋がるので、
+    // 録画が自動で止まった経路でも描画ループが残らない
+    videoOverride =
+      telops === null
+        ? undefined
+        : startCompositor(video, telops.telops, telops.style);
     handle = await startRecording(video, mimeType, {
+      videoOverride,
       onUnexpectedStop: (error) => {
         handle = null;
         notify({ type: "recorder/failed", reason: error.message });
@@ -924,6 +978,8 @@ async function beginRecording(): Promise<void> {
     });
     notify({ type: "recorder/started" });
   } catch (error) {
+    // release は二度呼んでも安全 (startRecording の中で解放済みのことがある)
+    videoOverride?.release();
     notify({ type: "recorder/failed", reason: String(error) });
   }
 }
@@ -1315,6 +1371,11 @@ function recoverFromState(): void {
     });
 }
 
+/** 設定のうちテロップの見た目を取り込む。起動時と、別のタブで変わったときに呼ぶ */
+function applyTelopSettings(settings: Settings): void {
+  telopStyle = telopStyleOf(settings);
+}
+
 /**
  * 起動時に設定を読む。
  *
@@ -1325,6 +1386,7 @@ function loadInitialSettings(): void {
   void loadSettings()
     .then((settings) => {
       maxClipSec = settings.maxClipSec;
+      applyTelopSettings(settings);
       applyMode(settings.mode);
     })
     .catch((error: unknown) => {
@@ -1343,6 +1405,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (change === undefined) return;
   const settings = mergeSettings(change.newValue);
   maxClipSec = settings.maxClipSec;
+  applyTelopSettings(settings);
   applyMode(settings.mode);
 });
 
