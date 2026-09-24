@@ -16,6 +16,12 @@ type FrameCallback = (now: number, metadata: { mediaTime: number }) => void;
 
 let texts: string[] = [];
 let clears = 0;
+/**
+ * `resolveTelopStyle` が font 判定に使う目印値 ("1px serif") への代入回数。
+ * `drawTelops` は毎フレーム font を代入するが、この目印は resolveTelopStyle
+ * しか使わないので、判定が何回走ったかをここだけで数えられる
+ */
+let probeAssignments = 0;
 
 function makeVideo() {
   const parent = document.createElement("div");
@@ -60,8 +66,16 @@ function makeVideo() {
 beforeEach(() => {
   texts = [];
   clears = 0;
+  probeAssignments = 0;
+  let fontValue = "10px sans-serif";
   const ctx = {
-    font: "10px sans-serif",
+    get font() {
+      return fontValue;
+    },
+    set font(value: string) {
+      fontValue = value;
+      if (value === "1px serif") probeAssignments += 1;
+    },
     clearRect: () => {
       clears += 1;
     },
@@ -152,5 +166,46 @@ describe("createTelopPreview", () => {
     expect(() => preview.update(fake.video, [TELOP], STYLE)).not.toThrow();
     expect(warn).toHaveBeenCalled();
     preview.destroy();
+  });
+
+  test("同じ style で update を繰り返しても font の判定は 1 回だけ", () => {
+    // global-constraints: font 指定の判定は attach 時とスタイル更新時の 1 回だけ。
+    // 毎フレーム判定すると、使えないフォント名のとき warn が状態通知のたびに出る
+    const fake = makeVideo();
+    const preview = createTelopPreview();
+    preview.update(fake.video, [TELOP], STYLE);
+    expect(probeAssignments).toBe(1);
+    preview.update(fake.video, [TELOP], STYLE);
+    expect(probeAssignments).toBe(1);
+    preview.update(fake.video, [TELOP], { ...STYLE, fontSizePx: 80 });
+    expect(probeAssignments).toBe(2);
+    preview.destroy();
+  });
+
+  test("描けない環境では、同じ video に対しては 2 回目以降 warn しない", () => {
+    // canvas を作り直して warn を繰り返すのはテスト出力のノイズになる。
+    // 別の video なら再試行してよい
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fake = makeVideo();
+    const preview = createTelopPreview();
+    preview.update(fake.video, [TELOP], STYLE);
+    preview.update(fake.video, [TELOP], STYLE);
+    expect(warn).toHaveBeenCalledTimes(1);
+    preview.destroy();
+  });
+
+  test("rVFC を持たない video では warn して続け、destroy でも落ちない", () => {
+    // rVFC が無いまま attached に入ると、後の detach の cancelVideoFrameCallback が
+    // 無い関数を呼んで例外になる (compositor の assertFrameCallbackSupported と同じ検査)
+    const parent = document.createElement("div");
+    const video = document.createElement("video");
+    parent.append(video);
+    document.body.append(parent);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const preview = createTelopPreview();
+    expect(() => preview.update(video, [TELOP], STYLE)).not.toThrow();
+    expect(warn).toHaveBeenCalled();
+    expect(() => preview.destroy()).not.toThrow();
   });
 });

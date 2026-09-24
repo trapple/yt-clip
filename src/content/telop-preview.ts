@@ -13,6 +13,17 @@ import type { Telop } from "@/shared/types";
 
 const PREVIEW_ID = "yt-clip-telop-preview";
 
+/** 5 項目のどれかが違えば見た目が変わったとみなす */
+function sameStyle(a: TelopStyle, b: TelopStyle): boolean {
+  return (
+    a.fontSizePx === b.fontSizePx &&
+    a.fontFamily === b.fontFamily &&
+    a.fillColor === b.fillColor &&
+    a.strokeColor === b.strokeColor &&
+    a.strokeWidthPx === b.strokeWidthPx
+  );
+}
+
 export type TelopPreview = {
   /**
    * 今のテロップと見た目で描き直す。テロップが空か video が無ければ外す。
@@ -34,8 +45,18 @@ export function createTelopPreview(): TelopPreview {
   let attached: VideoWithFrameCallback | null = null;
   let telops: Telop[] = [];
   let style: TelopStyle | null = null;
+  /**
+   * 直前に `resolveTelopStyle` へ渡した見た目。
+   *
+   * **font 指定が受け付けられるかの判定は、attach 直後とスタイルが変わったときの
+   * 1 回だけ行う。** フレームごとに描くたびに判定すると、使えないフォント名の
+   * ときに状態通知のたびに warn が繰り返される (global-constraints 参照)
+   */
+  let lastStyleInput: TelopStyle | null = null;
   let frameHandle = 0;
   let resizeObserver: ResizeObserver | null = null;
+  /** attach に失敗した video。同じ video では再試行も warn もしない (別の video なら再試行) */
+  let failedVideo: HTMLVideoElement | null = null;
 
   function warn(error: unknown): void {
     console.warn(`[yt-clip] テロップのプレビューを描けませんでした: ${String(error)}`);
@@ -92,9 +113,20 @@ export function createTelopPreview(): TelopPreview {
     canvas = null;
     ctx = null;
     attached = null;
+    // ctx が変われば判定のやり直しが要る。次の attach で 1 回だけ resolve する
+    style = null;
+    lastStyleInput = null;
   }
 
   function attach(video: VideoWithFrameCallback): boolean {
+    // rVFC が無い環境で進めると、後の detach が cancelVideoFrameCallback を
+    // 呼んで落ちる (compositor の assertFrameCallbackSupported と同じ検査だが、
+    // プレビューは目安なので throw ではなく warn で続ける)
+    if (typeof (video as Partial<VideoWithFrameCallback>).requestVideoFrameCallback !== "function") {
+      warn(new Error("この環境では動画のフレームに合わせて描き直せません"));
+      return false;
+    }
+
     const parent = video.parentElement;
     if (parent === null) return false;
 
@@ -138,9 +170,20 @@ export function createTelopPreview(): TelopPreview {
         // SPA 遷移で video が差し替わったら付け直す
         if (attached !== video) {
           detach();
-          if (!attach(video as VideoWithFrameCallback)) return;
+          // 前回 attach に失敗した video のまま。canvas を作り直して warn を
+          // 繰り返さない (別の video が来たら再試行する)
+          if (video === failedVideo) return;
+          if (!attach(video as VideoWithFrameCallback)) {
+            failedVideo = video;
+            return;
+          }
+          failedVideo = null;
         }
-        if (ctx !== null) style = resolveTelopStyle(ctx, nextStyle);
+        // font 指定が受け付けられるかは attach 直後とスタイルが変わったときだけ判定する
+        if (ctx !== null && (lastStyleInput === null || !sameStyle(lastStyleInput, nextStyle))) {
+          style = resolveTelopStyle(ctx, nextStyle);
+          lastStyleInput = nextStyle;
+        }
         paintNow();
       } catch (error) {
         warn(error);

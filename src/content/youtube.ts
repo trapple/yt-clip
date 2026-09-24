@@ -1,5 +1,6 @@
 import { pickMimeType } from "@/content/codec";
 import {
+  ElementNotFoundError,
   getChannel,
   getVideo,
   getVideoMeta,
@@ -760,8 +761,11 @@ function refreshTelopPreview(): void {
   let video: HTMLVideoElement | null = null;
   try {
     video = getVideo();
-  } catch {
-    // 動画要素がまだ無いか差し替えの最中。次の状態通知か DOM 変化で追いつく
+  } catch (error) {
+    // 動画要素がまだ無いか差し替えの最中は ElementNotFoundError で表れる。
+    // それ以外の例外は想定していない不具合なので握り潰さずに投げ直す。
+    // 次の状態通知 (applyStateToDisplay) か、DOM 変化で mount() が呼ばれたときに追いつく
+    if (!(error instanceof ElementNotFoundError)) throw error;
     video = null;
   }
   const visible = mode === "edit" && rangeVideoId === currentVideoId();
@@ -1428,6 +1432,7 @@ function mount(): void {
     }
   }
   refreshOverlay();
+  refreshTelopPreview();
 }
 
 /**
