@@ -1841,3 +1841,138 @@ describe("テロップ付きの録画", () => {
     expect(statusText()).toContain("テロップを動画に描けませんでした");
   });
 });
+
+describe("テロップの一覧", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  function telopRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='telop']")];
+  }
+
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  function addTelopButton(): HTMLButtonElement {
+    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
+    if (button === null) throw new Error("＋ テロップがありません");
+    return button;
+  }
+
+  async function showReady(
+    telops: Telop[],
+    segments: ClipRange[] = [RANGE],
+  ): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments, meta: META_A, telops });
+    await flush();
+    sent = [];
+  }
+
+  async function seekVideo(sec: number): Promise<void> {
+    video.element.currentTime = sec;
+    await flush();
+  }
+
+  test("＋ テロップで今の位置から 3 秒のテロップを送る", async () => {
+    await showReady([]);
+    await seekVideo(12);
+
+    addTelopButton().click();
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "ADD_TELOP",
+      telop: { startSec: 12, endSec: 15, text: "" },
+    });
+  });
+
+  test("動画の終わりを超えるなら終わりを詰める", async () => {
+    await showReady([]);
+    await seekVideo(598);
+
+    addTelopButton().click();
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "ADD_TELOP",
+      telop: { startSec: 598, endSec: 600, text: "" },
+    });
+  });
+
+  test("開始を今にで、開始が終了以上になるなら送らず理由を出す", async () => {
+    await showReady([TELOP]);
+    await seekVideo(20);
+
+    telopRows()[0]?.querySelector<HTMLElement>("[data-role='set-start']")?.click();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("開始は終了より前にしてください");
+  });
+
+  test("文言を確定すると UPDATE_TELOP を送る", async () => {
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+
+    textarea.value = "やあ\n元気";
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "UPDATE_TELOP",
+      index: 0,
+      telop: { ...TELOP, text: "やあ\n元気" },
+    });
+  });
+
+  test("テロップが残っていると最後の 1 区間は消せない", async () => {
+    // 区間が 0 個になると idle に戻り、手入力の文言もまとめて消える
+    await showReady([TELOP]);
+
+    segmentRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe(
+      "テロップが 1 件残っています。先にテロップを消してください",
+    );
+  });
+
+  test("区間の削除でテロップが消えてしまったら知らせる", async () => {
+    // 手元の写しが古くて止め損ねた場合の保険
+    await showReady([TELOP], [RANGE, { startSec: 30, endSec: 40 }]);
+    segmentRows()[1]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+
+    emit({ kind: "idle" });
+    await flush();
+
+    expect(statusText()).toBe("テロップも消えました");
+  });
+
+  test("preview では操作できない", async () => {
+    // 区間の拡大バーと同じ条件。テロップだけ触れる非対称を作らない
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [RANGE],
+      meta: META_A,
+      telops: [TELOP],
+    });
+    await flush();
+    sent = [];
+
+    telopRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    addTelopButton().click();
+
+    expect(clipEvents()).toEqual([]);
+  });
+
+  test("シンプルモードでは出さない", async () => {
+    changeSettings({ mode: "simple" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [] });
+    await flush();
+
+    // 一覧の箱は ＋ テロップの見出しの親
+    expect(addTelopButton().parentElement?.parentElement?.hidden).toBe(true);
+  });
+});

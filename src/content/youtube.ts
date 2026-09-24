@@ -31,6 +31,7 @@ import {
   type RecorderHandle,
 } from "@/content/recorder";
 import { createSegmentList, type SegmentList } from "@/content/segment-list";
+import { createTelopList, type TelopList } from "@/content/telop-list";
 import { YT_SELECTORS } from "@/content/selectors";
 import {
   TelopRenderError,
@@ -103,6 +104,7 @@ let selectedIndex = -1;
 /** 切り抜きの作り方。設定から読む */
 let mode: ClipMode = "simple";
 let segmentList: SegmentList | null = null;
+let telopList: TelopList | null = null;
 /**
  * 状態機械から最後に届いた種類。
  *
@@ -448,6 +450,74 @@ function onAddSegment(): void {
   send({ type: "ADD_SEGMENT", range, meta });
 }
 
+/** テロップを出す既定の長さ (秒) */
+const DEFAULT_TELOP_SEC = 3;
+
+/**
+ * テロップを編集してよいか。区間の拡大バーと同じ条件 (`ready` / `posted` で、
+ * 範囲を作った動画を見ている)。**区間は触れないのにテロップだけ触れる非対称を作らない**
+ */
+function canEditTelops(): boolean {
+  return canAdjustRange();
+}
+
+/** ＋ テロップ。今の位置から 3 秒、文言なし。動画の長さを超えるなら終わりを詰める */
+function onAddTelop(): void {
+  if (!canEditTelops()) {
+    setStatus("いまはテロップを変更できません");
+    return;
+  }
+  const video = getVideo();
+  // メタデータを読む前は duration が NaN。そのまま足すと状態機械が throw する
+  if (!Number.isFinite(video.duration)) {
+    setStatus("動画の長さが分からないため、テロップを足せません");
+    return;
+  }
+  const startSec = video.currentTime;
+  const endSec = Math.min(startSec + DEFAULT_TELOP_SEC, video.duration);
+  if (endSec <= startSec) {
+    setStatus("動画の終わりにはテロップを足せません");
+    return;
+  }
+  send({ type: "ADD_TELOP", telop: { startSec, endSec, text: "" } });
+}
+
+/**
+ * テロップの開始か終了を今の位置に合わせる。
+ *
+ * **開始が終了以上になる操作は送らない。** 状態機械は不正な時刻で throw する。
+ * 黙って無反応にせず理由を出す
+ */
+function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
+  const telop = currentTelops[index];
+  if (telop === undefined || !canEditTelops()) return;
+  const sec = getVideo().currentTime;
+  const next =
+    edge === "start" ? { ...telop, startSec: sec } : { ...telop, endSec: sec };
+  if (next.endSec <= next.startSec) {
+    setStatus("開始は終了より前にしてください");
+    return;
+  }
+  send({ type: "UPDATE_TELOP", index, telop: next });
+}
+
+/** 文言の確定。改行はそのまま持つ */
+function onTelopText(index: number, text: string): void {
+  const telop = currentTelops[index];
+  if (telop === undefined || !canEditTelops()) return;
+  if (telop.text === text) return;
+  send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
+}
+
+/** そのテロップの頭から再生する。範囲再生の監視は解く (押した場所からの再生が止まる) */
+async function playTelop(index: number): Promise<void> {
+  const telop = currentTelops[index];
+  if (telop === undefined || busy) return;
+  cancelPreviewWatch();
+  if ((await seekAndPlay(telop.startSec)) === null) return;
+  setStatus(`テロップ ${index + 1} の頭から再生中…`);
+}
+
 /**
  * エディットモードの IN。選択中の区間の**頭だけ**を今の位置に動かす。
  *
@@ -752,8 +822,18 @@ function applyStateToDisplay(state: ClipState): void {
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
   currentSegments = liveSegments;
+  const previousTelopCount = currentTelops.length;
   currentTelops =
     liveSegments.length === 0 || !("telops" in state) ? [] : state.telops;
+  // 最後の区間の削除は UI で止めているが、手元の写しが古くて止め損ねた場合に
+  // 黙って消さない
+  if (
+    removedIndexOnNextState !== null &&
+    previousTelopCount > 0 &&
+    currentTelops.length === 0
+  ) {
+    setStatus("テロップも消えました");
+  }
   // **並べ替えないので index は動かない。** 足した直後だけ末尾へ移し、
   // それ以外は今の位置を保つ。削除で数が減ったときだけ範囲内へ詰める
   if (liveSegments.length === 0) {
@@ -807,6 +887,11 @@ function applyStateToDisplay(state: ClipState): void {
     mode === "edit" ? currentSegments : [],
     selectedIndex,
     maxClipSec,
+  );
+  telopList?.setEnabled(canEditTelops());
+  telopList?.update(
+    mode === "edit" ? currentTelops : [],
+    mode === "edit" ? currentSegments : [],
   );
 
   lastKind = state.kind;
@@ -1205,14 +1290,35 @@ function buildBar(): HTMLElement {
       void playRange();
     },
     onRemove: (index) => {
+      // **テロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
+      // なると状態機械は idle に戻り、手入力の文言もまとめて消える
+      if (currentSegments.length === 1 && currentTelops.length > 0) {
+        setStatus(
+          `テロップが ${currentTelops.length} 件残っています。先にテロップを消してください`,
+        );
+        return;
+      }
       removedIndexOnNextState = index;
       send({ type: "REMOVE_SEGMENT", index });
     },
   });
 
+  telopList = createTelopList({
+    onAdd: onAddTelop,
+    onSetStart: (index) => onMoveTelopEdge(index, "start"),
+    onSetEnd: (index) => onMoveTelopEdge(index, "end"),
+    onPlay: (index) => void playTelop(index),
+    onRemove: (index) => {
+      if (!canEditTelops()) return;
+      send({ type: "REMOVE_TELOP", index });
+    },
+    onText: onTelopText,
+  });
+
   // 一覧を上、拡大バー、操作の順。区間を選んでからバーで調整する流れに合わせる
   bar.append(
     segmentList.element,
+    telopList.element,
     rangeBar.element,
     row,
     settingsPanel.element,

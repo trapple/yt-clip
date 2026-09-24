@@ -120,3 +120,17 @@ export const SEGMENT_STYLE = {
   // 色が見えない環境でも判断できる
   totalOver: "color:#f28b82;font-size:11px;text-align:right;font-weight:600;",
 } as const;
+
+/** テロップの一覧。区間の一覧と並ぶので見た目を揃える */
+export const TELOP_STYLE = {
+  root: "display:flex;flex-direction:column;gap:4px;",
+  header: "display:flex;align-items:center;gap:8px;",
+  title: "color:var(--ytc-text);font-size:12px;font-weight:600;flex:1;",
+  row: "display:flex;flex-direction:column;gap:4px;padding:4px 8px;border-radius:6px;background:var(--ytc-surface);",
+  rowHead: "display:flex;gap:8px;align-items:center;",
+  label: "color:var(--ytc-text);font-size:12px;flex:1;",
+  outside: "color:var(--ytc-text-sub);font-size:11px;",
+  iconButton: SEGMENT_STYLE.iconButton,
+  textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
+  textarea: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;`,
+} as const;
