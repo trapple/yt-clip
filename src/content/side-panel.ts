@@ -33,7 +33,7 @@ const EDGE_GAP_PX = 16;
  * (実測: プレイヤーの右端 1012px < パネルの左端 1024px)
  */
 const WIDTH_PX = 400;
-/** YouTube のヘッダーのメニュー類より下、ページ本体より上 */
+/** YouTube のヘッダー (#masthead-container、z-index 2020) より下、ページ本体より上 */
 const Z_INDEX = 2000;
 
 export type SidePanel = {

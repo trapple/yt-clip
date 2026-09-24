@@ -451,7 +451,10 @@ function applyMode(next: ClipMode): void {
   // 開いていたなら、⚙ と同じ経路 (開く → refreshSidePanel → reveal → scrollTo)
   // で新しい設定パネルを開き直す。保存済みの値は toggle の fill が入れ直すので、
   // 未保存の入力は失われてよい (モード変更は設定の保存を経由するため保存済み)
-  if (settingsWasOpen) onToggleSettings();
+  // **新しい隠れたパネルがあるときだけ開く。** onToggleSettings は toggle なので、
+  // mount() がバーを作り直さなかった場合 (#below が無い) に呼ぶと、開いたままの
+  // 古いパネルを逆に閉じてしまう
+  if (settingsWasOpen && settingsPanel?.element.hidden === true) onToggleSettings();
 
   if (currentSegments.length > 0) {
     send({ type: "RESET_MARKS" });
