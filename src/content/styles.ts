@@ -131,6 +131,33 @@ export const RANGE_STYLE = {
   disabled: "opacity:0.4;pointer-events:none;",
 } as const;
 
+/**
+ * 拡大バーの下のテロップの帯の段 (`telop-track.ts`。フロートの窓の spec B)。
+ *
+ * **根は display を持たない。** 出し入れは telop-track.ts が `style.display` で行う (ここに display を
+ * 書くと、`hidden` を立てても inline の display が勝って出たままになる)。高さは 2 段ぶん
+ * (14 + 2 + 14 = 30px) に固定し、重なりの有無でバーの高さを揺らさない。`margin-top:-6px` で、バーの
+ * 縦の並びの gap (10px) を拡大バーのトラックとの間 4px に詰める (spec B.3。予算 34px)。
+ *
+ * `gap`・文字の大きさ・数字の幅は拡大バー (`RANGE_STYLE.root`) に揃える。左右に置く見えない時刻
+ * (`ghost`) の幅が拡大バーのラベルの幅と同じになり、帯の段がトラックの左右に揃う
+ */
+export const TELOP_TRACK_STYLE = {
+  root: "gap:10px;height:30px;margin-top:-6px;font-size:12px;font-variant-numeric:tabular-nums;",
+  ghost: "visibility:hidden;white-space:nowrap;",
+  lanes: "position:relative;flex:1;min-width:0;",
+  /** 右の見えない時刻の箱。「+N」をこの中の 2 段目の高さに置く (帯と重ねない。spec B.3) */
+  endCell: "position:relative;",
+  /**
+   * 帯 1 本。位置 (left / width / top) は telop-track.ts が決める。文字を選べると、掴んだつもりで
+   * 選択が始まる。`touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  band: "position:absolute;height:14px;box-sizing:border-box;min-width:4px;padding:0 4px;border:1px solid var(--ytc-accent);border-radius:3px;background:var(--ytc-surface);color:var(--ytc-text);font-size:10px;line-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;touch-action:none;user-select:none;",
+  /** 2 段に入らない分の数。押しても何もしないので、掴めそうなカーソルを出さない */
+  overflow:
+    "position:absolute;left:0;top:16px;height:14px;line-height:14px;font-size:11px;color:var(--ytc-text-sub);white-space:nowrap;cursor:default;",
+} as const;
+
 /** 区間の一覧。行は押せるので、押せることが分かる見た目にする */
 export const SEGMENT_STYLE = {
   root: "display:flex;flex-direction:column;gap:4px;",

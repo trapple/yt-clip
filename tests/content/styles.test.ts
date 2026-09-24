@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   BAR_STYLE,
   FLOATING_WINDOW_STYLE,
+  RANGE_STYLE,
   SIDE_PANEL_STYLE,
+  TELOP_TRACK_STYLE,
   applyPalette,
   isDarkTheme,
 } from "@/content/styles";
@@ -161,5 +163,30 @@ describe("バーの窓", () => {
     expect(BAR_STYLE.grip).toContain("cursor:move");
     expect(BAR_STYLE.grip).toContain("user-select:none");
     expect(BAR_STYLE.grip).toContain("touch-action:none");
+  });
+});
+
+describe("テロップの帯の段", () => {
+  test("拡大バーのトラックとの間を 4px に詰め、高さは 2 段ぶん (14 + 2 + 14) に固定する", () => {
+    // バーの縦の並びは gap:10px。-6px で 4px になる (spec B.3。予算 34px)
+    expect(BAR_STYLE.root).toContain("gap:10px");
+    expect(TELOP_TRACK_STYLE.root).toContain("margin-top:-6px");
+    expect(TELOP_TRACK_STYLE.root).toContain("height:30px");
+    expect(TELOP_TRACK_STYLE.band).toContain("height:14px");
+    // 「+N」は 2 段目の高さ (14 + 2) に置く
+    expect(TELOP_TRACK_STYLE.overflow).toContain("top:16px");
+  });
+
+  test("根は display を持たない (出し入れは telop-track.ts が決める)", () => {
+    expect(TELOP_TRACK_STYLE.root).not.toContain("display");
+  });
+
+  test("左右の見えない時刻は、拡大バーのラベルと同じ文字の大きさ・数字の幅・間で並ぶ", () => {
+    // 同じでないと、帯の段の左右が拡大バーのトラックの左右とずれる
+    for (const rule of ["gap:10px", "font-size:12px", "font-variant-numeric:tabular-nums"]) {
+      expect(RANGE_STYLE.root).toContain(rule);
+      expect(TELOP_TRACK_STYLE.root).toContain(rule);
+    }
+    expect(TELOP_TRACK_STYLE.ghost).toContain("visibility:hidden");
   });
 });
