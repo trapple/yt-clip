@@ -9,6 +9,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "e2e": "npm run build && playwright test",
+    "check:telop": "npm run build && YT_CLIP_TELOP_CHECK=1 playwright test e2e/telop-check.spec.ts",
     "icons": "node scripts/make-icons.mjs",
     "package": "npm run build && node scripts/package.mjs",
     "screenshots": "npm run build && node scripts/screenshots.mjs",
