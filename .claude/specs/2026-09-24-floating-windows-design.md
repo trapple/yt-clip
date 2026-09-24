@@ -246,3 +246,7 @@ README の使い方・仕様と制約 (窓を動かせる・大きさを変え�
 - [review:spec/依頼者代理人/fable 3 往復目] Approved。Recommendations 5 件 (ドキュメント節の「3 段」の直し / 帯の段の margin-top:-6px /
   テロップの数え方 / 「+N」の置き場所 / 単体テストの言い回し) を取り込み
 - [選択] 実装スタイル: D (branch + SDD)。branch は feat/side-panel から分岐 (右側パネルの上に乗るため)
+- [plan A] .claude/plans/2026-09-24-floating-windows-a.md (9 タスク)。[review:plan/ゼロ context の実装者/fable] Issues 1 件
+  (fitRect が -0 を返してテスト 2 件が落ちる。レビュアーが複製リポジトリに plan を適用して発見) → 修正。Recommendations
+  (コメントの誤記・挿入位置の目印・README のシアターモードの文言) を取り込み。Gate は付けない (保存物の追記は事実に沿った
+  追加で、公開は別手順)。1 往復で修正が 2 行のみのため再レビューは回さない
