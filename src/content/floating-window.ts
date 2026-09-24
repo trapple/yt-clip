@@ -61,6 +61,11 @@ export type FloatingWindow = {
   place(rect: WindowRect): void;
   /** 今の位置と大きさ (詰めた後) */
   rect(): WindowRect;
+  /**
+   * 最後に place (またはドラッグ) で置いた位置と大きさから、画面に詰め直す (本体を畳む・開くとき)。
+   * place(rect()) で代えない: 詰めた後の位置で置いた場所を上書きし、ブラウザを大きく戻しても戻らない
+   */
+  refit(): void;
   destroy(): void;
 };
 
@@ -124,6 +129,12 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     if (handle === undefined) return { left: 0, top: 0, width: 0, height: 0 };
     const frame = element.getBoundingClientRect();
     const box = handle.getBoundingClientRect();
+    // **見出しは窓の縁 (1px) まで含めて数える。** 見出しは窓の幅いっぱいで縁の内側にあるので、
+    // 見出しの箱のままだと右端・上端に寄せたときに縁が 1px 画面の外へ出る (spec A.1)。
+    // バーのつまみは窓の中の小さな箱なので、そのまま測る (縁まで広げると窓全体が掴む場所になる)
+    if (handle === header) {
+      return { left: 0, top: 0, width: frame.width, height: box.bottom - frame.top };
+    }
     return {
       left: box.left - frame.left,
       top: box.top - frame.top,
@@ -298,6 +309,10 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
 
     rect(): WindowRect {
       return { ...current };
+    },
+
+    refit(): void {
+      apply(requested);
     },
 
     destroy(): void {

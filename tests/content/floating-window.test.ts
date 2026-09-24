@@ -423,6 +423,22 @@ describe("画面の中に詰める", () => {
     expect(frame.rect()).toEqual({ left: 0, top: 0, width: 400 });
   });
 
+  test("見出しは窓の縁まで含めて数える (右端・上端に寄せても縁が画面の外へ出ない)", () => {
+    const { frame } = makeWindow();
+    frame.place({ left: 100, top: 100, width: 400 });
+    // 見出しは 1px の縁の内側 (左上から (1, 1)・幅 398・高さ 32)
+    vi.spyOn(frame.element, "getBoundingClientRect").mockReturnValue(boxAt(100, 100, 400, 300));
+    vi.spyOn(headerOf(frame), "getBoundingClientRect").mockReturnValue(boxAt(101, 101, 398, 32));
+
+    drag(headerOf(frame), 5000, 5000);
+    // 右端は 1024 - 400 (縁の右端が画面の右端)、下は 768 - 33 (見出しの下端まで)
+    expect(frame.rect()).toEqual({ left: 624, top: 735, width: 400 });
+
+    drag(headerOf(frame), -5000, -5000);
+    // 縁の左上も画面の外へ出さない
+    expect(frame.rect()).toEqual({ left: 0, top: 0, width: 400 });
+  });
+
   test("つまみの窓は、つまみが画面に残るところまで出せる", () => {
     const { frame, grip } = makeBarLikeWindow();
     frame.place({ left: 100, top: 100, width: 600 });
@@ -447,6 +463,22 @@ describe("画面の中に詰める", () => {
 
     setViewport(900, 768);
     window.dispatchEvent(new Event("resize"));
+    expect(frame.rect()).toEqual({ left: 500, top: 100, width: 400 });
+
+    setViewport(1024, 768);
+    window.dispatchEvent(new Event("resize"));
+    expect(frame.rect()).toEqual({ left: 600, top: 100, width: 400 });
+  });
+
+  test("refit は詰めた後の位置ではなく置いた場所から詰め直す", () => {
+    const { frame } = makeWindow();
+    vi.spyOn(frame.element, "getBoundingClientRect").mockReturnValue(boxAt(0, 0, 400, 300));
+    vi.spyOn(headerOf(frame), "getBoundingClientRect").mockReturnValue(boxAt(0, 0, 400, 32));
+    frame.place({ left: 600, top: 100, width: 400 });
+
+    setViewport(900, 768);
+    window.dispatchEvent(new Event("resize"));
+    frame.refit();
     expect(frame.rect()).toEqual({ left: 500, top: 100, width: 400 });
 
     setViewport(1024, 768);

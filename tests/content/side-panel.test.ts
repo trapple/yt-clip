@@ -174,6 +174,35 @@ describe("createSidePanel", () => {
     expect(target.element.style.height).toBe("500px");
   });
 
+  test("畳む・開くときに、置いた場所を詰めた後の位置で上書きしない", () => {
+    const setViewport = (width: number): void => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+    };
+    const original = window.innerWidth;
+    try {
+      setViewport(1920);
+      const target = makePanel();
+      target.setVisible(true);
+      vi.spyOn(target.element, "getBoundingClientRect").mockReturnValue(rectAt(0, 300));
+      vi.spyOn(headerOf(target), "getBoundingClientRect").mockReturnValue(rectAt(0, 32));
+      target.frame.place({ left: 1500, top: 100, width: 400 });
+
+      // 狭めると詰まる (1440 - 400)。その間に畳んで開く
+      setViewport(1440);
+      window.dispatchEvent(new Event("resize"));
+      expect(target.frame.rect().left).toBe(1040);
+      collapseButton(target).click();
+      collapseButton(target).click();
+
+      // 広げ直すと、置いた場所に戻る (畳まなかったときと同じ)
+      setViewport(1920);
+      window.dispatchEvent(new Event("resize"));
+      expect(target.frame.rect().left).toBe(1500);
+    } finally {
+      setViewport(original);
+    }
+  });
+
   test("見出しに yt-clip と折り畳みボタンを出す。最初は開いている", () => {
     const target = makePanel();
     expect(target.element.textContent).toContain("yt-clip");

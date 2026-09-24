@@ -133,8 +133,9 @@ export function createSidePanel(options: SidePanelOptions = {}): SidePanel {
     collapseButton.title = next ? "開く" : "畳む";
     collapseButton.setAttribute("aria-expanded", next ? "false" : "true");
     // 窓の枠は、置くときに本体の出し入れを見て高さを外す (畳んだ窓に空の枠を残さない)。
-    // 高さを決めた窓でも見出しだけになるよう、今の位置のまま置き直す
-    frame.place(frame.rect());
+    // 高さを決めた窓でも見出しだけになるよう、置いた場所から詰め直す。place(rect()) にしない:
+    // 狭い画面で詰まった位置が「置いた場所」になり、広げ直しても戻らなくなる
+    frame.refit();
   }
 
   collapseButton.addEventListener("click", () => setCollapsed(!collapsed));
