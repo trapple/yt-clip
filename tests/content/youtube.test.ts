@@ -455,6 +455,58 @@ function handleLabels(): string[] {
   );
 }
 
+/** jsdom はレイアウトを持たず、どの要素の寸法も 0 を返す。位置を決め打ちする */
+function rectAt(top: number, height: number): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    height,
+    left: 0,
+    right: 400,
+    width: 400,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** 右側のパネル。body の直下に 1 つだけある */
+function panelElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-panel");
+  if (element === null) throw new Error("パネルが見つかりません");
+  return element;
+}
+
+/** パネルの中身の箱。一覧と設定はここに入る */
+function panelBody(): HTMLElement {
+  const element = document.getElementById("yt-clip-panel-body");
+  if (element === null) throw new Error("パネルの本体が見つかりません");
+  return element;
+}
+
+/** プレイヤー直下のバー */
+function barElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-bar");
+  if (element === null) throw new Error("バーが見つかりません");
+  return element;
+}
+
+function collapseButton(): HTMLButtonElement {
+  const button = panelElement().querySelector<HTMLButtonElement>(
+    "[data-role='collapse']",
+  );
+  if (button === null) throw new Error("折り畳みボタンがありません");
+  return button;
+}
+
+/** 設定パネルの根。最初の項目 (モード) の入力欄 → 項目の枠 → 根 */
+function settingsRoot(): HTMLElement {
+  const root = document.getElementById("yt-clip-setting-mode")?.parentElement
+    ?.parentElement;
+  if (root == null) throw new Error("設定パネルが見つかりません");
+  return root;
+}
+
 /** 実際に作られた MediaRecorder。無ければ録画が始まっていない */
 function startedRecorder(): FakeRecorder {
   const recorder = recorders[0];
@@ -534,6 +586,14 @@ beforeEach(async () => {
   // DOM を作り直したので、observer に拾わせて操作 UI を載せ直す
   document.body.append(document.createElement("div"));
   await flush();
+  // パネルはタブを開いている間 1 つを使い回す (畳んだ状態を覚えるため)。
+  // 前のテストで畳んだまま・送ったままにしない
+  const collapse = document.querySelector<HTMLButtonElement>(
+    "#yt-clip-panel [data-role='collapse']",
+  );
+  if (collapse?.getAttribute("aria-expanded") === "false") collapse.click();
+  const panelBodyElement = document.getElementById("yt-clip-panel-body");
+  if (panelBodyElement !== null) panelBodyElement.scrollTop = 0;
   // モードも既定へ戻す。edit のまま次のテストに入るとバーの見た目が変わる
   changeSettings({});
   // 前のテストの範囲・録画・監視をすべて捨てさせる
@@ -547,6 +607,15 @@ afterAll(async () => {
   // jsdom の破棄後に配られると location を参照できず、テストとは無関係な
   // 例外が出力に混ざる。ここで出し切ってから終わらせる
   document.body.innerHTML = "";
+  await flush();
+  // 空にした body を mount() が拾ってパネルを付け直す。jsdom は破棄のときに
+  // body.innerHTML = "" をするので、パネルが残っているとその DOM 変化が破棄後に
+  // 配られる。パネルを外すだけだと mount() がまた付け直すので、observer が見て
+  // いない空の body に差し替えて、破棄のときに外すものを無くす
+  document.documentElement.replaceChild(
+    document.createElement("body"),
+    document.body,
+  );
   await flush();
 });
 
@@ -2194,5 +2263,239 @@ describe("テロップの一覧", () => {
 
     // 一覧の箱は ＋ テロップの見出しの親
     expect(addTelopButton().parentElement?.parentElement?.hidden).toBe(true);
+  });
+});
+
+describe("右側のパネル", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  async function showEdit(telops: Telop[] = []): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops, meta: META_A });
+    await flush();
+  }
+
+  test("body を作り直しても、パネルを body の直下に付け直す", async () => {
+    // buildPage は body を空にする。付け直さないと、以降はパネルが DOM に無く
+    // 一覧も設定も操作できない
+    buildPage();
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(panelElement().parentElement).toBe(document.body);
+    expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
+  });
+
+  test("一覧と設定はパネルに入り、バーには拡大バーと操作の行だけが残る", async () => {
+    await showEdit([TELOP]);
+
+    const body = panelBody();
+    // 区間の一覧 → テロップの一覧 → 設定の順
+    expect(body.children.length).toBe(3);
+    expect(body.children[0]?.querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(body.children[1]?.querySelector("[data-role='add-telop']")).not.toBeNull();
+    expect(body.children[1]?.querySelectorAll("[data-role='telop']").length).toBe(1);
+    expect(body.children[2]).toBe(settingsRoot());
+
+    const bar = barElement();
+    expect(bar.querySelector("[data-role='segment']")).toBeNull();
+    expect(bar.querySelector("[data-role='add-telop']")).toBeNull();
+    expect(bar.querySelector("#yt-clip-setting-mode")).toBeNull();
+    // 並びは今のまま: 拡大バー → 操作の行
+    expect(bar.children.length).toBe(2);
+    expect(bar.firstElementChild?.id).toBe("yt-clip-range");
+    expect(
+      bar.lastElementChild?.contains(document.getElementById("yt-clip-bar-status")),
+    ).toBe(true);
+  });
+
+  test("エディットで区間があるとパネルを出す", async () => {
+    await showEdit();
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  test("エディットでも区間が 0 個で設定を閉じていれば出さない", async () => {
+    changeSettings({ mode: "edit" });
+    await flush();
+    expect(panelElement().hidden).toBe(true);
+  });
+
+  test("シンプルでは ⚙ で設定を開いている間だけ出す", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    expect(panelElement().hidden).toBe(true);
+
+    clickButton("⚙");
+    expect(panelElement().hidden).toBe(false);
+    expect(settingsRoot().hidden).toBe(false);
+    expect(panelBody().contains(settingsRoot())).toBe(true);
+
+    clickButton("⚙");
+    expect(settingsRoot().hidden).toBe(true);
+    expect(panelElement().hidden).toBe(true);
+  });
+
+  test("畳んでいても ⚙ で設定を開くとパネルが開く", async () => {
+    await showEdit();
+    collapseButton().click();
+    expect(panelBody().hidden).toBe(true);
+    // 見出しは残る
+    expect(panelElement().hidden).toBe(false);
+
+    clickButton("⚙");
+
+    expect(panelBody().hidden).toBe(false);
+    expect(settingsRoot().hidden).toBe(false);
+  });
+
+  test("隠れて畳まれたパネルでも、⚙ で出して開いてから設定の先頭へ送る", () => {
+    // シンプルで設定を閉じている (パネルは隠れている) うえに畳んである
+    collapseButton().click();
+    const body = panelBody();
+    const target = settingsRoot();
+    // 隠れている間は寸法が 0 になる実機の振る舞いを写す。出す → 開く → 送る
+    // の順が崩れると、0 同士で測って送らない
+    const shown = (): boolean =>
+      !panelElement().hidden && !body.hidden && !target.hidden;
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this === body) return shown() ? rectAt(100, 400) : rectAt(0, 0);
+        if (this === target) return shown() ? rectAt(900, 300) : rectAt(0, 0);
+        return rectAt(0, 0);
+      });
+    try {
+      clickButton("⚙");
+
+      expect(panelElement().hidden).toBe(false);
+      expect(body.hidden).toBe(false);
+      // 設定の先頭を本体の上端に揃える: 900 - 100
+      expect(body.scrollTop).toBe(800);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("⚙ で閉じるときは送らない", async () => {
+    await showEdit();
+    const body = panelBody();
+    const target = settingsRoot();
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this === body) return rectAt(100, 400);
+        if (this === target) return rectAt(900, 300);
+        return rectAt(0, 0);
+      });
+    try {
+      clickButton("⚙");
+      expect(body.scrollTop).toBe(800);
+
+      body.scrollTop = 0;
+      clickButton("⚙");
+      expect(body.scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("モードを変えてバーを作り直しても、一覧と設定が 2 重にならない", async () => {
+    changeSettings({ mode: "edit" });
+    await flush();
+    changeSettings({ mode: "simple" });
+    await flush();
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
+    expect(panelBody().children.length).toBe(3);
+    expect(document.querySelectorAll("[data-role='add-telop']").length).toBe(1);
+    expect(document.querySelectorAll("#yt-clip-setting-mode").length).toBe(1);
+
+    // 入っているのは今の一覧。状態が届けば行が出る
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+  });
+
+  test("バーを作り直しても、手元の区間で一覧を描き直す", async () => {
+    await showEdit([TELOP]);
+
+    // YouTube の再描画でバーが外れた場面。次の状態通知を待たずに一覧を戻す
+    barElement().remove();
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(panelBody().querySelectorAll("[data-role='telop']").length).toBe(1);
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  test("全画面の間はパネルを隠し、抜けたら戻す", async () => {
+    await showEdit();
+    expect(panelElement().hidden).toBe(false);
+
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(panelElement().hidden).toBe(true);
+
+      // 全画面の間に状態が届いても出さない
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(panelElement().hidden).toBe(true);
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  test("別の動画へ移ると一覧を空にしてパネルを隠す。戻れば出す", async () => {
+    await showEdit([TELOP]);
+    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+
+    // 固定のパネルでは、動画 B の画面に A の区間が出続けると目立つ
+    history.pushState({}, "", "/watch?v=video-b");
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(0);
+    expect(panelBody().querySelectorAll("[data-role='telop']").length).toBe(0);
+    expect(panelElement().hidden).toBe(true);
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  test("動画ページ以外ではパネルを出さない", async () => {
+    clickButton("⚙");
+    expect(panelElement().hidden).toBe(false);
+
+    history.pushState({}, "", "/");
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(panelElement().hidden).toBe(true);
+  });
+
+  test("テーマを切り替えるとパネルの配色も変わる", async () => {
+    // パネルは body の直下でバーの外にある。バーの配色は継がれない
+    document.documentElement.setAttribute("dark", "");
+    try {
+      await flush();
+      expect(panelElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+    } finally {
+      document.documentElement.removeAttribute("dark");
+    }
+    await flush();
+    expect(panelElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
   });
 });
