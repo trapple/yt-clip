@@ -2558,6 +2558,31 @@ describe("拡大バーの下のテロップの帯", () => {
     ]);
   });
 
+  test("帯のドラッグが拒否されたとき、帯を状態機械側の時刻へ戻す", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    const before = firstBand().style.left;
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 145, 5);
+      // 指を離す直前に、別タブで録画が始まって service worker 側の状態だけが進んだ場面を作る。
+      // emit は使わない (content script にも通知してしまい、このレースを起こせない)
+      swState = { kind: "recording", segments: [RANGE], telops: [TELOP], meta: META_A };
+      pointer(band, "pointerup", 145, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    // 状態機械は録画中で UPDATE_TELOP を受け付けない。応答の状態 (recording・元の時刻) は
+    // 変わらないので、拒まれたことが応答でしか分からない (state/changed は飛んでこない)
+    expect(swState.kind).toBe("recording");
+    expect(statusText()).toContain("受け付けられませんでした");
+    // 送った時刻 (13〜16 秒) ではなく、状態機械が持つ元の時刻 (11〜14 秒) へ戻る
+    expect(firstBand().style.left).toBe(before);
+  });
+
   test("帯を押して動かさずに離すと、そのテロップの頭から再生する", async () => {
     await showReady([TELOP]);
     const spy = stubLayout();
