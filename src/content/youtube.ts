@@ -1658,18 +1658,48 @@ function watchPlayhead(): void {
   requestAnimationFrame(step);
 }
 
+/**
+ * 動かしていない窓を最初の位置に置き直す。**`window` の resize とプレイヤーの大きさの変化で
+ * だけ呼ぶ** (spec A.2)。ページのスクロールでは呼ばない: 窓は画面に浮いたまま、コメント欄を
+ * 読む間も同じ位置で操作できるようにする
+ */
+function placeUnmovedWindows(): void {
+  placeInitial("bar");
+  placeInitial("panel");
+}
+
+/** 大きさを見ているプレイヤー。**SPA 遷移や再描画で要素が替わる**ので、mount のたびに確かめる */
+let observedPlayer: Element | null = null;
+/** プレイヤーの大きさの変化 (シアターモードの切り替えなど) を拾う */
+const playerObserver = new ResizeObserver(() => placeUnmovedWindows());
+
+function watchPlayerSize(): void {
+  const player = document.querySelector(YT_SELECTORS.player);
+  if (player === observedPlayer) return;
+  playerObserver.disconnect();
+  observedPlayer = player;
+  if (player !== null) playerObserver.observe(player);
+}
+
 function mount(): void {
   // 2 つの窓は body の直下に置く (#below の中だと YouTube の再描画で外れる)。
   // **バーの有無より先に見る。** body の子を差し替えられると窓だけが外れる
   for (const frame of [barWindow.element, sidePanel.element]) {
     if (frame.parentElement !== document.body) document.body.append(frame);
   }
+  // **バーの有無より先に見る。** バーを作り直さなくても、プレイヤーの要素だけが替わることがある
+  watchPlayerSize();
   if (document.getElementById(BAR_ID) !== null) return;
 
   // #below にはもう何も置かないが、「動画ページのページができたか」の目印として見続ける
   // (spec A.3)。まだ無い間にバーを作ると、タイトルもプレイヤーも読めないまま IN を押せる
   const anchor = document.querySelector(YT_SELECTORS.mountAnchor);
-  if (anchor === null) return; // 動画ページ未生成。次の observe で再試行する
+  if (anchor === null) {
+    // applyMode が中身の根 (BAR_ID) を外した直後にここで抜けると、バーの窓が中身の無いまま
+    // 出続ける。refreshWindows は中身の根が無ければバーの窓を隠すので、ここで一度呼んでおく
+    refreshWindows();
+    return; // 動画ページ未生成。次の observe で再試行する
+  }
 
   // 前のバーが外されていることがある (モードの切り替え)。参照だけ差し替えると
   // rAF とリスナを抱えた古いインスタンスが解放されないまま残る
@@ -1885,6 +1915,10 @@ themeObserver.observe(document.documentElement, {
 
 // 全画面の間は 2 つの窓を隠す。body 直下の fixed 要素は全画面の動画の上に残りうる
 document.addEventListener("fullscreenchange", refreshWindows);
+
+// ブラウザの大きさが変わったら、動かしていない窓の最初の位置を取り直す (spec A.2)。
+// 動かした窓は置いた場所のまま (画面の外へ出る分は窓の枠が自分で詰める)
+window.addEventListener("resize", placeUnmovedWindows);
 
 // YouTube は SPA 遷移するため DOM 変化を監視して再マウントする
 const observer = new MutationObserver(() => {

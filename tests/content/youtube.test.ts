@@ -310,6 +310,16 @@ function useDefaultCanvasContext(): void {
   getContextSpy?.mockImplementation(() => makeCanvasContext());
 }
 
+/** ResizeObserver の stub が見ている要素と、大きさが変わったときに呼ぶもの */
+const resizeObservers: { callback: () => void; targets: Set<Element> }[] = [];
+
+/** target を見ている ResizeObserver に、大きさが変わったことを届ける */
+function resizeElement(target: Element): void {
+  for (const entry of resizeObservers) {
+    if (entry.targets.has(target)) entry.callback();
+  }
+}
+
 function installGlobals(): void {
   class FakeMediaRecorder implements FakeRecorder {
     static isTypeSupported(): boolean {
@@ -415,13 +425,26 @@ function installGlobals(): void {
   Element.prototype.setPointerCapture = (): void => undefined;
   Element.prototype.releasePointerCapture = (): void => undefined;
 
-  // プレビュー (telop-preview.ts) のため。jsdom は ResizeObserver を持たず、
-  // canvas も描けない (getContext は "Not implemented" を出して null を返す)
+  // プレビュー (telop-preview.ts) と、プレイヤーの大きさの変化で窓を置き直す (youtube.ts) ため。
+  // jsdom は ResizeObserver を持たず、canvas も描けない (getContext は "Not implemented" を
+  // 出して null を返す)。見ている要素を覚えておき、resizeElement で大きさの変化を起こす
   vi.stubGlobal(
     "ResizeObserver",
     class {
-      observe(): void {}
-      disconnect(): void {}
+      private readonly entry: { callback: () => void; targets: Set<Element> };
+      constructor(callback: () => void) {
+        this.entry = { callback, targets: new Set() };
+        resizeObservers.push(this.entry);
+      }
+      observe(target: Element): void {
+        this.entry.targets.add(target);
+      }
+      unobserve(target: Element): void {
+        this.entry.targets.delete(target);
+      }
+      disconnect(): void {
+        this.entry.targets.clear();
+      }
     },
   );
   getContextSpy = spyOnGetContext();
@@ -2982,6 +3005,21 @@ describe("フロートの窓", () => {
     expect(panelElement().hidden).toBe(false);
   });
 
+  // resolution 追加 1 (Task 5 レビューの Minor): applyMode が中身の根を外した後に
+  // mount が #below の無さで途中で抜けると、バーの窓が中身の無いまま出続けてしまう。
+  // mount はこの経路でも refreshWindows() を呼んでからでないと抜けてはいけない
+  test("#below が無い状態で中身の根が外れると、mount はバーの窓を隠してから抜ける", async () => {
+    expect(barWindowElement().hidden).toBe(false);
+
+    document.getElementById("yt-clip-bar")?.remove();
+    document.getElementById("below")?.remove();
+    // DOM の変化を起こして MutationObserver 経由で mount() を走らせる
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(barWindowElement().hidden).toBe(true);
+  });
+
   test("隠れていた窓を出すときは、最初の位置を取り直す", () => {
     let playerBottom = 530;
     const spy = vi
@@ -3059,5 +3097,161 @@ describe("フロートの窓", () => {
     }
     await flush();
     expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+  });
+});
+
+describe("動かしていない窓の最初の位置を取り直す", () => {
+  /** プレイヤーの画面上の位置を、テストの途中で変えられるように決め打ちする */
+  function stubPlayer(initial: { left: number; top: number; width: number; height: number }) {
+    const box = { ...initial };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(box.left, box.top, box.width, box.height);
+        if (this.id === "yt-clip-bar-window") return boxAt(0, 0, 0, 106);
+        return boxAt(0, 0, 0, 0);
+      });
+    return { box, spy };
+  }
+
+  function player(): HTMLElement {
+    const element = document.getElementById("movie_player");
+    if (element === null) throw new Error("プレイヤーが見つかりません");
+    return element;
+  }
+
+  // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(panelHeader());
+    await flush();
+  });
+
+  test("ブラウザの大きさが変わると取り直す", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+
+      box.left = 0;
+      box.width = 900;
+      box.height = 500;
+      window.dispatchEvent(new Event("resize"));
+      // 80 + 500 + 8
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "0px",
+        top: "588px",
+        width: "900px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("パネルの窓も画面の幅に合わせて取り直す", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      // 1440 - 16 - 400
+      expect(panelElement().style.left).toBe("1024px");
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: 1024,
+      });
+      window.dispatchEvent(new Event("resize"));
+    }
+    expect(panelElement().style.left).toBe("608px");
+  });
+
+  test("プレイヤーの大きさが変わると取り直す (シアターモードの切り替えなど)", () => {
+    // beforeEach の buildPage で作り直したプレイヤーを見ている (mount のたびに見直す)
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      box.height = 500;
+      resizeElement(player());
+      expect(barWindowElement().style.top).toBe("588px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("ページのスクロールでは取り直さない (窓は同じ画面位置に浮いたまま)", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // ページを 200px 送った: プレイヤーは画面の上へ動く
+      box.top = -120;
+      window.dispatchEvent(new Event("scroll"));
+      document.dispatchEvent(new Event("scroll"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // 状態が届いても取り直さない (出ている間は置き直さない)
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(barWindowElement().style.top).toBe("538px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // resolution 追加 2 (Task 5 レビューの Minor): スクロールと並べて、状態が届くだけでは
+  // 取り直さないことを別のきっかけ (プレイヤーの位置の変化) でも確かめる
+  test("窓を出している間は、状態を emit しても最初の位置を取り直さない", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // プレイヤーの画面上の位置が変わっても、resize / ResizeObserver 以外のきっかけ
+      // (状態の通知) では取り直さない
+      box.top = 200;
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(barWindowElement().style.top).toBe("538px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("スクロールした後に取り直すときは、プレイヤーの画面上の位置をそのまま使う", () => {
+    // ページを 200px 送った状態 (プレイヤーの上端が画面の上へ 120px 出ている)
+    const { spy } = stubPlayer({ left: 24, top: -120, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      // -120 + 450 + 8。ページの座標に直さない (窓は画面に固定)
+      expect(barWindowElement().style.top).toBe("338px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("動かした窓は、ブラウザやプレイヤーの大きさが変わっても置いた場所のまま", async () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      drag(barGrip(), 30, -100);
+      await flush();
+      const placed = styleRect(barWindowElement());
+      expect(placed.top).toBe("438px");
+
+      box.height = 500;
+      window.dispatchEvent(new Event("resize"));
+      resizeElement(player());
+
+      expect(styleRect(barWindowElement())).toEqual(placed);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
