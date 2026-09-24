@@ -170,3 +170,30 @@ export const SIDE_PANEL_STYLE = {
    */
   body: "flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
 } as const;
+
+/**
+ * フロートの窓の枠 (`floating-window.ts`)。バーの窓とパネルの窓で同じものを使う。
+ *
+ * **`root` と `resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
+ * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の display が
+ * 勝って出たままになる。位置・大きさ・重なり順も `floating-window.ts` が決める
+ */
+export const FLOATING_WINDOW_STYLE = {
+  /** 下のページが透けると読めないので、不透明な地と影を付ける */
+  root: `position:fixed;flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
+  /**
+   * 見出し。空いたところを掴んで動かす。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  header:
+    "display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:move;user-select:none;touch-action:none;",
+  title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
+  /** 見出しの右側の部品の箱。ボタンの上では窓を動かさないので、掴めそうなカーソルを出さない */
+  headerActions: "display:flex;align-items:center;gap:4px;cursor:default;",
+  /**
+   * 右下の角のつまみ (16px 四方。spec A.1)。カーソルは窓の向き (幅だけ / 幅と高さ) で
+   * `floating-window.ts` が足す
+   */
+  resizeGrip:
+    "position:absolute;right:0;bottom:0;width:16px;height:16px;touch-action:none;background:linear-gradient(135deg,transparent 50%,var(--ytc-border) 50%);",
+} as const;

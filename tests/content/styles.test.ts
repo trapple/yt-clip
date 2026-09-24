@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { BAR_STYLE, SIDE_PANEL_STYLE, applyPalette, isDarkTheme } from "@/content/styles";
+import {
+  BAR_STYLE,
+  FLOATING_WINDOW_STYLE,
+  SIDE_PANEL_STYLE,
+  applyPalette,
+  isDarkTheme,
+} from "@/content/styles";
 
 describe("isDarkTheme", () => {
   beforeEach(() => {
@@ -121,5 +127,27 @@ describe("右側のパネル", () => {
   test("display は持たない (出し入れは side-panel.ts が決める)", () => {
     expect(SIDE_PANEL_STYLE.root).not.toContain("display:");
     expect(SIDE_PANEL_STYLE.body).not.toContain("display:");
+  });
+});
+
+describe("フロートの窓", () => {
+  test("画面に固定し、地はパネル用の色で塗る (下のページが透けない)", () => {
+    expect(FLOATING_WINDOW_STYLE.root).toContain("position:fixed");
+    expect(FLOATING_WINDOW_STYLE.root).toContain("background:var(--ytc-panel)");
+  });
+
+  test("display は持たない (出し入れは floating-window.ts が決める)", () => {
+    expect(FLOATING_WINDOW_STYLE.root).not.toContain("display:");
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).not.toContain("display:");
+  });
+
+  test("見出しは掴めることが分かるカーソルで、文字を選ばせない", () => {
+    expect(FLOATING_WINDOW_STYLE.header).toContain("cursor:move");
+    expect(FLOATING_WINDOW_STYLE.header).toContain("user-select:none");
+  });
+
+  test("右下のつまみは 16px 四方", () => {
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("width:16px");
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("height:16px");
   });
 });
