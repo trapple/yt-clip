@@ -1863,6 +1863,27 @@ describe("テロップ付きの録画", () => {
     expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
   });
 
+  test("seeking から recorder/start までの往復の間に隠れたら録画を始めない", async () => {
+    // prepareRecording の検査は seek の await より前の 1 回だけ。その後の
+    // service worker との往復の間に隠れると、監視はまだ付いていないので
+    // startCompositor が始まる前に見ておかないと素通りする
+    installCanvas();
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    // ここではまだ隠れていない (SEEK_DONE を通す)
+    setHidden(true);
+
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    command("recorder/start");
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(recorders).toHaveLength(0);
+  });
+
   test("録画中にタブが隠れたら中断する", async () => {
     installCanvas();
     await recordWith([TELOP]);

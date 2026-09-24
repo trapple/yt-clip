@@ -1055,6 +1055,15 @@ async function beginRecording(): Promise<void> {
     // 使い切ったら空にする。seeking を通らずに recorder/start が来たとき
     // (実機の順序の食い違いやテスト) に、前の録画のテロップで合成しない
     recordingTelops = null;
+    // prepareRecording の検査は seek の await より前の 1 回だけ。その後の
+    // SEEK_DONE → service worker → recorder/start の往復の間にタブが隠れると、
+    // startCompositor はここから先の visibilitychange しか見ないので、隠れた
+    // まま録り始めると音声だけ進むクリップになる。始める直前にもう一度見る
+    if (telops !== null && document.hidden) {
+      send({ type: "FAIL", reason: "telop-tab-hidden" });
+      setStatus(FAILURE_MESSAGES["telop-tab-hidden"]);
+      return;
+    }
     // 合成は録画の解放 (buildRecordingStream の release) に繋がるので、
     // 録画が自動で止まった経路でも描画ループが残らない
     videoOverride =

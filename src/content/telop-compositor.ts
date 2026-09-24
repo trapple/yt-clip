@@ -125,6 +125,9 @@ export function startCompositor(
   const target = video as VideoWithFrameCallback;
   let handle = 0;
   let released = false;
+  // 1 回呼んだら以後は呼ばない。隠れる→見える→隠れるを繰り返すたびに送ると、
+  // 録画は既に止まっているのに失敗の表示だけが何度も上書きされる
+  let hiddenNotified = false;
 
   const paint = (sourceSec: number): void => {
     ctx.drawImage(video, 0, 0, width, height);
@@ -144,7 +147,9 @@ export function startCompositor(
   // **監視は release で外す。** 外し忘れると、録画が終わった後にタブを切り替えた
   // だけで FAIL が飛ぶ
   const onVisibilityChange = (): void => {
-    if (!released && document.hidden) options?.onHidden();
+    if (released || hiddenNotified || !document.hidden) return;
+    hiddenNotified = true;
+    options?.onHidden();
   };
   document.addEventListener("visibilitychange", onVisibilityChange);
 

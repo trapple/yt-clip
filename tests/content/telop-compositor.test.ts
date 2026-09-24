@@ -218,4 +218,18 @@ describe("タブが隠れたとき", () => {
     expect(onHidden).not.toHaveBeenCalled();
     setHidden(false);
   });
+
+  test("隠れる→見える→隠れるを繰り返しても onHidden は 1 回だけ", () => {
+    // 1 回呼んだ後も監視を続けて何度も FAIL を送ると、録画は止まっているのに
+    // 失敗の表示だけが上書きされ続ける
+    const fake = makeVideo();
+    const { canvas } = makeCanvas();
+    const onHidden = vi.fn();
+    startCompositor(fake.video, [], STYLE, { createCanvas: () => canvas }, { onHidden });
+    setHidden(true);
+    setHidden(false);
+    setHidden(true);
+    expect(onHidden).toHaveBeenCalledOnce();
+    setHidden(false);
+  });
 });
