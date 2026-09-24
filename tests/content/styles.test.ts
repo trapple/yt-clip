@@ -114,19 +114,18 @@ describe("状態の文言", () => {
 });
 
 describe("右側のパネル", () => {
-  test("地はパネル用の色で塗る", () => {
-    expect(SIDE_PANEL_STYLE.root).toContain("background:var(--ytc-panel)");
-  });
-
   test("本体の中だけでスクロールする", () => {
     expect(SIDE_PANEL_STYLE.body).toContain("overflow-y:auto");
     // flex の子は min-height:0 が無いと中身より縮まず、パネルごと伸びる
     expect(SIDE_PANEL_STYLE.body).toContain("min-height:0");
   });
 
-  test("display は持たない (出し入れは side-panel.ts が決める)", () => {
-    expect(SIDE_PANEL_STYLE.root).not.toContain("display:");
+  test("本体は display を持たない (畳むときの出し入れは side-panel.ts が決める)", () => {
     expect(SIDE_PANEL_STYLE.body).not.toContain("display:");
+  });
+
+  test("枠の見た目 (地・見出し) は持たない (窓の枠が持つ)", () => {
+    expect(Object.keys(SIDE_PANEL_STYLE)).toEqual(["collapseButton", "body"]);
   });
 });
 

@@ -151,18 +151,15 @@ export const TELOP_STYLE = {
 } as const;
 
 /**
- * 右側のパネル (`side-panel.ts`)。位置・幅・重なり順は YouTube の実機の値に合わせる
- * ので、出所と一緒に `side-panel.ts` が持つ。
+ * 右側のパネル (`side-panel.ts`) の中身。**枠の見た目 (地・影・見出し) は
+ * `FLOATING_WINDOW_STYLE` が持つ** (パネルはフロートの窓の上に作る)。位置・幅は
+ * YouTube の実機の値に合わせるので、出所と一緒に `side-panel.ts` が持つ。
  *
- * **`root` と `body` は display を持たない。** 出し入れは `side-panel.ts` が
+ * **`body` は display を持たない。** 畳むときの出し入れは `side-panel.ts` が
  * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の
  * display が勝って出たままになる
  */
 export const SIDE_PANEL_STYLE = {
-  /** 下のおすすめ動画が透けると読めないので、不透明な地と影を付ける */
-  root: `flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
-  header: "display:flex;align-items:center;gap:8px;padding:8px 12px;",
-  title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
   collapseButton: SEGMENT_STYLE.iconButton,
   /**
    * 中身の箱。**超えた分はここだけでスクロールする。** `min-height:0` が無いと
