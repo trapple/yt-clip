@@ -124,6 +124,19 @@ describe("createSidePanel", () => {
     expect(collapseButton(target).textContent).toBe("▶");
   });
 
+  test("畳んだまま隠して出しても、畳んだ状態を保つ", () => {
+    const target = makePanel();
+    collapseButton(target).click();
+
+    target.setVisible(false);
+    target.setVisible(true);
+
+    expect(target.body.hidden).toBe(true);
+    expect(target.body.style.display).toBe("none");
+    expect(collapseButton(target).textContent).toBe("◀");
+    expect(collapseButton(target).getAttribute("aria-expanded")).toBe("false");
+  });
+
   test("reveal で畳んでいたら開く", () => {
     const target = makePanel();
     collapseButton(target).click();

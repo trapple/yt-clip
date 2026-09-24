@@ -15,9 +15,11 @@ export const SIDE_PANEL_BODY_ID = `${SIDE_PANEL_ID}-body`;
 /*
  * 位置と寸法。**YouTube の実機の値に合わせている。**
  * 出所: 2026-09-24 に `npm run check:telop` の「パネルの位置の出所 (YouTube の実測)」で測った
- * (viewport 1920x1080): #masthead-container の高さ 56px・z-index 2020、
- * #secondary の幅 544px、ytd-popup-container の z-index auto。
- * YouTube のレイアウトが変わったら測り直す
+ * (viewport 1920x1080): #masthead-container の高さ 56px・z-index 2020、#secondary の幅 544px。
+ * z-index は「ヘッダー (#masthead-container、z-index 2020) より下」であることだけ実測。
+ * ヘッダーのメニュー本体は自前の z-index を持つため測っておらず、ytd-popup-container の
+ * z-index auto はその根拠にならない。#secondary の幅は viewport で変わるので WIDTH_PX の
+ * doc に別で書く。YouTube のレイアウトが変わったら測り直す
  */
 /** YouTube のヘッダー (#masthead-container) の高さ */
 const MASTHEAD_HEIGHT_PX = 56;
@@ -25,7 +27,11 @@ const MASTHEAD_HEIGHT_PX = 56;
 const TOP_GAP_PX = 12;
 /** 画面の右端・下端との間 */
 const EDGE_GAP_PX = 16;
-/** おすすめ動画の列 (#secondary、402px 前後) の上に収まる幅 */
+/**
+ * #secondary の幅は viewport で変わる (1920x1080 で 544px、実測)。400px は
+ * 1440x795 (受け入れ条件の viewport) でもプレイヤーに重ならない幅
+ * (実測: プレイヤーの右端 1012px < パネルの左端 1024px)
+ */
 const WIDTH_PX = 400;
 /** YouTube のヘッダーのメニュー類より下、ページ本体より上 */
 const Z_INDEX = 2000;
@@ -90,7 +96,7 @@ export function createSidePanel(): SidePanel {
   function setCollapsed(next: boolean): void {
     collapsed = next;
     show(body, !next);
-    // 畳むと右へ引っ込む向き (▶)、開くと左へ出てくる向き (◀)
+    // 開いているときは ▶ (押すと右へ畳む)、畳んでいるときは ◀ (押すと左へ開く)
     collapseButton.textContent = next ? "◀" : "▶";
     collapseButton.title = next ? "開く" : "畳む";
     collapseButton.setAttribute("aria-expanded", next ? "false" : "true");
