@@ -32,6 +32,7 @@ import {
 } from "@/content/recorder";
 import { createSegmentList, type SegmentList } from "@/content/segment-list";
 import { createTelopList, type TelopList } from "@/content/telop-list";
+import { createTelopPreview } from "@/content/telop-preview";
 import { YT_SELECTORS } from "@/content/selectors";
 import {
   TelopRenderError,
@@ -105,6 +106,8 @@ let selectedIndex = -1;
 let mode: ClipMode = "simple";
 let segmentList: SegmentList | null = null;
 let telopList: TelopList | null = null;
+/** プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため) */
+const telopPreview = createTelopPreview();
 /**
  * 状態機械から最後に届いた種類。
  *
@@ -748,6 +751,24 @@ function refreshOverlay(): void {
 }
 
 /**
+ * プレビューを今のテロップと見た目に合わせる。
+ *
+ * エディットモードで、範囲を作った動画を見ているときだけ出す。別の動画の
+ * テロップを重ねない (帯と同じ規則)
+ */
+function refreshTelopPreview(): void {
+  let video: HTMLVideoElement | null = null;
+  try {
+    video = getVideo();
+  } catch {
+    // 動画要素がまだ無いか差し替えの最中。次の状態通知か DOM 変化で追いつく
+    video = null;
+  }
+  const visible = mode === "edit" && rangeVideoId === currentVideoId();
+  telopPreview.update(video, visible ? currentTelops : [], telopStyle);
+}
+
+/**
  * 状態機械が持つ範囲を画面へ反映する。**食い違ったときは状態機械が正。**
  * 表示だけを扱い、録画そのものには触れない。
  */
@@ -868,6 +889,7 @@ function applyStateToDisplay(state: ClipState): void {
 
   rangeBar?.setEnabled(canAdjustRange());
   refreshOverlay();
+  refreshTelopPreview();
   renderActions(state.kind);
 
   // 失敗はバーにも出す。録画中にタブをリロードした場合、このバーが
@@ -1503,6 +1525,7 @@ function recoverFromState(): void {
 /** 設定のうちテロップの見た目を取り込む。起動時と、別のタブで変わったときに呼ぶ */
 function applyTelopSettings(settings: Settings): void {
   telopStyle = telopStyleOf(settings);
+  refreshTelopPreview();
 }
 
 /**
@@ -1561,6 +1584,7 @@ const observer = new MutationObserver(() => {
     // 見えていない動画の範囲を書き換えることになる
     rangeBar?.setEnabled(canAdjustRange());
     refreshOverlay();
+    refreshTelopPreview();
   }
   mount();
 });

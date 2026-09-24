@@ -339,6 +339,17 @@ function installGlobals(): void {
       },
     },
   });
+
+  // プレビュー (telop-preview.ts) のため。jsdom は ResizeObserver を持たず、
+  // canvas も描けない。描けない環境ではプレビューは warn して何もしない
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe(): void {}
+      disconnect(): void {}
+    },
+  );
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
 }
 
 /**
