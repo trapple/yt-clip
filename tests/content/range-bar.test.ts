@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, test } from "vitest";
-import type { RangeBar } from "@/content/range-bar";
+import { createRangeBar, type RangeBar } from "@/content/range-bar";
 import {
   dragHandle,
   handleLabels,
@@ -187,5 +187,35 @@ describe("最大秒数", () => {
     dragHandle(handles[1], 300);
 
     expect(labelsOf(bar)).toEqual(["開始 0:00", "終了 1:00"]);
+  });
+});
+
+describe("時間の窓 (テロップの帯が同じ軸で読む)", () => {
+  test("update する前は null (幅 0 の窓を軸にさせない)", () => {
+    const bar = createRangeBar({
+      onScrub: () => undefined,
+      onCommit: () => undefined,
+      onSeekPlay: () => undefined,
+      maxClipSec: () => 60,
+    });
+
+    expect(bar.window()).toBeNull();
+  });
+
+  test("update した範囲から決めた窓を返す", () => {
+    // 範囲 30〜45 (15 秒) の窓は 30 秒幅で、中央 37.5 の前後に 15 秒ずつ
+    const { bar } = mountRangeBar();
+
+    expect(bar.window()).toEqual({ startSec: 22.5, endSec: 52.5 });
+  });
+
+  test("返した窓を書き換えても、拡大バーの窓は変わらない", () => {
+    const { bar } = mountRangeBar();
+    const read = bar.window();
+    if (read === null) throw new Error("窓がありません");
+
+    read.startSec = 0;
+
+    expect(bar.window()).toEqual({ startSec: 22.5, endSec: 52.5 });
   });
 });
