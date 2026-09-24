@@ -49,13 +49,16 @@ export function createTelopPreview(): TelopPreview {
    * 直前に `resolveTelopStyle` へ渡した見た目。
    *
    * **font 指定が受け付けられるかの判定は、attach 直後とスタイルが変わったときの
-   * 1 回だけ行う。** フレームごとに描くたびに判定すると、使えないフォント名の
+   * 1 回だけ行う。** update のたびに判定すると、使えないフォント名の
    * ときに状態通知のたびに warn が繰り返される (global-constraints 参照)
    */
   let lastStyleInput: TelopStyle | null = null;
   let frameHandle = 0;
   let resizeObserver: ResizeObserver | null = null;
-  /** attach に失敗した video。同じ video では再試行も warn もしない (別の video なら再試行) */
+  /**
+   * この環境では描けないと分かった video。同じ video では再試行も warn もしない
+   * (別の video なら再試行)。一時的な失敗 (親がまだ無い) はここに入れない
+   */
   let failedVideo: HTMLVideoElement | null = null;
 
   function warn(error: unknown): void {
@@ -118,23 +121,32 @@ export function createTelopPreview(): TelopPreview {
     lastStyleInput = null;
   }
 
+  /** 付けられなければ false。恒久的な失敗なら `failedVideo` に覚える */
   function attach(video: VideoWithFrameCallback): boolean {
     // rVFC が無い環境で進めると、後の detach が cancelVideoFrameCallback を
-    // 呼んで落ちる (compositor の assertFrameCallbackSupported と同じ検査だが、
+    // 呼んで落ちる (compositor の assertTelopRenderable と同じ検査だが、
     // プレビューは目安なので throw ではなく warn で続ける)
     if (typeof (video as Partial<VideoWithFrameCallback>).requestVideoFrameCallback !== "function") {
+      failedVideo = video;
       warn(new Error("この環境では動画のフレームに合わせて描き直せません"));
       return false;
     }
 
+    // getVideo() は文書内の要素を返すので実際には来ないはず。来たとしても親に
+    // 入れば描けるので failedVideo には入れない (入れると同じ video では二度と
+    // 試さず、プレビューが黙って止まる)。次の update で試し直す
     const parent = video.parentElement;
-    if (parent === null) return false;
+    if (parent === null) {
+      warn(new Error("動画がまだ文書に入っていません"));
+      return false;
+    }
 
     const element = document.createElement("canvas");
     element.id = PREVIEW_ID;
     element.style.cssText = "position:absolute;pointer-events:none;z-index:10;";
     const context = element.getContext("2d");
     if (context === null) {
+      failedVideo = video;
       warn(new Error("canvas の描画の文脈を取れません"));
       return false;
     }
@@ -173,10 +185,7 @@ export function createTelopPreview(): TelopPreview {
           // 前回 attach に失敗した video のまま。canvas を作り直して warn を
           // 繰り返さない (別の video が来たら再試行する)
           if (video === failedVideo) return;
-          if (!attach(video as VideoWithFrameCallback)) {
-            failedVideo = video;
-            return;
-          }
+          if (!attach(video as VideoWithFrameCallback)) return;
           failedVideo = null;
         }
         // font 指定が受け付けられるかは attach 直後とスタイルが変わったときだけ判定する

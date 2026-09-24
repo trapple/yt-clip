@@ -726,4 +726,82 @@ describe("テロップ", () => {
     expect(failed).toMatchObject({ kind: "failed", telops: [telop] });
     expect(reduce(failed, { type: "RETRY" })).toEqual(withTelop);
   });
+
+  describe("空でないテロップを持ち回る", () => {
+    // 遷移のどこかで `telops: []` を書き忘れると、手入力の文言が黙って消える。
+    // 空配列のまま確かめても書き忘れは見えないので、中身のあるもので見る
+    const base = { segments, meta, telops: [telop] };
+    const clip = { clipId: "clip-1", mimeType: "video/mp4" };
+    const cases: [string, ClipState, Parameters<typeof reduce>[1], ClipState["kind"]][] = [
+      ["seeking + CANCEL_RECORDING", { kind: "seeking", ...base }, { type: "CANCEL_RECORDING" }, "ready"],
+      ["recording + CANCEL_RECORDING", { kind: "recording", ...base }, { type: "CANCEL_RECORDING" }, "ready"],
+      ["preview + RETAKE", { kind: "preview", ...base, ...clip }, { type: "RETAKE" }, "ready"],
+      ["preview + POST", { kind: "preview", ...base, ...clip }, { type: "POST" }, "composing"],
+      [
+        "preview + DEGRADE",
+        { kind: "preview", ...base, ...clip },
+        { type: "DEGRADE", reason: "x-attach-failed" },
+        "degraded",
+      ],
+      ["composing + ATTACHED", { kind: "composing", ...base, ...clip }, { type: "ATTACHED" }, "posted"],
+      ["composing + RETAKE", { kind: "composing", ...base, ...clip }, { type: "RETAKE" }, "ready"],
+      [
+        "composing + DEGRADE",
+        { kind: "composing", ...base, ...clip },
+        { type: "DEGRADE", reason: "x-attach-failed" },
+        "degraded",
+      ],
+      ["posted + POST", { kind: "posted", ...base, ...clip }, { type: "POST" }, "composing"],
+      ["posted + RETAKE", { kind: "posted", ...base, ...clip }, { type: "RETAKE" }, "ready"],
+      [
+        "degraded + POST",
+        { kind: "degraded", ...base, ...clip, reason: "x-attach-failed" },
+        { type: "POST" },
+        "composing",
+      ],
+      [
+        "degraded + RETAKE",
+        { kind: "degraded", ...base, ...clip, reason: "x-attach-failed" },
+        { type: "RETAKE" },
+        "ready",
+      ],
+      // 不正な遷移の failed も持つ。RETRY で ready に戻るときに引き継ぐため
+      ["ready + OUT_REACHED (不正)", { kind: "ready", ...base }, { type: "OUT_REACHED" }, "failed"],
+    ];
+
+    test.each(cases)("%s", (_name, state, event, kind) => {
+      expect(reduce(state, event)).toMatchObject({ kind, telops: [telop] });
+    });
+  });
+
+  describe("ready / posted 以外ではテロップの編集を受けない", () => {
+    // 区間の編集 (isEditEvent) と同じ条件。テロップだけ触れる非対称を作らない
+    const base = { segments, meta, telops: [telop] };
+    const clip = { clipId: "clip-1", mimeType: "video/mp4" };
+    const states: ClipState[] = [
+      { kind: "preview", ...base, ...clip },
+      { kind: "degraded", ...base, ...clip, reason: "x-attach-failed" },
+      INITIAL_STATE,
+      { kind: "seeking", ...base },
+      { kind: "recording", ...base },
+      { kind: "encoding", ...base },
+      { kind: "composing", ...base, ...clip },
+    ];
+    const events: Parameters<typeof reduce>[1][] = [
+      { type: "ADD_TELOP", telop: { startSec: 15, endSec: 18, text: "" } },
+      { type: "UPDATE_TELOP", index: 0, telop: { ...telop, text: "やあ" } },
+      { type: "REMOVE_TELOP", index: 0 },
+    ];
+
+    test.each(
+      states.flatMap((state) =>
+        events.map((event) => [state.kind, event.type, state, event] as const),
+      ),
+    )("%s + %s", (_kind, _type, state, event) => {
+      expect(reduce(state, event)).toMatchObject({
+        kind: "failed",
+        reason: "internal-error",
+      });
+    });
+  });
 });

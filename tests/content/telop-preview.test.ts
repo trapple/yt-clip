@@ -170,7 +170,7 @@ describe("createTelopPreview", () => {
 
   test("同じ style で update を繰り返しても font の判定は 1 回だけ", () => {
     // global-constraints: font 指定の判定は attach 時とスタイル更新時の 1 回だけ。
-    // 毎フレーム判定すると、使えないフォント名のとき warn が状態通知のたびに出る
+    // update のたびに判定すると、使えないフォント名のとき warn が状態通知のたびに出る
     const fake = makeVideo();
     const preview = createTelopPreview();
     preview.update(fake.video, [TELOP], STYLE);
@@ -197,7 +197,7 @@ describe("createTelopPreview", () => {
 
   test("rVFC を持たない video では warn して続け、destroy でも落ちない", () => {
     // rVFC が無いまま attached に入ると、後の detach の cancelVideoFrameCallback が
-    // 無い関数を呼んで例外になる (compositor の assertFrameCallbackSupported と同じ検査)
+    // 無い関数を呼んで例外になる (compositor の assertTelopRenderable と同じ検査)
     const parent = document.createElement("div");
     const video = document.createElement("video");
     parent.append(video);
@@ -207,5 +207,22 @@ describe("createTelopPreview", () => {
     expect(() => preview.update(video, [TELOP], STYLE)).not.toThrow();
     expect(warn).toHaveBeenCalled();
     expect(() => preview.destroy()).not.toThrow();
+  });
+
+  test("親の無い video では warn し、親に入った後の update で付け直す", () => {
+    // 親が無いのは一時的なもの。失敗した video として覚えると、同じ video では
+    // 二度と試さず、プレビューが黙って出なくなる
+    const fake = makeVideo();
+    fake.video.remove();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const preview = createTelopPreview();
+    preview.update(fake.video, [TELOP], STYLE);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(fake.parent.querySelector("canvas")).toBeNull();
+
+    fake.parent.append(fake.video);
+    preview.update(fake.video, [TELOP], STYLE);
+    expect(fake.parent.querySelector("canvas")).not.toBeNull();
+    preview.destroy();
   });
 });
