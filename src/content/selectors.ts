@@ -6,9 +6,10 @@ export const YT_SELECTORS = {
   video: "video.html5-main-video",
   player: "#movie_player",
   /**
-   * 操作 UI を差し込む位置。プレイヤーの直下にあり、動画ページの間は残り続ける。
-   * プレイヤー内部の操作列 (.ytp-right-controls) に入れると、列の高さに収まらず、
-   * さらにマウスを外したときプレイヤーの UI ごと隠れてしまう
+   * 動画ページのページができたかの目印。プレイヤーの直下にあり、動画ページの間は残り続ける。
+   * **操作 UI はもうここに差し込まない** (body 直下のフロートの窓に入れる。
+   * `.claude/specs/2026-09-24-floating-windows-design.md` A.3)。これが無い間に操作 UI を作ると、
+   * タイトルもプレイヤーも読めないまま IN を押せてしまう
    */
   mountAnchor: "#below",
   /**

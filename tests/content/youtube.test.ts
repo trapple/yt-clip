@@ -250,6 +250,24 @@ function changeSettings(next: Record<string, unknown>): void {
   storageListener?.({ settings: { newValue: next } }, "sync");
 }
 
+/** chrome.storage.local の windowLayout (覚えた窓の位置)。読み込み時の値は beforeAll で入れる */
+let storedLayout: unknown = undefined;
+/** chrome.storage.local へ書いた windowLayout。書いた順 */
+let layoutWrites: unknown[] = [];
+/**
+ * 読み込み時の windowLayout の読み込みを止めておく。beforeAll が離す。
+ * 止めている間に「窓がまだ出ていない」ことを確かめる
+ */
+let releaseLayout: () => void = () => undefined;
+const layoutGate = new Promise<void>((resolve) => {
+  releaseLayout = resolve;
+});
+/** 読み込み時に覚えていた窓の位置。この位置で出ることを確かめる (jsdom の画面 1024x768 に収まる値) */
+const LAYOUT_AT_LOAD = {
+  bar: { left: 40, top: 500, width: 700 },
+  panel: { left: 300, top: 120, width: 360, height: 400 },
+};
+
 /**
  * 描ける canvas の 2D 文脈のモック。プレビューと合成が呼ぶものだけ持つ。
  *
@@ -341,6 +359,17 @@ function installGlobals(): void {
           Promise.resolve({ settings: storedSettings }),
         set: (): Promise<void> => Promise.resolve(),
       },
+      // 窓の位置 (window-layout.ts)。読み込み時の 1 回は layoutGate が離されるまで返さない
+      local: {
+        get: async (): Promise<Record<string, unknown>> => {
+          await layoutGate;
+          return storedLayout === undefined ? {} : { windowLayout: storedLayout };
+        },
+        set: async (items: Record<string, unknown>): Promise<void> => {
+          storedLayout = items.windowLayout;
+          layoutWrites.push(items.windowLayout);
+        },
+      },
       // 別のタブで設定を変えられたときに拾う経路
       onChanged: {
         addListener: (fn: StorageListener): void => {
@@ -381,6 +410,10 @@ function installGlobals(): void {
       },
     },
   });
+
+  // jsdom は Pointer Capture を持たない (窓のドラッグ floating-window.ts が呼ぶ)
+  Element.prototype.setPointerCapture = (): void => undefined;
+  Element.prototype.releasePointerCapture = (): void => undefined;
 
   // プレビュー (telop-preview.ts) のため。jsdom は ResizeObserver を持たず、
   // canvas も描けない (getContext は "Not implemented" を出して null を返す)
@@ -507,6 +540,89 @@ function settingsRoot(): HTMLElement {
   return root;
 }
 
+/** バーの窓の枠 (外形)。中身の根 #yt-clip-bar はこの中にある */
+function barWindowElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-bar-window");
+  if (element === null) throw new Error("バーの窓が見つかりません");
+  return element;
+}
+
+/** バーの窓を動かすつまみ (⠿)。操作の行の左端にある */
+function barGrip(): HTMLElement {
+  const grip = barElement().querySelector<HTMLElement>("[data-role='grip']");
+  if (grip === null) throw new Error("つまみが見つかりません");
+  return grip;
+}
+
+/** パネルの窓の見出し (掴んで動かす所) */
+function panelHeader(): HTMLElement {
+  const header = panelElement().querySelector<HTMLElement>("[data-role='window-header']");
+  if (header === null) throw new Error("パネルの見出しが見つかりません");
+  return header;
+}
+
+/** 位置と大きさを決め打ちした箱 (rectAt は左 0・幅 400 に固定なので別に持つ) */
+function boxAt(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** jsdom は PointerEvent を持たない。MouseEvent に pointer* の名前を付けて配る */
+function pointer(target: Element, type: string, x: number, y: number): void {
+  target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+}
+
+/** (100, 100) で押し、dx / dy だけ動かして離す */
+function drag(target: Element, dx: number, dy: number): void {
+  pointer(target, "pointerdown", 100, 100);
+  pointer(target, "pointermove", 100 + dx, 100 + dy);
+  pointer(target, "pointerup", 100 + dx, 100 + dy);
+}
+
+function dblclick(target: Element): void {
+  target.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+}
+
+/** 窓の枠に当てた位置と大きさ */
+function styleRect(element: HTMLElement): {
+  left: string;
+  top: string;
+  width: string;
+  height: string;
+} {
+  return {
+    left: element.style.left,
+    top: element.style.top,
+    width: element.style.width,
+    height: element.style.height,
+  };
+}
+
+/** プレイヤーの画面上の位置とバーの窓の高さを決め打ちする。ほかの要素は 0 */
+function placePlayer(
+  player: { left: number; top: number; width: number; height: number },
+  barHeight: number,
+) {
+  return vi
+    .spyOn(Element.prototype, "getBoundingClientRect")
+    .mockImplementation(function (this: Element) {
+      if (this.id === "movie_player") {
+        return boxAt(player.left, player.top, player.width, player.height);
+      }
+      if (this.id === "yt-clip-bar-window") return boxAt(0, 0, 0, barHeight);
+      return boxAt(0, 0, 0, 0);
+    });
+}
+
 /** 実際に作られた MediaRecorder。無ければ録画が始まっていない */
 function startedRecorder(): FakeRecorder {
   const recorder = recorders[0];
@@ -534,12 +650,24 @@ let restoredAtLoad = {
   labels: [] as string[],
 };
 
+/** 覚えた位置を読み込む前の窓 (設定を開いてパネルに中身がある状態) */
+let windowsBeforeLayout = { barHidden: false, panelHidden: false };
+/** 覚えた位置を読み込んだ後の窓 */
+let windowsAfterLayout = {
+  barHidden: true,
+  panelHidden: true,
+  bar: { left: "", top: "", width: "", height: "" },
+  panel: { left: "", top: "", width: "", height: "" },
+};
+
 beforeAll(async () => {
   buildPage();
   installGlobals();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
   swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+  // 前に動かした窓の位置を覚えている場面を再現する
+  storedLayout = LAYOUT_AT_LOAD;
 
   // chrome を用意してから読み込む。import 時に listener と observer を張る
   await import("@/content/youtube");
@@ -555,6 +683,24 @@ beforeAll(async () => {
     pointerEvents: rangeBarElement().style.pointerEvents,
     labels: handleLabels(),
   };
+
+  // 覚えた窓の位置の読み込みは layoutGate で止めてある。設定を開いてパネルに中身が
+  // ある状態にしても、読み込みが済むまではどちらの窓も出ない (最初の位置から跳ぶ絵にしない)
+  clickButton("⚙");
+  windowsBeforeLayout = {
+    barHidden: barWindowElement().hidden,
+    panelHidden: panelElement().hidden,
+  };
+  releaseLayout();
+  await flush();
+  windowsAfterLayout = {
+    barHidden: barWindowElement().hidden,
+    panelHidden: panelElement().hidden,
+    bar: styleRect(barWindowElement()),
+    panel: styleRect(panelElement()),
+  };
+  // 設定を閉じて、以降のテストを閉じた状態から始める
+  clickButton("⚙");
 });
 
 /**
@@ -565,6 +711,10 @@ let saved: string[] = [];
 
 beforeEach(async () => {
   history.pushState({}, "", "/watch?v=video-a");
+  // バーの中身は body 直下の窓の中にあり、buildPage で body を空にしても窓ごと付け直されて
+  // 残る (以前は #below と一緒に消えていた)。前のテストの状態の文言・設定の開閉を持ち越さない
+  // よう、中身の根を外して作り直させる
+  document.getElementById("yt-clip-bar")?.remove();
   buildPage();
   sent = [];
   recorders = [];
@@ -608,9 +758,9 @@ afterAll(async () => {
   // 例外が出力に混ざる。ここで出し切ってから終わらせる
   document.body.innerHTML = "";
   await flush();
-  // 空にした body を mount() が拾ってパネルを付け直す。jsdom は破棄のときに
-  // body.innerHTML = "" をするので、パネルが残っているとその DOM 変化が破棄後に
-  // 配られる。パネルを外すだけだと mount() がまた付け直すので、observer が見て
+  // 空にした body を mount() が拾って 2 つの窓 (バーとパネル) を付け直す。jsdom は破棄の
+  // ときに body.innerHTML = "" をするので、窓が残っているとその DOM 変化が破棄後に
+  // 配られる。窓を外すだけだと mount() がまた付け直すので、observer が見て
   // いない空の body に差し替えて、破棄のときに外すものを無くす
   document.documentElement.replaceChild(
     document.createElement("body"),
@@ -1140,7 +1290,9 @@ describe("最大秒数の設定", () => {
     changeSettings({ maxClipSec: 20 });
     await flush();
 
-    // 再描画を起こしてバーを作り直させる
+    // 再描画を起こしてバーを作り直させる。バーの中身は body 直下の窓の中にあり、
+    // body を作り直しても窓ごと付け直されて残るので、中身の根を外しておく
+    barElement().remove();
     buildPage();
     document.body.append(document.createElement("div"));
     await flush();
@@ -2624,5 +2776,288 @@ describe("足した行をパネルの見える範囲に入れる", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("フロートの窓", () => {
+  // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(panelHeader());
+    await flush();
+    layoutWrites = [];
+  });
+
+  test("バーの窓とパネルの窓が body の直下に 1 つずつある", () => {
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(panelElement().parentElement).toBe(document.body);
+    expect(document.querySelectorAll("#yt-clip-bar-window").length).toBe(1);
+    expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
+    // バーの中身 (拡大バーと操作の行) は窓の中
+    expect(barWindowElement().contains(barElement())).toBe(true);
+  });
+
+  test("#below には何も置かない", () => {
+    const below = document.getElementById("below");
+    if (below === null) throw new Error("#below がありません");
+    expect(below.children.length).toBe(0);
+  });
+
+  test("覚えた位置を読み込むまで、設定を開いていても窓を出さない", () => {
+    expect(windowsBeforeLayout).toEqual({ barHidden: true, panelHidden: true });
+  });
+
+  test("覚えた位置で出る", () => {
+    expect(windowsAfterLayout).toEqual({
+      barHidden: false,
+      panelHidden: false,
+      bar: { left: "40px", top: "500px", width: "700px", height: "" },
+      panel: { left: "300px", top: "120px", width: "360px", height: "400px" },
+    });
+  });
+
+  test("バーの窓の最初の位置はプレイヤーの直下 (左端を揃え、幅はプレイヤーの幅、8px 空ける)", () => {
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
+    try {
+      dblclick(barGrip());
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("画面に収まらなければ、バーの窓を画面の下端から 16px に詰める", () => {
+    // jsdom の画面は 1024x768。下端 700 のプレイヤーの下には 106px のバーが入らない
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 620 }, 106);
+    try {
+      dblclick(barGrip());
+      // 768 - 16 - 106
+      expect(barWindowElement().style.top).toBe("646px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("パネルの窓の最初の位置は右上 (右端から 16px・上 68px・幅 400px)", () => {
+    expect(styleRect(panelElement())).toEqual({
+      left: `${window.innerWidth - 416}px`,
+      top: "68px",
+      width: "400px",
+      height: "",
+    });
+  });
+
+  test("つまみをドラッグすると動き、指を離したときに 1 回だけ覚える", async () => {
+    const frame = barWindowElement();
+    const left = parseFloat(frame.style.left);
+    const top = parseFloat(frame.style.top);
+    const width = parseFloat(frame.style.width);
+    const grip = barGrip();
+
+    pointer(grip, "pointerdown", 100, 100);
+    pointer(grip, "pointermove", 130, 120);
+    pointer(grip, "pointermove", 150, 130);
+    await flush();
+    // 動かしている間は覚えない
+    expect(layoutWrites).toEqual([]);
+
+    pointer(grip, "pointerup", 150, 130);
+    await flush();
+    expect(frame.style.left).toBe(`${left + 50}px`);
+    expect(frame.style.top).toBe(`${top + 30}px`);
+    expect(layoutWrites).toEqual([{ bar: { left: left + 50, top: top + 30, width } }]);
+  });
+
+  test("パネルの窓は見出しをドラッグすると動き、位置を覚える", async () => {
+    clickButton("⚙");
+    const frame = panelElement();
+    const left = parseFloat(frame.style.left);
+
+    drag(panelHeader(), -100, 20);
+    await flush();
+
+    expect(frame.style.left).toBe(`${left - 100}px`);
+    expect(frame.style.top).toBe("88px");
+    expect(layoutWrites).toEqual([{ panel: { left: left - 100, top: 88, width: 400 } }]);
+  });
+
+  test("つまみ・見出しをダブルクリックすると最初の位置に戻り、覚えた位置を消す", async () => {
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
+    try {
+      dblclick(barGrip());
+      drag(barGrip(), 100, 50);
+      drag(panelHeader(), -100, 20);
+      await flush();
+      expect(storedLayout).toEqual({
+        bar: { left: 124, top: 588, width: 800 },
+        panel: { left: window.innerWidth - 516, top: 88, width: 400 },
+      });
+
+      dblclick(barGrip());
+      dblclick(panelHeader());
+      await flush();
+
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+      expect(panelElement().style.left).toBe(`${window.innerWidth - 416}px`);
+      expect(panelElement().style.top).toBe("68px");
+      expect(storedLayout).toEqual({});
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("モードを変えても窓を作り直さず、位置も変わらない。作り直したつまみでも動かせる", async () => {
+    const frame = barWindowElement();
+    drag(barGrip(), 30, 20);
+    await flush();
+    const placed = styleRect(frame);
+    const oldGrip = barGrip();
+
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    expect(barWindowElement()).toBe(frame);
+    expect(styleRect(frame)).toEqual(placed);
+    // 中身は作り直した (＋ 区間を追加 が増えた)。つまみも新しい要素になる
+    expect(barGrip()).not.toBe(oldGrip);
+    drag(barGrip(), 10, 0);
+    expect(frame.style.left).toBe(`${parseFloat(placed.left) + 10}px`);
+  });
+
+  test("最後に触った窓が上に来る", () => {
+    pointer(barElement(), "pointerdown", 0, 0);
+    expect(barWindowElement().style.zIndex).toBe("2001");
+    expect(panelElement().style.zIndex).toBe("2000");
+
+    pointer(panelBody(), "pointerdown", 0, 0);
+    expect(panelElement().style.zIndex).toBe("2001");
+    expect(barWindowElement().style.zIndex).toBe("2000");
+  });
+
+  test("全画面の間は 2 つとも隠し、抜けたら戻す", () => {
+    clickButton("⚙");
+    expect(barWindowElement().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(barWindowElement().hidden).toBe(true);
+      expect(panelElement().hidden).toBe(true);
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(barWindowElement().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  test("動画ページ以外では 2 つとも隠す。戻れば出す", async () => {
+    clickButton("⚙");
+
+    history.pushState({}, "", "/");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(barWindowElement().hidden).toBe(true);
+    expect(panelElement().hidden).toBe(true);
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(barWindowElement().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  test("隠れていた窓を出すときは、最初の位置を取り直す", () => {
+    let playerBottom = 530;
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, playerBottom - 450, 800, 450);
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      dblclick(barGrip());
+      expect(barWindowElement().style.top).toBe("538px");
+
+      Object.defineProperty(document, "fullscreenElement", {
+        configurable: true,
+        get: () => video.element,
+      });
+      try {
+        document.dispatchEvent(new Event("fullscreenchange"));
+        expect(barWindowElement().hidden).toBe(true);
+        // 全画面の間にプレイヤーの位置が変わった
+        playerBottom = 400;
+      } finally {
+        Reflect.deleteProperty(document, "fullscreenElement");
+      }
+      document.dispatchEvent(new Event("fullscreenchange"));
+
+      expect(barWindowElement().hidden).toBe(false);
+      expect(barWindowElement().style.top).toBe("408px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("動かした窓は、出し直しても置いた場所のまま", async () => {
+    let playerBottom = 530;
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, playerBottom - 450, 800, 450);
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      dblclick(barGrip());
+      drag(barGrip(), 30, -100);
+      await flush();
+      const placed = styleRect(barWindowElement());
+      expect(placed.top).toBe("438px");
+
+      Object.defineProperty(document, "fullscreenElement", {
+        configurable: true,
+        get: () => video.element,
+      });
+      try {
+        document.dispatchEvent(new Event("fullscreenchange"));
+        playerBottom = 400;
+      } finally {
+        Reflect.deleteProperty(document, "fullscreenElement");
+      }
+      document.dispatchEvent(new Event("fullscreenchange"));
+
+      expect(styleRect(barWindowElement())).toEqual(placed);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("テーマを切り替えるとバーの窓の配色も変わる", async () => {
+    // バーの窓は body の直下でページの外にある。配色は自分で持つ
+    document.documentElement.setAttribute("dark", "");
+    try {
+      await flush();
+      expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+    } finally {
+      document.documentElement.removeAttribute("dark");
+    }
+    await flush();
+    expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
   });
 });

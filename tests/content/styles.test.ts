@@ -150,3 +150,16 @@ describe("フロートの窓", () => {
     expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("height:16px");
   });
 });
+
+describe("バーの窓", () => {
+  test("中身の根は縁も外の余白も持たない (窓の枠が持つ。2 重にしない)", () => {
+    expect(BAR_STYLE.root).not.toContain("border:");
+    expect(BAR_STYLE.root).not.toContain("margin:");
+  });
+
+  test("つまみは掴めることが分かるカーソルで、文字を選ばせない", () => {
+    expect(BAR_STYLE.grip).toContain("cursor:move");
+    expect(BAR_STYLE.grip).toContain("user-select:none");
+    expect(BAR_STYLE.grip).toContain("touch-action:none");
+  });
+});

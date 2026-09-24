@@ -73,8 +73,18 @@ const FONT = 'Roboto,"Noto Sans JP","Helvetica Neue",Arial,sans-serif';
 const BUTTON_BASE = `appearance:none;border-radius:18px;height:36px;padding:0 16px;font-family:${FONT};font-size:14px;font-weight:500;cursor:pointer;white-space:nowrap;`;
 
 export const BAR_STYLE = {
-  root: `display:flex;flex-direction:column;gap:10px;padding:12px;margin:8px 0;border:1px solid var(--ytc-border);border-radius:12px;color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
+  /**
+   * バーの中身の根 (#yt-clip-bar)。**縁・角・外の余白は持たない。** バーの窓
+   * (floating-window.ts) の枠が持つ。ここにも縁を付けると枠が 2 重になる
+   */
+  root: `display:flex;flex-direction:column;gap:10px;padding:12px;color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
   row: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
+  /**
+   * 窓を動かすつまみ (⠿)。操作の行の左端に置く (spec A.1: バーの窓は見出しの行を作らない)。
+   * 行の高さはボタン (36px) に揃える。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  grip: "cursor:move;user-select:none;touch-action:none;color:var(--ytc-text-sub);font-size:18px;line-height:36px;padding:0 2px;",
   /**
    * 状態の文言。**1 行に収めて、はみ出しは … にする。** 長い文言 (「テロップが N 件
    * 残っています…」など) で行が 2 段に折り返すと、バーが伸びて動画と操作が 1 画面に
