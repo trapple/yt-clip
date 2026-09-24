@@ -81,6 +81,19 @@ describe("layoutTelops", () => {
     const bottom = 540 - 540 * 0.08;
     expect(lines[0]?.y).toBeCloseTo(bottom - 60);
   });
+
+  test("canvas の上に完全に出た行は返さない", () => {
+    // 改行だらけの文言でも、描く行数は高さ ÷ 行間で頭打ちになる
+    const text = Array.from({ length: 500 }, (_, i) => `行${i}`).join("\n");
+    const lines = layoutTelops([text, "後"], 1920, 1080, 100);
+    // 行間 120px、下端 993.6。y > 0 の行だけ残るので 9 行
+    expect(lines.length).toBe(9);
+    expect(lines.every((line) => line.y > 0)).toBe(true);
+    // 残るのは文言の下の方の行。その上に積んだ「後」は画面の外に出ている
+    expect(lines.map((line) => line.text)).toEqual(
+      Array.from({ length: 9 }, (_, i) => `行${491 + i}`),
+    );
+  });
 });
 
 describe("resolveTelopStyle", () => {
@@ -144,6 +157,18 @@ describe("drawTelops", () => {
     const ctx = makeContext();
     drawTelops(ctx as unknown as CanvasRenderingContext2D, [telop], 20, STYLE, 1920, 1080);
     expect(ctx.calls).toEqual([]);
+  });
+
+  test("描く途中で落ちても ctx の設定を戻す", () => {
+    // 録画ではこの ctx に次のフレームの drawImage が来る。設定が残ると影響する
+    const ctx = makeContext();
+    ctx.fillText = () => {
+      throw new Error("壊れた");
+    };
+    expect(() =>
+      drawTelops(ctx as unknown as CanvasRenderingContext2D, [telop], 11, STYLE, 1920, 1080),
+    ).toThrow("壊れた");
+    expect(ctx.calls.at(-1)).toBe("restore");
   });
 
   test("描いた後は ctx の設定を戻す", () => {

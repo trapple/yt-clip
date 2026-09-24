@@ -34,7 +34,11 @@ function fontOf(family: string, sizePx: number): string {
 /**
  * 行の位置を決める。**作った順に下から積む。** 1 つのテロップの中の行は上から下。
  *
- * 自動折り返しはしない。日本語の禁則まで含めると重く、Phase 1 では手で改行してもらう
+ * 自動折り返しはしない。日本語の禁則まで含めると重く、Phase 1 では手で改行してもらう。
+ *
+ * **canvas の上に完全に出た行 (下端が 0 以下) は返さない。** 改行だらけの文言でも
+ * 描く行数が「高さ ÷ 行間」で頭打ちになり、毎フレームの太字の縁取りが膨らまない。
+ * 下へは積まないので、下にはみ出す行は出ない
  */
 export function layoutTelops(
   texts: string[],
@@ -48,13 +52,12 @@ export function layoutTelops(
   const lines: TelopLine[] = [];
 
   for (const text of texts) {
+    // ここから上に積むものは全部画面の外
+    if (bottom <= 0) break;
     const rows = text.split("\n");
     rows.forEach((row, index) => {
-      lines.push({
-        text: row,
-        x,
-        y: bottom - (rows.length - 1 - index) * lineHeight,
-      });
+      const y = bottom - (rows.length - 1 - index) * lineHeight;
+      if (y > 0) lines.push({ text: row, x, y });
     });
     bottom -= rows.length * lineHeight;
   }
@@ -105,23 +108,27 @@ export function drawTelops(
 
   const scale = height / TELOP_BASE_HEIGHT;
   ctx.save();
-  ctx.font = fontOf(style.fontFamily, style.fontSizePx * scale);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.lineJoin = "round";
-  ctx.lineWidth = style.strokeWidthPx * 2 * scale;
-  ctx.strokeStyle = style.strokeColor;
-  ctx.fillStyle = style.fillColor;
+  // 途中で投げても設定を戻す。録画ではこの ctx に次のフレームの drawImage が来る
+  try {
+    ctx.font = fontOf(style.fontFamily, style.fontSizePx * scale);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = style.strokeWidthPx * 2 * scale;
+    ctx.strokeStyle = style.strokeColor;
+    ctx.fillStyle = style.fillColor;
 
-  const lines = layoutTelops(
-    active.map((telop) => telop.text),
-    width,
-    height,
-    style.fontSizePx,
-  );
-  for (const line of lines) {
-    if (style.strokeWidthPx > 0) ctx.strokeText(line.text, line.x, line.y);
-    ctx.fillText(line.text, line.x, line.y);
+    const lines = layoutTelops(
+      active.map((telop) => telop.text),
+      width,
+      height,
+      style.fontSizePx,
+    );
+    for (const line of lines) {
+      if (style.strokeWidthPx > 0) ctx.strokeText(line.text, line.x, line.y);
+      ctx.fillText(line.text, line.x, line.y);
+    }
+  } finally {
+    ctx.restore();
   }
-  ctx.restore();
 }

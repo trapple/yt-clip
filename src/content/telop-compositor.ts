@@ -18,7 +18,12 @@ export type CompositorDeps = {
 
 export type CompositorOptions = {
   /** 録画中にタブが隠れた。呼ばれるのは release の前だけ */
-  onHidden(): void;
+  onHidden?(): void;
+  /**
+   * 録画中のフレームの描画が例外で止まった。合成は解放済み。呼ばれるのは 1 回だけ。
+   * 最初のフレームの失敗はここに来ず、`startCompositor` がそのまま投げる
+   */
+  onError?(error: Error): void;
 };
 
 const defaultDeps: CompositorDeps = {
@@ -134,33 +139,50 @@ export function startCompositor(
     drawTelops(ctx, telops, sourceSec, resolved, width, height);
     track.requestFrame();
   };
-  const tick: FrameCallback = (_now, metadata) => {
-    if (released) return;
-    paint(metadata.mediaTime);
-    handle = target.requestVideoFrameCallback(tick);
-  };
-
-  // 最初のフレームは今の位置で描いておく。録画の先頭が空の映像にならないように
-  paint(video.currentTime);
-  handle = target.requestVideoFrameCallback(tick);
-
   // **監視は release で外す。** 外し忘れると、録画が終わった後にタブを切り替えた
   // だけで FAIL が飛ぶ
   const onVisibilityChange = (): void => {
     if (released || hiddenNotified || !document.hidden) return;
     hiddenNotified = true;
-    options?.onHidden();
+    options?.onHidden?.();
   };
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    target.cancelVideoFrameCallback(handle);
+    track.stop();
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  };
+
+  // **描画の失敗は録画の失敗として知らせる。** 投げたままにすると rVFC を登録し直せず
+  // requestFrame が止まり、MediaRecorder は最後のフレームで静止した映像と進む音声を
+  // 成功として書き出す (タブが隠れたときに中断してまで避けた壊れ方と同じ)
+  const tick: FrameCallback = (_now, metadata) => {
+    if (released) return;
+    try {
+      paint(metadata.mediaTime);
+    } catch (error) {
+      release();
+      options?.onError?.(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    handle = target.requestVideoFrameCallback(tick);
+  };
+
+  // **最初のフレームの失敗は投げる。** まだ録画に渡しておらず、呼び出し元
+  // (beginRecording) の catch が録画の失敗として扱える。onError で知らせると、
+  // 呼び出し元は解放済みの合成で録画を始めてしまう。トラックだけは止めて残さない
+  try {
+    // 最初のフレームは今の位置で描いておく。録画の先頭が空の映像にならないように
+    paint(video.currentTime);
+  } catch (error) {
+    track.stop();
+    throw error;
+  }
+  handle = target.requestVideoFrameCallback(tick);
+
+  // 監視は最初のフレームを描けてから付ける (描けずに投げたときに残さない)
   document.addEventListener("visibilitychange", onVisibilityChange);
 
-  return {
-    track,
-    release(): void {
-      if (released) return;
-      released = true;
-      target.cancelVideoFrameCallback(handle);
-      track.stop();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    },
-  };
+  return { track, release };
 }

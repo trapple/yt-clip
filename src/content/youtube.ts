@@ -52,7 +52,7 @@ import {
   type Settings,
   type SettingsContext,
 } from "@/shared/settings";
-import { hasRenderableTelops } from "@/shared/telop";
+import { MAX_TELOP_TEXT_LENGTH, hasRenderableTelops } from "@/shared/telop";
 import { telopStyleOf, type TelopStyle } from "@/shared/telop-style";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 import { isOverLimit, totalSec } from "@/shared/timeline";
@@ -510,6 +510,14 @@ function onTelopText(index: number, text: string): void {
   const telop = currentTelops[index];
   if (telop === undefined || !canEditTelops()) return;
   if (telop.text === text) return;
+  // 状態機械は上限を超えた文言を UI のバグとして拒む。送る前に止めて理由を出す。
+  // 入力欄は消さない (削って直してもらう)
+  if (text.length > MAX_TELOP_TEXT_LENGTH) {
+    setStatus(
+      `テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`,
+    );
+    return;
+  }
   send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
 }
 
@@ -764,7 +772,8 @@ function refreshTelopPreview(): void {
   } catch (error) {
     // 動画要素がまだ無いか差し替えの最中は ElementNotFoundError で表れる。
     // それ以外の例外は想定していない不具合なので握り潰さずに投げ直す。
-    // 次の状態通知 (applyStateToDisplay) か、DOM 変化で mount() が呼ばれたときに追いつく
+    // 次の状態通知 (applyStateToDisplay)、href が変わったとき (observer の分岐)、
+    // バーを付け直したとき (mount) のいずれかで追いつく
     if (!(error instanceof ElementNotFoundError)) throw error;
     video = null;
   }
@@ -852,10 +861,14 @@ function applyStateToDisplay(state: ClipState): void {
     liveSegments.length === 0 || !("telops" in state) ? [] : state.telops;
   // 最後の区間の削除は UI で止めているが、手元の写しが古くて止め損ねた場合に
   // 黙って消さない
+  // **別の動画の状態では言わない。** 削除の応答待ちの間に別の動画へ移ると、取り込まない
+  // ので手元は空になるが、状態機械にはまだ残っている。idle は meta を持たないが、
+  // そのときは本当に消えている
   if (
     removedIndexOnNextState !== null &&
     previousTelopCount > 0 &&
-    currentTelops.length === 0
+    currentTelops.length === 0 &&
+    (stateMeta === null || stateMeta.videoId === currentVideoId())
   ) {
     setStatus("テロップも消えました");
   }
@@ -967,6 +980,19 @@ async function playRange(): Promise<void> {
 }
 
 /**
+ * テロップ付きの録画を失敗で落とす。文言は状態機械から返ってくるものと同じ
+ * (既定) か、それに詳細を足したもの。違う言い回しを出すと、直後に届く
+ * state/changed で表示が言い換わって見える
+ */
+function failTelopRecording(
+  reason: "telop-tab-hidden" | "telop-render-failed",
+  message: string = FAILURE_MESSAGES[reason],
+): void {
+  send({ type: "FAIL", reason });
+  setStatus(message);
+}
+
+/**
  * 録画の前半。IN へ seek するが再生はしない。
  * service worker が録画開始を指示し、それを受けた録画が実際に始まるまで
  * 動画を進めないため。
@@ -976,6 +1002,9 @@ async function prepareRecording(
   expectedVideoId: string,
 ): Promise<void> {
   try {
+    // 前の準備の残りで合成しない。以下のどの経路で抜けても、録画に使う
+    // テロップは下で決め直したものか null になる
+    recordingTelops = null;
     // 範囲を作った動画と今の動画が違えば、範囲もタイトルも URL も別の動画の
     // もの。そのまま録ると B の映像に A のタイトルと URL が付いて投稿される。
     // IN 単独で ready になれるため、OUT を押さずに録画へ進む経路がある
@@ -994,18 +1023,17 @@ async function prepareRecording(
     // **テロップの有無で録画の経路を決め、描けるかをここで確かめる。**
     // `beginRecording` で気付くと、router が理由を問わず recording-aborted に
     // 落とすので専用の文言が出ない。見た目もここで固定する (録画中に変えても効かない)
-    recordingTelops = hasRenderableTelops(currentTelops, currentSegments)
-      ? { telops: currentTelops, style: telopStyle }
-      : null;
-    if (recordingTelops !== null) {
-      assertTelopRenderable(getVideo());
-      // 隠れたまま始めると、最初のフレームから映像が止まる
+    if (hasRenderableTelops(currentTelops, currentSegments)) {
+      // 隠れたまま始めると、最初のフレームから映像が止まる。**描けるかより先に
+      // 見る。** 隠れた窓では動画がデコードされず videoWidth が 0 になり
+      // (テロップ spec §9.1)、先に「動画の大きさがまだ分かりません」が出て
+      // 本当の理由が伝わらない
       if (document.hidden) {
-        recordingTelops = null;
-        send({ type: "FAIL", reason: "telop-tab-hidden" });
-        setStatus(FAILURE_MESSAGES["telop-tab-hidden"]);
+        failTelopRecording("telop-tab-hidden");
         return;
       }
+      assertTelopRenderable(getVideo());
+      recordingTelops = { telops: currentTelops, style: telopStyle };
     }
 
     // **繋ぎ目の検査もここで済ませる。** 区間の間で初めて気付くと、既に
@@ -1055,9 +1083,7 @@ async function prepareRecording(
       return;
     }
     if (error instanceof TelopRenderError) {
-      recordingTelops = null;
-      send({ type: "FAIL", reason: "telop-render-failed" });
-      setStatus(error.message);
+      failTelopRecording("telop-render-failed", error.message);
       return;
     }
     if (error instanceof FrameCallbackUnsupportedError) {
@@ -1086,8 +1112,7 @@ async function beginRecording(): Promise<void> {
     // startCompositor はここから先の visibilitychange しか見ないので、隠れた
     // まま録り始めると音声だけ進むクリップになる。始める直前にもう一度見る
     if (telops !== null && document.hidden) {
-      send({ type: "FAIL", reason: "telop-tab-hidden" });
-      setStatus(FAILURE_MESSAGES["telop-tab-hidden"]);
+      failTelopRecording("telop-tab-hidden");
       return;
     }
     // 合成は録画の解放 (buildRecordingStream の release) に繋がるので、
@@ -1098,10 +1123,13 @@ async function beginRecording(): Promise<void> {
         : startCompositor(video, telops.telops, telops.style, undefined, {
             // 区間の間の広告検査と同じく FAIL で落とす。状態が recording を離れると
             // state/changed の処理が abortRecording を呼び、合成も解放される
-            onHidden: () => {
-              send({ type: "FAIL", reason: "telop-tab-hidden" });
-              setStatus(FAILURE_MESSAGES["telop-tab-hidden"]);
-            },
+            onHidden: () => failTelopRecording("telop-tab-hidden"),
+            // 描画が止まった録画を成功として出さない (静止した映像と進む音声になる)
+            onError: (error) =>
+              failTelopRecording(
+                "telop-render-failed",
+                new TelopRenderError(error.message).message,
+              ),
           });
     handle = await startRecording(video, mimeType, {
       videoOverride,

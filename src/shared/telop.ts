@@ -9,6 +9,14 @@ import { assertValidRange } from "@/shared/timeline";
 import type { ClipRange, Telop } from "@/shared/types";
 
 /**
+ * 1 つのテロップの文言の上限 (UTF-16 の長さ)。
+ *
+ * 文言は状態ごと `chrome.storage.session` に保存され、プレビューと録画で毎フレーム
+ * 描かれる。上限が無いと、巨大な貼り付けで保存が失敗したり描画が膨らんだりする
+ */
+export const MAX_TELOP_TEXT_LENGTH = 500;
+
+/**
  * テロップとして成立しているか確かめる。
  *
  * **握り潰して直さない。** ここに不正な値が来るのは UI のバグであり、黙って
@@ -19,6 +27,12 @@ export function assertValidTelops(telops: Telop[]): void {
     assertValidRange(telop);
     if (typeof telop.text !== "string") {
       throw new TypeError(`テロップの文言が文字列ではありません: ${String(telop.text)}`);
+    }
+    // UI (onTelopText) が送る前に止めている。ここに来るのは UI のバグ
+    if (telop.text.length > MAX_TELOP_TEXT_LENGTH) {
+      throw new RangeError(
+        `テロップの文言が ${MAX_TELOP_TEXT_LENGTH} 文字を超えています: ${telop.text.length} 文字`,
+      );
     }
   }
 }

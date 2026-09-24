@@ -43,7 +43,9 @@ function makeVideo(width = 1920, height = 1080) {
   };
 }
 
-function makeCanvas(options: { tainted?: boolean; noContext?: boolean } = {}) {
+function makeCanvas(
+  options: { tainted?: boolean; noContext?: boolean; fillThrows?: boolean } = {},
+) {
   const log = { drawn: 0, requested: 0, stopped: false, texts: [] as string[] };
   const track = {
     kind: "video",
@@ -72,7 +74,10 @@ function makeCanvas(options: { tainted?: boolean; noContext?: boolean } = {}) {
     save: () => undefined,
     restore: () => undefined,
     strokeText: () => undefined,
-    fillText: (text: string) => log.texts.push(text),
+    fillText: (text: string) => {
+      if (options.fillThrows) throw new Error("fillText が壊れた");
+      log.texts.push(text);
+    },
   };
   const canvas = {
     width: 0,
@@ -231,5 +236,52 @@ describe("タブが隠れたとき", () => {
     setHidden(true);
     expect(onHidden).toHaveBeenCalledOnce();
     setHidden(false);
+  });
+});
+
+describe("描画が例外で止まったとき", () => {
+  const telop = { startSec: 10, endSec: 11, text: "出る" };
+
+  test("録画中のフレームで落ちたら onError を呼び、トラックを止め、以後は描かない", () => {
+    // rVFC を登録し直せずに黙って止まると、最後のフレームで静止した映像と
+    // 進む音声が成功として書き出される
+    const fake = makeVideo();
+    const { canvas, log } = makeCanvas({ fillThrows: true });
+    const onError = vi.fn();
+    startCompositor(
+      fake.video,
+      [telop],
+      STYLE,
+      { createCanvas: () => canvas },
+      { onHidden: vi.fn(), onError },
+    );
+    fake.frame(10.5);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+    expect(log.stopped).toBe(true);
+    expect(fake.pending()).toBe(0);
+    const drawn = log.drawn;
+    fake.frame(10.6);
+    expect(log.drawn).toBe(drawn);
+  });
+
+  test("最初のフレームで落ちたら呼び出し元に投げ、トラックを残さない", () => {
+    // まだ録画に渡していないので、失敗は呼び出し元 (beginRecording の catch) が扱う
+    const fake = makeVideo();
+    fake.video.currentTime = 10.5;
+    const { canvas, log } = makeCanvas({ fillThrows: true });
+    const onError = vi.fn();
+    expect(() =>
+      startCompositor(
+        fake.video,
+        [telop],
+        STYLE,
+        { createCanvas: () => canvas },
+        { onHidden: vi.fn(), onError },
+      ),
+    ).toThrow("fillText が壊れた");
+    expect(onError).not.toHaveBeenCalled();
+    expect(log.stopped).toBe(true);
+    expect(fake.pending()).toBe(0);
   });
 });

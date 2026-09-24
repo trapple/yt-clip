@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   activeTelops,
+  MAX_TELOP_TEXT_LENGTH,
   assertValidTelops,
   hasRenderableTelops,
   overlapsSegments,
@@ -32,6 +33,18 @@ describe("assertValidTelops", () => {
   test("負の開始は弾く", () => {
     expect(() =>
       assertValidTelops([{ startSec: -1, endSec: 2, text: "a" }]),
+    ).toThrow(RangeError);
+  });
+
+  test("文言は 500 文字まで通し、超えたら弾く", () => {
+    // 状態ごと chrome.storage.session に保存され、毎フレーム描かれる。上限が無いと
+    // 巨大な貼り付けで保存も描画も膨らむ
+    expect(MAX_TELOP_TEXT_LENGTH).toBe(500);
+    expect(() =>
+      assertValidTelops([{ startSec: 0, endSec: 1, text: "あ".repeat(500) }]),
+    ).not.toThrow();
+    expect(() =>
+      assertValidTelops([{ startSec: 0, endSec: 1, text: "あ".repeat(501) }]),
     ).toThrow(RangeError);
   });
 

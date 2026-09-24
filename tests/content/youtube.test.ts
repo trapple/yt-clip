@@ -250,6 +250,48 @@ function changeSettings(next: Record<string, unknown>): void {
   storageListener?.({ settings: { newValue: next } }, "sync");
 }
 
+/**
+ * 描ける canvas の 2D 文脈のモック。プレビューと合成が呼ぶものだけ持つ。
+ *
+ * **既定を null にしない。** 描けない環境ではテロップ付きの状態が届くたびに
+ * プレビューが warn し、テストの出力が警告で埋まる
+ */
+function makeCanvasContext(
+  options: { tainted?: boolean; fillText?: () => void } = {},
+): CanvasRenderingContext2D {
+  let font = "10px sans-serif";
+  const ctx = {
+    get font(): string {
+      return font;
+    },
+    set font(value: string) {
+      font = value;
+    },
+    drawImage: () => undefined,
+    getImageData: () => {
+      if (options.tainted) throw new DOMException("tainted", "SecurityError");
+      return {};
+    },
+    clearRect: () => undefined,
+    save: () => undefined,
+    restore: () => undefined,
+    strokeText: () => undefined,
+    fillText: options.fillText ?? (() => undefined),
+  };
+  return ctx as unknown as CanvasRenderingContext2D;
+}
+
+function spyOnGetContext() {
+  return vi.spyOn(HTMLCanvasElement.prototype, "getContext");
+}
+
+/** getContext の spy。テストが差し替えた後は `useDefaultCanvasContext` で戻す */
+let getContextSpy: ReturnType<typeof spyOnGetContext> | null = null;
+
+function useDefaultCanvasContext(): void {
+  getContextSpy?.mockImplementation(() => makeCanvasContext());
+}
+
 function installGlobals(): void {
   class FakeMediaRecorder implements FakeRecorder {
     static isTypeSupported(): boolean {
@@ -341,7 +383,7 @@ function installGlobals(): void {
   });
 
   // プレビュー (telop-preview.ts) のため。jsdom は ResizeObserver を持たず、
-  // canvas も描けない。描けない環境ではプレビューは warn して何もしない
+  // canvas も描けない (getContext は "Not implemented" を出して null を返す)
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -349,7 +391,8 @@ function installGlobals(): void {
       disconnect(): void {}
     },
   );
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  getContextSpy = spyOnGetContext();
+  useDefaultCanvasContext();
 }
 
 /**
@@ -1726,32 +1769,43 @@ describe("テロップ付きの録画", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
   let restoreCanvas: (() => void) | null = null;
 
-  /** canvas を描ける状態にする。tainted なら getImageData が SecurityError */
-  function installCanvas(options: { tainted?: boolean } = {}) {
-    const track = { kind: "video", requestFrame: () => undefined, stop: () => undefined };
-    const ctx = {
-      font: "10px sans-serif",
-      drawImage: () => undefined,
-      getImageData: () => {
-        if (options.tainted) throw new DOMException("tainted", "SecurityError");
-        return {};
+  /**
+   * 録画の canvas を用意する。tainted なら getImageData が SecurityError。
+   * recordingDrawThrows なら、録画に使った canvas (captureStream を呼んだもの) に
+   * 文字を描くと投げる。プレビューの canvas は壊さない (壊すとプレビューが warn する)
+   */
+  function installCanvas(
+    options: { tainted?: boolean; recordingDrawThrows?: boolean } = {},
+  ) {
+    const track = {
+      kind: "video",
+      requestFrame: () => undefined,
+      stopped: false,
+      stop() {
+        this.stopped = true;
       },
-      clearRect: () => undefined,
-      save: () => undefined,
-      restore: () => undefined,
-      strokeText: () => undefined,
-      fillText: () => undefined,
     };
-    const getContext = vi
-      .spyOn(HTMLCanvasElement.prototype, "getContext")
-      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+    const captured = new Set<HTMLCanvasElement>();
+    getContextSpy?.mockImplementation(function (this: HTMLCanvasElement) {
+      return makeCanvasContext({
+        tainted: options.tainted,
+        fillText: () => {
+          if (options.recordingDrawThrows && captured.has(this)) {
+            throw new Error("描画が壊れた");
+          }
+        },
+      });
+    });
     Object.defineProperty(HTMLCanvasElement.prototype, "captureStream", {
       configurable: true,
-      value: () => ({ getVideoTracks: () => [track] }),
+      value(this: HTMLCanvasElement) {
+        captured.add(this);
+        return { getVideoTracks: () => [track] };
+      },
     });
-    // mockRestore にしない。Task 11 で installGlobals に置く「既定は null」の spy まで
-    // 外れて jsdom の実装に戻り、以降のテストの出力に "Not implemented" が混ざる
-    restoreCanvas = () => getContext.mockReturnValue(null);
+    // mockRestore にしない。installGlobals の spy まで外れて jsdom の実装に戻り、
+    // 以降のテストの出力に "Not implemented" が混ざる
+    restoreCanvas = useDefaultCanvasContext;
     return { track };
   }
 
@@ -1906,6 +1960,39 @@ describe("テロップ付きの録画", () => {
     expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
   });
 
+  test("録画中に合成の描画が落ちたら telop-render-failed で中断する", async () => {
+    // 描画が止まったまま録り続けると、静止した映像と進む音声が成功として書き出される
+    const { track } = installCanvas({ recordingDrawThrows: true });
+    await recordWith([TELOP]);
+    sent = [];
+
+    // テロップの出る時刻のフレームで初めて文字を描く
+    video.advanceFrame(12);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-render-failed" });
+    expect(statusText()).toContain("テロップを動画に描けませんでした");
+    expect(track.stopped).toBe(true);
+  });
+
+  test("隠れていて動画の大きさも分からないときは、隠れたことを理由にする", async () => {
+    // 隠れた窓では動画がデコードされず videoWidth が 0 になる。大きさの検査を
+    // 先にすると「動画の大きさがまだ分かりません」が出て本当の理由が伝わらない
+    installCanvas();
+    Object.defineProperty(video.element, "videoWidth", { configurable: true, value: 0 });
+    setHidden(true);
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(clipEvents()).not.toContainEqual({
+      type: "FAIL",
+      reason: "telop-render-failed",
+    });
+  });
+
   test("テロップの無い録画では隠れても中断しない", async () => {
     // 今の経路は隠れても映像が止まらない (§9.1)
     await recordWith([]);
@@ -1999,6 +2086,30 @@ describe("テロップの一覧", () => {
     });
   });
 
+  test("500 文字を超える文言は送らず、理由を出して入力欄は残す", async () => {
+    // 状態ごと保存され毎フレーム描かれる。上限を超えたものは状態機械に拒まれる
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+
+    textarea.value = "あ".repeat(501);
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("テロップは 500 文字までです (いま 501 文字)");
+    // 直してもらうので消さない
+    expect(textarea.value).toBe("あ".repeat(501));
+
+    textarea.value = "あ".repeat(500);
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "UPDATE_TELOP",
+      index: 0,
+      telop: { ...TELOP, text: "あ".repeat(500) },
+    });
+  });
+
   test("テロップが残っていると最後の 1 区間は消せない", async () => {
     // 区間が 0 個になると idle に戻り、手入力の文言もまとめて消える
     await showReady([TELOP]);
@@ -2021,6 +2132,20 @@ describe("テロップの一覧", () => {
     await flush();
 
     expect(statusText()).toBe("テロップも消えました");
+  });
+
+  test("削除の応答待ちの間に別の動画へ移っても、テロップが消えたとは言わない", async () => {
+    // 応答の状態は元の動画のもの。別の動画のタブでは取り込まないので手元の
+    // テロップは空になるが、状態機械にはまだ残っている
+    await showReady([TELOP], [RANGE, { startSec: 30, endSec: 40 }]);
+    segmentRows()[1]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+    history.pushState({}, "", "/watch?v=video-b");
+
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(statusText()).not.toBe("テロップも消えました");
   });
 
   test("preview では操作できない", async () => {
