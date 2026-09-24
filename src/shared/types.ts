@@ -4,6 +4,20 @@ export type ClipRange = {
   endSec: number;
 };
 
+/**
+ * 動画に重ねる文字。
+ *
+ * **時刻は元動画の秒。出力タイムラインではない。** 区間を並べ替えたり縮めたり
+ * してもテロップが発話に付いてくるようにするため (テロップ spec §0.1)。
+ * 自動文字起こし (Phase 2) の出力もそのまま入れられる
+ */
+export type Telop = {
+  startSec: number;
+  endSec: number;
+  /** 改行を含んでよい。空文字は「まだ書いていない」テロップで、描かない */
+  text: string;
+};
+
 export type VideoMeta = {
   videoId: string;
   title: string;
