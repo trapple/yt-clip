@@ -14,8 +14,10 @@ export const SIDE_PANEL_BODY_ID = `${SIDE_PANEL_ID}-body`;
 
 /*
  * 位置と寸法。**YouTube の実機の値に合わせている。**
- * 出所: spec §1 の想定値 (YouTube の通常のレイアウト)。実測は `npm run check:telop` の
- * 「パネルの位置の出所 (YouTube の実測)」で残し、ここに書き写す
+ * 出所: 2026-09-24 に `npm run check:telop` の「パネルの位置の出所 (YouTube の実測)」で測った
+ * (viewport 1920x1080): #masthead-container の高さ 56px・z-index 2020、
+ * #secondary の幅 544px、ytd-popup-container の z-index auto。
+ * YouTube のレイアウトが変わったら測り直す
  */
 /** YouTube のヘッダー (#masthead-container) の高さ */
 const MASTHEAD_HEIGHT_PX = 56;
