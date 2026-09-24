@@ -43,6 +43,11 @@ const SEGMENTS = [
   { startSec: 60, endSec: 63 },
   { startSec: 120, endSec: 123 },
 ];
+/**
+ * 受け入れ条件の確認 (1440x795) で足す 5 区間の頭。既定の長さ (15 秒) で重ならない
+ * よう 30 秒ずつ離す。合計は上限 (60 秒) を超えるが、録画はしないので構わない
+ */
+const LAYOUT_SEGMENT_STARTS = [200, 230, 260, 290, 320];
 /** 1 つは 2 行にして、行の積み方も画像で見られるようにする */
 const TELOPS = [
   { startSec: 60.5, text: "テロップの確認\n2 行目です" },
@@ -367,8 +372,10 @@ test("テロップの実機確認", async () => {
   ).not.toBeEmpty({ timeout: 30_000 });
 
   const button = (name: string) => bar.getByRole("button", { name, exact: true });
-  const segmentRows = bar.locator("[data-role=segment]");
-  const telopRows = bar.locator("[data-role=telop]");
+  // 一覧と設定は右側のパネルにある。バーには拡大バーと操作の行だけ
+  const panel = page.locator("#yt-clip-panel");
+  const segmentRows = panel.locator("[data-role=segment]");
+  const telopRows = panel.locator("[data-role=telop]");
 
   /** 広告が出ている間は操作も録画も意味を持たない。消えるまで待つ */
   async function waitNoAd(): Promise<void> {
@@ -488,7 +495,7 @@ test("テロップの実機確認", async () => {
   async function addTelops(): Promise<void> {
     for (const [i, telop] of TELOPS.entries()) {
       await seekPaused(telop.startSec);
-      await bar.locator("[data-role=add-telop]").click();
+      await panel.locator("[data-role=add-telop]").click();
       await expect(telopRows).toHaveCount(i + 1);
       await setTelopText(i, telop.text);
     }
@@ -778,7 +785,7 @@ test("テロップの実機確認", async () => {
     await segmentRows.nth(1).locator("[data-role=remove]").click();
     await expect(segmentRows).toHaveCount(1);
     await seekPaused(TELOPS[0]!.startSec);
-    await bar.locator("[data-role=add-telop]").click();
+    await panel.locator("[data-role=add-telop]").click();
     await expect(telopRows).toHaveCount(1);
     await segmentRows.nth(0).locator("[data-role=remove]").click();
     await page.waitForTimeout(500);
@@ -792,13 +799,116 @@ test("テロップの実機確認", async () => {
     );
   });
 
+  // --- パネルの位置の出所 (spec §1: 実機の値を確かめて side-panel.ts に書く) ------
+  await check("パネルの位置の出所 (YouTube の実測)", async () => {
+    const measured = await page.evaluate(() => {
+      const box = (selector: string) => {
+        const element = document.querySelector(selector);
+        if (element === null) return null;
+        const b = element.getBoundingClientRect();
+        return { x: b.x, y: b.y, width: b.width, height: b.height };
+      };
+      const zIndex = (selector: string) => {
+        const element = document.querySelector(selector);
+        return element === null ? null : getComputedStyle(element).zIndex;
+      };
+      return {
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        masthead: box("#masthead-container"),
+        mastheadZIndex: zIndex("#masthead-container"),
+        secondary: box("#secondary"),
+        popupContainerZIndex: zIndex("ytd-popup-container"),
+        panel: box("#yt-clip-panel"),
+        panelZIndex: zIndex("#yt-clip-panel"),
+      };
+    });
+    // 値そのものは人が読んで side-panel.ts のコメントに書き写す。ここでは読めたかだけ見る
+    record(
+      "パネルの位置の出所 (YouTube の実測)",
+      measured.masthead !== null && measured.secondary !== null && measured.panel !== null,
+      measured,
+    );
+  });
+
   // --- シンプルモードでは一覧が出ない ------------------------------------------
   await check("シンプルモードでテロップの一覧が出ない", async () => {
     await writeSettings({ mode: "simple" });
-    await expect(bar.locator("[data-role=add-telop]")).toBeHidden({ timeout: 10_000 });
-    const visible = await bar.locator("[data-role=add-telop]").isVisible();
-    record("シンプルモードでテロップの一覧が出ない", !visible, { addTelopVisible: visible });
+    const addTelop = panel.locator("[data-role=add-telop]");
+    // **有ることを先に確かめる。** toBeHidden は見つからない要素でも通るので、
+    // 探す場所を間違えていても素通りしてしまう
+    await expect(addTelop).toHaveCount(1, { timeout: 10_000 });
+    await expect(addTelop).toBeHidden({ timeout: 10_000 });
+    const count = await addTelop.count();
+    const visible = await addTelop.isVisible();
+    record("シンプルモードでテロップの一覧が出ない", count === 1 && !visible, {
+      addTelopCount: count,
+      addTelopVisible: visible,
+    });
   });
+
+  // --- 受け入れ条件 (spec の冒頭): 1440x795 でバーが画面に収まり、一覧はパネルの中で届く ---
+  // 1920x1080 の確認がすべて済んでから切り替え、最後に戻す
+  await check(
+    "受け入れ条件 1440x795: バーとパネルが画面に収まり、パネルの中でスクロールする",
+    async () => {
+      await page.setViewportSize({ width: 1440, height: 795 });
+      try {
+        // 直前の項目でシンプルに切り替えたので、区間とテロップは消えている
+        await writeSettings({ mode: "edit" });
+        await expect(button("＋ 区間を追加")).toBeVisible({ timeout: 10_000 });
+        for (const [i, startSec] of LAYOUT_SEGMENT_STARTS.entries()) {
+          await seekPaused(startSec);
+          await button("＋ 区間を追加").click();
+          await expect(segmentRows).toHaveCount(i + 1);
+        }
+        for (const [i, startSec] of LAYOUT_SEGMENT_STARTS.entries()) {
+          await seekPaused(startSec + 1);
+          await panel.locator("[data-role=add-telop]").click();
+          await expect(telopRows).toHaveCount(i + 1);
+        }
+        // 設定も開く。開くと必ず溢れるので、パネルの中でのスクロールを確実に見られる
+        await button("⚙").click();
+        await expect(page.locator("#yt-clip-setting-mode")).toBeVisible();
+
+        // 「スクロールせずに操作できる」かを測るので、ページは先頭に戻す
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.waitForTimeout(500);
+        const measured = await page.evaluate(() => {
+          const rect = (id: string) => {
+            const element = document.getElementById(id);
+            if (element === null) throw new Error(`#${id} がありません`);
+            const b = element.getBoundingClientRect();
+            return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
+          };
+          const body = document.getElementById("yt-clip-panel-body");
+          if (body === null) throw new Error("#yt-clip-panel-body がありません");
+          const player = document.getElementById("movie_player")?.getBoundingClientRect();
+          return {
+            innerHeight: window.innerHeight,
+            scrollY: window.scrollY,
+            bar: rect("yt-clip-bar"),
+            panel: rect("yt-clip-panel"),
+            bodyScrollHeight: body.scrollHeight,
+            bodyClientHeight: body.clientHeight,
+            // 合否には入れない。パネルが動画やバーに重なっていないかを人が見る材料
+            playerRight: player?.right ?? null,
+          };
+        });
+        const file = join(OUT_DIR, "layout-1440x795.png");
+        await page.screenshot({ path: file });
+        record(
+          "受け入れ条件 1440x795: バーとパネルが画面に収まり、パネルの中でスクロールする",
+          measured.scrollY === 0 &&
+            measured.bar.bottom <= measured.innerHeight &&
+            measured.panel.bottom <= measured.innerHeight &&
+            measured.bodyScrollHeight > measured.bodyClientHeight,
+          { ...measured, file },
+        );
+      } finally {
+        await page.setViewportSize({ width: 1920, height: 1080 });
+      }
+    },
+  );
 
   await writeResults();
   const failed = Object.entries(results)
