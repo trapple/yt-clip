@@ -209,3 +209,5 @@ IN / OUT / 録画と拡大バーを操作できる。区間とテロップの一
   足した行へのスクロールは応答後 / 文言の言い換え / margin-left:auto を消す) を取り込み
 - [選択] 実装スタイル: D (branch + SDD)。独立タスクが 3 つ以上 (side-panel モジュール / youtube.ts の配線 /
   E2E と受け入れ確認 / ドキュメントと掲載画像)。branch は feat/telop-phase1 から分岐 (テロップの UI の上に乗るため)
+- [plan] .claude/plans/2026-09-24-side-panel.md (8 タスク)。[review:plan/ゼロ context の実装者/fable] 1 往復目 Approved
+  (plan のコードを複製したリポジトリに適用し、tsc と vitest 652 件の通過まで確認)。Recommendations は各タスクの派遣時に補足する
