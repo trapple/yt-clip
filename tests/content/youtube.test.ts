@@ -973,6 +973,25 @@ describe("設定", () => {
   });
 });
 
+describe("状態の文言", () => {
+  test("全文を title にも入れる (1 行に省略して出すため)", async () => {
+    clickButton("IN");
+    await flush();
+
+    const status = document.getElementById("yt-clip-bar-status");
+    expect(status?.textContent).not.toBe("");
+    expect(status?.title).toBe(status?.textContent);
+  });
+
+  test("⚙ は状態の文言のすぐ後ろ (右端) に置く", () => {
+    const status = document.getElementById("yt-clip-bar-status");
+    const next = status?.nextElementSibling;
+    expect(next?.textContent).toBe("⚙");
+    // 右端へは状態の文言の flex:1 で寄せる。margin-left:auto と意図を 2 つ持たない
+    expect(next instanceof HTMLElement ? next.style.marginLeft : "missing").toBe("");
+  });
+});
+
 describe("最大秒数の設定", () => {
   /** 直近に送った MARK_IN の範囲 */
   function markedRange(): ClipRange {

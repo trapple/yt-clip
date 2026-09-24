@@ -212,6 +212,8 @@ function setStatus(text: string): void {
   const status = document.getElementById(`${BAR_ID}-status`);
   if (status !== null) {
     status.textContent = text;
+    // 1 行に省略して出すので、全文はマウスを乗せたときに読めるようにする
+    status.title = text;
   }
 }
 
@@ -1331,6 +1333,7 @@ function buildBar(): HTMLElement {
   status.id = `${BAR_ID}-status`;
   status.style.cssText = BAR_STYLE.status;
   status.textContent = "IN を押して開始位置を指定";
+  status.title = status.textContent;
 
   // 状態ごとに中身を入れ替える箱。押しても拒まれるだけの操作は出さない
   const actions = document.createElement("div");
@@ -1338,10 +1341,10 @@ function buildBar(): HTMLElement {
   actions.style.cssText = BAR_STYLE.row;
 
   const settingsPanel = createSettingsPanel({ getContext: readChannelContext });
+  // 状態の文言 (flex:1) が残りの幅を取るので、⚙ は右端に来る。操作の並びから
+  // 外して、押し間違いを減らす
   const settingsButton = makeButton("⚙", false, () => settingsPanel.toggle());
   settingsButton.title = "設定";
-  // 右端へ寄せる。操作の並びから外して、押し間違いを減らす
-  settingsButton.style.cssText += "margin-left:auto;";
 
   // 「追加してから頭と尻を決める」順に並べる
   if (addButton !== null) row.append(addButton);

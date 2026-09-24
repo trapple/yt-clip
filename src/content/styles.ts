@@ -5,8 +5,8 @@
  * 場所 (`#below` 配下の light DOM) では 1 つも解決せず、書いたフォールバック値
  * だけが効く。実機で確認済み。そのため配色は自前で持ち、テーマは自分で判定する。
  *
- * 配色は自前の変数 (`--ytc-*`) としてバーの根に置く。テーマが切り替わったら
- * その 6 個を差し替えるだけで全体が追従する。
+ * 配色は自前の変数 (`--ytc-*`) としてバーと右側のパネルの根に置く。テーマが
+ * 切り替わったらその 7 個を差し替えるだけで全体が追従する。
  */
 
 export type Palette = {
@@ -16,6 +16,11 @@ export type Palette = {
   border: string;
   accent: string;
   onAccent: string;
+  /**
+   * 右側のパネルの地。**`surface` とは別に持つ。** `surface` はテロップ行・選択中の
+   * 区間行・設定の背景に使っており、それを地にすると行と設定が地に溶ける
+   */
+  panel: string;
 };
 
 /** ライトテーマ。白地に置くので、面は白より確実に暗くする */
@@ -26,6 +31,7 @@ const LIGHT: Palette = {
   border: "#c6c6c6",
   accent: "#065fd4",
   onAccent: "#ffffff",
+  panel: "#ffffff",
 };
 
 /** ダークテーマ。黒地に置くので、面は黒より確実に明るくする */
@@ -36,6 +42,7 @@ const DARK: Palette = {
   border: "#5a5a5a",
   accent: "#3ea6ff",
   onAccent: "#0f0f0f",
+  panel: "#212121",
 };
 
 /**
@@ -59,6 +66,7 @@ export function applyPalette(element: HTMLElement, dark: boolean): void {
   element.style.setProperty("--ytc-border", palette.border);
   element.style.setProperty("--ytc-accent", palette.accent);
   element.style.setProperty("--ytc-on-accent", palette.onAccent);
+  element.style.setProperty("--ytc-panel", palette.panel);
 }
 
 const FONT = 'Roboto,"Noto Sans JP","Helvetica Neue",Arial,sans-serif';
@@ -67,7 +75,14 @@ const BUTTON_BASE = `appearance:none;border-radius:18px;height:36px;padding:0 16
 export const BAR_STYLE = {
   root: `display:flex;flex-direction:column;gap:10px;padding:12px;margin:8px 0;border:1px solid var(--ytc-border);border-radius:12px;color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
   row: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
-  status: "color:var(--ytc-text-sub);font-size:12px;",
+  /**
+   * 状態の文言。**1 行に収めて、はみ出しは … にする。** 長い文言 (「テロップが N 件
+   * 残っています…」など) で行が 2 段に折り返すと、バーが伸びて動画と操作が 1 画面に
+   * 収まらなくなる。全文は title で出す。`min-width:0` が無いと flex の子は中身より
+   * 縮まず折り返す。`flex:1` で残りの幅を取るので、後ろの ⚙ は右端に来る
+   */
+  status:
+    "color:var(--ytc-text-sub);font-size:12px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
   /** 主操作。押してほしいものを塗りつぶす */
   primaryButton: `${BUTTON_BASE}border:none;background:var(--ytc-accent);color:var(--ytc-on-accent);`,
   /** 副操作。輪郭だけ */
@@ -133,4 +148,25 @@ export const TELOP_STYLE = {
   iconButton: SEGMENT_STYLE.iconButton,
   textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
   textarea: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;`,
+} as const;
+
+/**
+ * 右側のパネル (`side-panel.ts`)。位置・幅・重なり順は YouTube の実機の値に合わせる
+ * ので、出所と一緒に `side-panel.ts` が持つ。
+ *
+ * **`root` と `body` は display を持たない。** 出し入れは `side-panel.ts` が
+ * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の
+ * display が勝って出たままになる
+ */
+export const SIDE_PANEL_STYLE = {
+  /** 下のおすすめ動画が透けると読めないので、不透明な地と影を付ける */
+  root: `flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
+  header: "display:flex;align-items:center;gap:8px;padding:8px 12px;",
+  title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
+  collapseButton: SEGMENT_STYLE.iconButton,
+  /**
+   * 中身の箱。**超えた分はここだけでスクロールする。** `min-height:0` が無いと
+   * flex の子は中身より縮まず、パネルごと画面の下へ伸びる
+   */
+  body: "flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
 } as const;
