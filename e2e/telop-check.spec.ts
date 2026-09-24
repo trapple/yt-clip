@@ -107,7 +107,6 @@ async function check(name: string, run: () => Promise<void>): Promise<void> {
   await writeResults();
 }
 
-/** ffmpeg / ffprobe は引数の抜け 1 つで暴走しうるので必ず timeout を付ける */
 /**
  * CDP の応答を待つ処理に上限を付ける。Chrome が無応答だと Playwright の send / close は
  * 返らず、フックのタイムアウトまで止まる
@@ -124,6 +123,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
   }
 }
 
+/** ffmpeg / ffprobe は引数の抜け 1 つで暴走しうるので必ず timeout を付ける */
 function runTool(command: string, args: string[]): string {
   return execFileSync(command, args, { timeout: 60_000, encoding: "utf8" });
 }
