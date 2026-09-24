@@ -847,6 +847,18 @@ test("テロップの実機確認", async () => {
     });
   });
 
+  /**
+   * 拡張が覚えた窓の位置 (何も覚えていなければ null)。受け入れ条件の記録にも使うので、
+   * その検査より前に置く
+   */
+  async function readWindowLayout(): Promise<Record<string, unknown> | null> {
+    const worker = await getWorker();
+    return worker.evaluate(async () => {
+      const stored = await chrome.storage.local.get("windowLayout");
+      return (stored.windowLayout as Record<string, unknown> | undefined) ?? null;
+    });
+  }
+
   // --- 受け入れ条件 (フロートの窓の spec A.4): 1440x795 で、最初の位置のままのバーの窓が
   // プレイヤーの下に重ならずに収まり、一覧はパネルの窓の中で届く -----------------------------
   // 1920x1080 の確認がすべて済んでから切り替え、最後に戻す
@@ -904,6 +916,12 @@ test("テロップの実機確認", async () => {
             bodyClientHeight: body.clientHeight,
           };
         });
+        // **記録だけ (合否には入れない)。** 落ちたときに「最初の位置のままか、動かした窓か」を
+        // 後から読めるようにする (覚えた位置があれば、その窓は最初の位置を取り直さない)。
+        // 読めなくても測定の合否は変えない
+        const windowLayout = await readWindowLayout().catch((error: unknown) => ({
+          error: String(error),
+        }));
         const file = join(OUT_DIR, "layout-1440x795.png");
         await page.screenshot({ path: file });
         record(
@@ -916,7 +934,7 @@ test("テロップの実機確認", async () => {
             measured.panel.right <= measured.innerWidth &&
             measured.panel.bottom <= measured.innerHeight &&
             measured.bodyScrollHeight > measured.bodyClientHeight,
-          { ...measured, file },
+          { ...measured, windowLayout, file },
         );
       } finally {
         await page.setViewportSize({ width: 1920, height: 1080 });
@@ -950,15 +968,6 @@ test("テロップの実機確認", async () => {
     await page.mouse.up();
     // 覚える (chrome.storage.local への保存) のは指を離した後に非同期で走る
     await page.waitForTimeout(500);
-  }
-
-  /** 拡張が覚えた窓の位置 (何も覚えていなければ null) */
-  async function readWindowLayout(): Promise<Record<string, unknown> | null> {
-    const worker = await getWorker();
-    return worker.evaluate(async () => {
-      const stored = await chrome.storage.local.get("windowLayout");
-      return (stored.windowLayout as Record<string, unknown> | undefined) ?? null;
-    });
   }
 
   await check("窓を動かすと、読み込み直しても同じ位置に出る", async () => {
@@ -1034,10 +1043,11 @@ test("テロップの実機確認", async () => {
     // 画面の外の座標へはマウスを運べない (ページにイベントが届かない) ので、隅で止める。
     // バーのつまみは右下、パネルの見出しは左下へ。反対の隅へ送るのは、次の項目で
     // ダブルクリックするときに 2 つの窓が重ならないようにするため
-    const grip = centerOf(await boxOf(barGrip));
+    const gripBefore = await boxOf(barGrip);
+    const grip = centerOf(gripBefore);
     await dragFromTo(grip, { x: viewport.width - 1, y: viewport.height - 1 });
-    const header = await boxOf(panelHeader);
-    const headerAt = { x: header.x + 40, y: header.y + header.height / 2 };
+    const headerBefore = await boxOf(panelHeader);
+    const headerAt = { x: headerBefore.x + 40, y: headerBefore.y + headerBefore.height / 2 };
     await dragFromTo(headerAt, { x: 1, y: viewport.height - 1 });
 
     const gripBox = await boxOf(barGrip);
@@ -1047,10 +1057,18 @@ test("テロップの実機確認", async () => {
       b.y >= -0.5 &&
       b.x + b.width <= viewport.width + 0.5 &&
       b.y + b.height <= viewport.height + 0.5;
+    // **ドラッグが効いたことも確かめる。** 掴めなかった (pointerdown が落ちた) ときも掴む場所は
+    // 元の位置で画面の中にあり、inside だけでは通ってしまう。隅へ送るので、詰められても
+    // x か y が大きく動く
+    const moved = (before: Box, after: Box) =>
+      Math.abs(after.x - before.x) >= 50 || Math.abs(after.y - before.y) >= 50;
     record(
       "窓を画面の外へドラッグしても、掴む場所が画面に残る",
-      inside(gripBox) && inside(headerBox),
-      { viewport, gripBox, headerBox },
+      inside(gripBox) &&
+        inside(headerBox) &&
+        moved(gripBefore, gripBox) &&
+        moved(headerBefore, headerBox),
+      { viewport, gripBefore, gripBox, headerBefore, headerBox },
     );
   });
 
