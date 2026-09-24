@@ -8,8 +8,12 @@ import {
   mergeSettings,
   normalizeHashtags,
   hashtagsFor,
+  parseColor,
   parseMaxClipSec,
   parseMode,
+  parseTelopFont,
+  parseTelopFontSize,
+  parseTelopStrokeWidth,
   saveSettings,
   tagsVariable,
   type Settings,
@@ -412,5 +416,107 @@ describe("parseMode", () => {
   test("知らない値は既定に倒さず理由を返す", () => {
     // 選択肢しか出していないのに別の値が来たら、それは UI のバグ
     expect(parseMode("advanced").ok).toBe(false);
+  });
+});
+
+describe("テロップの見た目", () => {
+  test("既定値", () => {
+    expect(DEFAULT_SETTINGS).toMatchObject({
+      telopFontSizePx: 64,
+      telopFont: "ゴシック",
+      telopFillColor: "#ffffff",
+      telopStrokeColor: "#000000",
+      telopStrokeWidthPx: 8,
+    });
+  });
+
+  test("読み込み時の範囲外・型違い・不正な色は既定値に倒す", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const merged = mergeSettings({
+      telopFontSizePx: 999,
+      telopFont: 'bad"name',
+      telopFillColor: "red",
+      telopStrokeColor: 3,
+      telopStrokeWidthPx: -1,
+    });
+    expect(merged).toMatchObject({
+      telopFontSizePx: 64,
+      telopFont: "ゴシック",
+      telopFillColor: "#ffffff",
+      telopStrokeColor: "#000000",
+      telopStrokeWidthPx: 8,
+    });
+    // 黙って落とさない
+    expect(warn).toHaveBeenCalledTimes(5);
+    warn.mockRestore();
+  });
+
+  test("正しい値は採る", () => {
+    expect(
+      mergeSettings({
+        telopFontSizePx: 100,
+        telopFont: "Klee One",
+        telopFillColor: "#ffcc00",
+        telopStrokeColor: "#112233",
+        telopStrokeWidthPx: 0,
+      }),
+    ).toMatchObject({
+      telopFontSizePx: 100,
+      telopFont: "Klee One",
+      telopFillColor: "#ffcc00",
+      telopStrokeColor: "#112233",
+      telopStrokeWidthPx: 0,
+    });
+  });
+
+  test("文字サイズの入力は 16〜200 の整数だけ通す", () => {
+    expect(parseTelopFontSize("48")).toEqual({ ok: true, patch: { telopFontSizePx: 48 } });
+    expect(parseTelopFontSize("15").ok).toBe(false);
+    expect(parseTelopFontSize("201").ok).toBe(false);
+    expect(parseTelopFontSize("4.5").ok).toBe(false);
+    expect(parseTelopFontSize("").ok).toBe(false);
+  });
+
+  test("縁取りの太さの入力は 0〜40 の整数だけ通す", () => {
+    expect(parseTelopStrokeWidth("0")).toEqual({ ok: true, patch: { telopStrokeWidthPx: 0 } });
+    expect(parseTelopStrokeWidth("41").ok).toBe(false);
+    expect(parseTelopStrokeWidth("-1").ok).toBe(false);
+  });
+
+  test("フォント名は空と引用符・バックスラッシュ・セミコロンを弾く", () => {
+    // 引用符が混ざると font の指定全体が不正になり、代入が黙って無視される
+    // (大きさまで既定の 10px のまま録画される)
+    expect(parseTelopFont(" Klee One ")).toEqual({ ok: true, patch: { telopFont: "Klee One" } });
+    expect(parseTelopFont("").ok).toBe(false);
+    expect(parseTelopFont('a"b').ok).toBe(false);
+    expect(parseTelopFont("a'b").ok).toBe(false);
+    expect(parseTelopFont("a\\b").ok).toBe(false);
+    expect(parseTelopFont("a;b").ok).toBe(false);
+  });
+
+  test("カンマは弾かない (候補が 2 つになるだけで壊れない)", () => {
+    expect(parseTelopFont("Klee One, Meiryo").ok).toBe(true);
+  });
+
+  test("色は #rrggbb だけを小文字にして通す", () => {
+    expect(parseColor("telopFillColor", "#FFCC00")).toEqual({
+      ok: true,
+      patch: { telopFillColor: "#ffcc00" },
+    });
+    expect(parseColor("telopFillColor", "red").ok).toBe(false);
+    expect(parseColor("telopFillColor", "#fff").ok).toBe(false);
+  });
+
+  test("画面にはモードに関わらず 5 項目が出る", () => {
+    const keys = SETTINGS_FIELDS.map((field) => field.key);
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        "telopFontSizePx",
+        "telopFont",
+        "telopFillColor",
+        "telopStrokeColor",
+        "telopStrokeWidthPx",
+      ]),
+    );
   });
 });

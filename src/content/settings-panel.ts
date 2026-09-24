@@ -66,9 +66,36 @@ export function createFieldInput(field: SettingsField): FieldInput {
 
   const input = document.createElement("input");
   input.id = id;
-  input.type = "text";
+  input.type = field.control.kind === "color" ? "color" : "text";
   input.style.cssText = PANEL_STYLE.input;
+  if (field.control.kind === "text" && field.control.suggestions !== undefined) {
+    // 候補の箱は `createFieldExtras` が作る。id の決め方をここと揃える
+    input.setAttribute("list", `${id}-suggestions`);
+  }
   return input;
+}
+
+/**
+ * 入力欄の隣に置く要素。いまは候補の `datalist` だけ。
+ *
+ * **`createFieldInput` の返り値を変えない。** 入力欄として振る舞う要素を 1 つ返す
+ * 形はテストと保存処理が前提にしている。候補の箱は DOM に置かないと効かないので、
+ * パネルが入力欄と並べて置く
+ */
+export function createFieldExtras(field: SettingsField): HTMLElement[] {
+  if (field.control.kind !== "text" || field.control.suggestions === undefined) {
+    return [];
+  }
+  const datalist = document.createElement("datalist");
+  datalist.id = `yt-clip-setting-${field.key}-suggestions`;
+  datalist.append(
+    ...field.control.suggestions.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      return option;
+    }),
+  );
+  return [datalist];
 }
 
 export function createSettingsPanel(
@@ -96,7 +123,7 @@ export function createSettingsPanel(
     const hint = document.createElement("div");
     hint.style.cssText = PANEL_STYLE.hint;
 
-    wrapper.append(label, input, hint);
+    wrapper.append(label, input, ...createFieldExtras(field), hint);
     element.append(wrapper);
     return { field, input, hint };
   });
