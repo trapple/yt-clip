@@ -174,37 +174,54 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     if (event.button !== 0) return;
     // 文字の選択やページのスクロールを始めさせない
     event.preventDefault();
+    // このドラッグを起こした指だけを追う。**違う pointerId の move / up / cancel は無視する**
+    // (2 本目の指が同じ要素に触れても、こちらの位置を横から書き換えない)
+    const pointerId = event.pointerId;
     const startX = event.clientX;
     const startY = event.clientY;
     const start = current;
     // 高さを決めていない窓を縦に広げるときは、今の見た目の高さから始める
     const startHeight = start.height ?? element.getBoundingClientRect().height;
-    source.setPointerCapture(event.pointerId);
+    source.setPointerCapture(pointerId);
 
     /** ドラッグを終わらせる。捕捉とリスナをまとめて解く (range-bar.ts の拡大バーと同じ作法) */
-    const finish = (pointerId: number): void => {
+    const finish = (): void => {
       source.releasePointerCapture(pointerId);
       source.removeEventListener("pointermove", onMove);
-      source.removeEventListener("pointerup", onUp);
-      source.removeEventListener("pointercancel", onUp);
+      source.removeEventListener("pointerup", onSettle);
+      source.removeEventListener("pointercancel", onSettle);
+      source.removeEventListener("lostpointercapture", onSettle);
     };
 
     const onMove = (move: PointerEvent): void => {
+      if (move.pointerId !== pointerId) return;
       const dx = move.clientX - startX;
       const dy = move.clientY - startY;
       if (kind === "move") {
         apply({ ...start, left: start.left + dx, top: start.top + dy });
       } else if (options.resize === "both") {
-        apply({ ...start, width: start.width + dx, height: startHeight + dy });
+        // 高さを決めていない窓は、実際に縦へ動いた (dy !== 0) ときだけ高さを持たせる。
+        // 移動量 0 の pointermove (押して動かさずに離す) だけで height が入ると、元は
+        // undefined だった height が定義された値になり、sameRect が false になって
+        // クリックしただけで onUserMove が呼ばれてしまう
+        apply(
+          start.height !== undefined || dy !== 0
+            ? { ...start, width: start.width + dx, height: startHeight + dy }
+            : { ...start, width: start.width + dx },
+        );
       } else {
         apply({ ...start, width: start.width + dx });
       }
     };
 
-    // pointercancel (タッチの横取りなど) でも終える。そこまでに動かした位置は、画面に
-    // 出ているとおりに確定する (拡大バーのハンドルと同じ)
-    const onUp = (up: PointerEvent): void => {
-      finish(up.pointerId);
+    // pointercancel (タッチの横取りなど)・lostpointercapture (要素が DOM から外れる、
+    // ほかが捕捉を奪うなど) でも終える。pointerup が来ないままドラッグが宙に浮くのを防ぐ。
+    // そこまでに動かした位置は、画面に出ているとおりに確定する (拡大バーのハンドルと同じ)
+    const onSettle = (settled: Event): void => {
+      const settledPointerId = (settled as PointerEvent).pointerId;
+      // lostpointercapture は座標を持たない。current (最後の pointermove で反映済み) を使う
+      if (settledPointerId !== undefined && settledPointerId !== pointerId) return;
+      finish();
       requested = current;
       // 押して離しただけ (クリックやダブルクリックの 1 回目) は知らせない。知らせると
       // 「動かした窓」になり、最初の位置を取り直さなくなる
@@ -213,13 +230,16 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     };
 
     source.addEventListener("pointermove", onMove);
-    source.addEventListener("pointerup", onUp);
-    source.addEventListener("pointercancel", onUp);
+    source.addEventListener("pointerup", onSettle);
+    source.addEventListener("pointercancel", onSettle);
+    source.addEventListener("lostpointercapture", onSettle);
   }
 
   function addDragHandle(handle: HTMLElement): void {
     // 窓から外れた古い掴む場所 (作り直したバーの前のつまみ) は捨てる。持ち続けると溜まる
     handles = handles.filter((candidate) => element.contains(candidate));
+    // 同じ要素を 2 回登録しない。listener を重ねて足すと、1 回のドラッグに 2 重に反応する
+    if (handles.includes(handle)) return;
     handles.push(handle);
     handle.addEventListener("pointerdown", (event: PointerEvent) => {
       if (isOnControl(event.target, handle)) return;

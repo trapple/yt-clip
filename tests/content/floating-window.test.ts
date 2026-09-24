@@ -29,9 +29,22 @@ function boxAt(left: number, top: number, width: number, height: number): DOMRec
   } as DOMRect;
 }
 
-/** jsdom は PointerEvent を持たない。MouseEvent に pointer* の名前を付けて配る */
-function pointer(target: Element, type: string, x: number, y: number, button = 0): void {
-  target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button }));
+/**
+ * jsdom は PointerEvent を持たない。MouseEvent に pointer* の名前を付けて配る。
+ * `pointerId` は 2 本目の指の区別を確かめるテストのためだけに指定できる
+ * (省くと undefined のまま。実装は捕捉の関数に渡すだけなので、既存のテストは変わらない)
+ */
+function pointer(
+  target: Element,
+  type: string,
+  x: number,
+  y: number,
+  button = 0,
+  pointerId?: number,
+): void {
+  const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button });
+  if (pointerId !== undefined) Object.defineProperty(event, "pointerId", { value: pointerId });
+  target.dispatchEvent(event);
 }
 
 /** (100, 100) で押し、dx / dy だけ動かして離す */
@@ -173,13 +186,18 @@ describe("createFloatingWindow", () => {
     expect(frame.rect()).toEqual({ left: 100, top: 68, width: 600 });
   });
 
-  test("destroy で DOM から外れる", () => {
+  test("destroy で DOM から外れ、window の resize も聞かなくなる", () => {
     const { frame } = makeWindow({ id: "yt-clip-test-window" });
+    frame.place({ left: 900, top: 100, width: 400 });
     frame.destroy();
     expect(frame.element.isConnected).toBe(false);
     expect(document.getElementById("yt-clip-test-window")).toBeNull();
-    // 外した後に画面の大きさが変わっても落ちない
+
+    const leftBeforeResize = frame.element.style.left;
+    // listener を外していないと、画面が小さくなったときに詰め直しが起きて left が変わる
+    setViewport(500, 768);
     window.dispatchEvent(new Event("resize"));
+    expect(frame.element.style.left).toBe(leftBeforeResize);
   });
 });
 
@@ -261,6 +279,51 @@ describe("ドラッグで動かす", () => {
     pointer(header, "pointermove", 200, 200);
     expect(frame.rect()).toEqual({ left: 120, top: 110, width: 400 });
   });
+
+  test("捕捉が外れても (要素が DOM から外れるなど) そこまで動いた位置で確定する", () => {
+    const { frame, onUserMove } = makeWindow();
+    frame.place({ left: 100, top: 100, width: 400 });
+    const header = headerOf(frame);
+
+    pointer(header, "pointerdown", 0, 0);
+    pointer(header, "pointermove", 20, 10);
+    // pointerup は来ない (要素が外れたときなど)。lostpointercapture だけでも終える
+    header.dispatchEvent(new Event("lostpointercapture", { bubbles: true }));
+    expect(onUserMove).toHaveBeenCalledTimes(1);
+    expect(frame.rect()).toEqual({ left: 120, top: 110, width: 400 });
+
+    // 終えた後の動きには付いていかない
+    pointer(header, "pointermove", 200, 200);
+    expect(frame.rect()).toEqual({ left: 120, top: 110, width: 400 });
+  });
+
+  test("同じ要素を addDragHandle で 2 回登録しても、2 重に反応しない", () => {
+    const { frame, grip, onUserMove } = makeBarLikeWindow();
+    frame.place({ left: 100, top: 100, width: 600 });
+    frame.addDragHandle(grip);
+
+    drag(grip, 30, 20);
+
+    expect(frame.rect()).toEqual({ left: 130, top: 120, width: 600 });
+    expect(onUserMove).toHaveBeenCalledTimes(1);
+  });
+
+  test("ドラッグを始めた指と違う pointerId の pointermove では動かない (2 本目の指に反応しない)", () => {
+    const { frame, onUserMove } = makeWindow();
+    frame.place({ left: 100, top: 100, width: 400 });
+    const header = headerOf(frame);
+
+    pointer(header, "pointerdown", 0, 0, 0, 1);
+    // 別の指 (別の pointerId) の pointermove
+    pointer(header, "pointermove", 20, 10, 0, 2);
+    expect(frame.rect()).toEqual({ left: 100, top: 100, width: 400 });
+
+    // 元の指なら動く
+    pointer(header, "pointermove", 20, 10, 0, 1);
+    pointer(header, "pointerup", 20, 10, 0, 1);
+    expect(onUserMove).toHaveBeenCalledTimes(1);
+    expect(frame.rect()).toEqual({ left: 120, top: 110, width: 400 });
+  });
 });
 
 describe("大きさを変える", () => {
@@ -285,6 +348,18 @@ describe("大きさを変える", () => {
     drag(resizeGripOf(frame), 0, 30);
 
     expect(frame.rect()).toEqual({ left: 100, top: 100, width: 400, height: 280 });
+  });
+
+  test("高さを決めていない窓は、動かさずに押して離しただけでは高さが決まらない", () => {
+    const { frame, onUserMove } = makeWindow();
+    frame.place({ left: 100, top: 100, width: 400 });
+
+    // 移動量 0 の pointermove だけが来て離れる (クリックの取りこぼしなど)
+    drag(resizeGripOf(frame), 0, 0);
+
+    expect(frame.element.style.height).toBe("");
+    expect(frame.rect()).toEqual({ left: 100, top: 100, width: 400 });
+    expect(onUserMove).not.toHaveBeenCalled();
   });
 
   test("「幅だけ」の窓は高さが変わらない", () => {
