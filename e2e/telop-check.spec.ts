@@ -49,6 +49,10 @@ const TELOPS = [
   { startSec: 120.5, text: "2 つ目の区間のテロップ" },
 ];
 const EXPECTED_SEC = 6;
+/**
+ * 区間の繋ぎと末尾のフレームで MediaRecorder の出力は少し揺れる (§9.1 の実測で
+ * 6.02〜6.12 秒)。区間 1 つ分の欠落や重複 (秒単位) は確実に弾ける幅にする
+ */
 const TOLERANCE_SEC = 0.5;
 
 /**
@@ -104,6 +108,22 @@ async function check(name: string, run: () => Promise<void>): Promise<void> {
 }
 
 /** ffmpeg / ffprobe は引数の抜け 1 つで暴走しうるので必ず timeout を付ける */
+/**
+ * CDP の応答を待つ処理に上限を付ける。Chrome が無応答だと Playwright の send / close は
+ * 返らず、フックのタイムアウトまで止まる
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} が ${ms / 1000} 秒で返りません`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function runTool(command: string, args: string[]): string {
   return execFileSync(command, args, { timeout: 60_000, encoding: "utf8" });
 }
@@ -282,9 +302,11 @@ test.beforeAll(async () => {
   await mkdir(OUT_DIR, { recursive: true });
   await launchChrome();
   const cdp = await browser.newBrowserCDPSession();
-  const loaded = (await cdp.send("Extensions.loadUnpacked" as never, {
-    path: EXTENSION_PATH,
-  } as never)) as { id: string };
+  const loaded = (await withTimeout(
+    cdp.send("Extensions.loadUnpacked" as never, { path: EXTENSION_PATH } as never),
+    30_000,
+    "拡張の読み込み (Extensions.loadUnpacked)",
+  )) as { id: string };
   await cdp.detach();
   extensionId = loaded.id;
   // service worker は読み込んだだけでは起動しないことがある。getWorker が起こす
@@ -292,20 +314,31 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await writeResults();
-  // connectOverCDP の close は切断するだけで Chrome は残る。自前で止め、**終わるまで
-  // 待ってから**消す。待たないと終了中の Chrome がキャッシュを書き足し、rm が
-  // ENOTEMPTY で落ちる
-  await browser?.close();
-  const proc = chromeProcess;
-  if (proc !== undefined && proc.exitCode === null) {
-    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
-    proc.kill();
-    const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000);
-    await exited;
-    clearTimeout(timer);
+  try {
+    await writeResults();
+    // connectOverCDP の close は切断するだけで Chrome は残る。**切断は best-effort。**
+    // Chrome が無応答だと close が返らず、後ろの停止と削除まで進めなくなる。
+    // Chrome の停止は CDP の応答に頼らずプロセスへのシグナルで行う
+    if (browser !== undefined) {
+      await withTimeout(browser.close(), 5_000, "CDP の切断").catch((error: unknown) =>
+        console.warn(`CDP の切断に失敗しました (Chrome は止めに行く): ${String(error)}`),
+      );
+    }
+  } finally {
+    // **終わるまで待ってから**消す。待たないと終了中の Chrome がキャッシュを書き足し、
+    // rm が ENOTEMPTY で落ちる
+    const proc = chromeProcess;
+    if (proc !== undefined && proc.exitCode === null && proc.signalCode === null) {
+      const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+      proc.kill();
+      const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000);
+      await exited;
+      clearTimeout(timer);
+    }
+    if (userDataDir !== undefined) {
+      await rm(userDataDir, { recursive: true, force: true, maxRetries: 5 });
+    }
   }
-  await rm(userDataDir, { recursive: true, force: true, maxRetries: 5 });
 });
 
 test("テロップの実機確認", async () => {
