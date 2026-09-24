@@ -587,4 +587,28 @@ describe("帯のドラッグ", () => {
 
     expect(document.body.contains(track.element)).toBe(false);
   });
+
+  test("releasePointerCapture が throw しても後始末は済ませる", () => {
+    // Pointer Events L3 の実装によっては NotFoundError などを投げうる。先に throw で
+    // 抜けると cancelDrag が残り、以後の update が保留に飲まれたまま描かれなくなる
+    const releaseSpy = vi
+      .spyOn(Element.prototype, "releasePointerCapture")
+      .mockImplementation(() => {
+        throw new DOMException("捕捉がありません", "NotFoundError");
+      });
+    try {
+      const { track, committed } = mountTrack([TELOP]);
+      const band = bandAt(track, 0);
+      pointer(band, "pointerdown", 150);
+      pointer(band, "pointermove", 250);
+      pointer(band, "pointerup", 250);
+
+      expect(committed).toEqual([[0, 20, 30]]);
+      // 固まっていれば、この update は pending に飲まれたまま描かれない
+      track.update([{ ...TELOP, startSec: 5, endSec: 8 }], TRACK_WINDOW);
+      expect(bandAt(track, 0).style.left).toBe("12.5%");
+    } finally {
+      releaseSpy.mockRestore();
+    }
+  });
 });

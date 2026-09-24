@@ -257,13 +257,20 @@ export function createTelopTrack(callbacks: TelopTrackCallbacks): TelopTrack {
       band.removeEventListener("pointerup", onUp);
       band.removeEventListener("pointercancel", onCancel);
       band.removeEventListener("lostpointercapture", onCancel);
-      band.releasePointerCapture(pointerId);
       // 予約済みのシークも取り消す。残すと指を離した 1 フレーム後に動画が飛ぶ (元の位置へ戻して
-      // 離した・打ち切ったときでも、見た目と違う位置へシークしてしまう)
+      // 離した・打ち切ったときでも、見た目と違う位置へシークしてしまう)。
+      // **releasePointerCapture より先に済ませる**: 実装によっては (Pointer Events L3) 既に
+      // 外れた捕捉に対して throw しうる。後始末が先なら、throw しても cancelDrag が残って
+      // 帯の段が固まることはない (jsdom は hasPointerCapture を持たないため try/catch で確かめる)
       if (scrubFrame !== 0) cancelAnimationFrame(scrubFrame);
       scrubFrame = 0;
       pendingScrubSec = null;
       cancelDrag = null;
+      try {
+        band.releasePointerCapture(pointerId);
+      } catch {
+        // 既に捕捉が外れているなどで throw しても、後始末は上で済んでいるので無視してよい
+      }
     };
 
     /** 指を離した (または取り上げられた)。時刻が変わっていれば確定する */
@@ -274,7 +281,11 @@ export function createTelopTrack(callbacks: TelopTrackCallbacks): TelopTrack {
       takePending();
       // 掴んだ後に届いた update でテロップが消えた・入れ替わった (index がずれた) ときは確定も
       // 再生もしない。掴んだ時点の時刻のテロップが同じ index にあることで、同じテロップと見なす。
-      // 確かめないと、別のテロップに時刻を載せて送ってしまう
+      // 確かめないと、別のテロップに時刻を載せて送ってしまう。
+      // **文言は同一性に含めない**: 同じ時刻のテロップが 2 つ以上あるとき、ドラッグ中に前の index が
+      // 消えると別のテロップを動かしうる欠点はあるが、一覧の入力欄で文言を書いている最中に帯を
+      // 押すと blur で onTelopText の通知がドラッグ中に届く経路があり、文言まで見ると確定が
+      // 黙って落ちてしまう
       const target = telops[index];
       const sameTarget =
         target !== undefined &&
