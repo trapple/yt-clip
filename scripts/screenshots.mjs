@@ -101,6 +101,23 @@ try {
   await page
     .locator("#yt-clip-panel")
     .waitFor({ state: "visible", timeout: WAIT_TIMEOUT_MS });
+
+  // **このスクリーンショットだけ**、動画 (#primary) の幅をパネルのぶん空ける。
+  // 掲載画像はおすすめ列 (#secondary) を隠しているのでプレイヤーが画面右端まで
+  // 広がり、固定パネルと重なって「動画は隠れない」設計と食い違う絵になる。実際の
+  // YouTube にはおすすめ列があるので重ならない (1440 幅の実測で
+  // playerRight 1012 < panel.left 1024)。
+  // 実測 (1280x800、YouTube 2026-09-24): #secondary を隠すと #columns は
+  // justify-content: center になり、max-width だけ足すとプレイヤーが中央へ
+  // 寄って逆に重なりが深くなる (primary right 1072 > panel.left 864) ので、
+  // 左詰めに戻す指定も一緒に足す。448 = パネル幅 400 + 右端の余白 16 +
+  // プレイヤー側の左マージン 32 (side-panel.ts の WIDTH_PX / EDGE_GAP_PX と対応)
+  await page.addStyleTag({
+    content:
+      "#columns { justify-content: flex-start !important; } #primary { max-width: calc(100vw - 448px) !important; }",
+  });
+  await page.waitForTimeout(500);
+
   await page.evaluate(() => {
     const body = document.getElementById("yt-clip-panel-body");
     // 設定パネルの根は、最初の項目 (モード) の入力欄 → 項目の枠 → 根
