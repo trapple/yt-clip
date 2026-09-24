@@ -4685,70 +4685,35 @@ MSG
 
 ---
 
-### Task 12: 実機で通しを確かめ、掲載用スクリーンショットを撮り直す
+### Task 12: 実機で通しを確かめる (Playwright のスクリプト)
+
+**2026-09-24 変更:** 当初は Claude in Chrome で操作する計画だったが、接続先の Chrome の取り違え・
+ウィンドウが覆われると `hidden` になる・ツールでタブを隠せない、でユーザーの手作業が増えたため、
+Playwright のスクリプトに変えた (ユーザー了承済み)。
 
 **Files:**
+- Create: `e2e/telop-check.spec.ts` (手動実行専用。環境変数 `YT_CLIP_TELOP_CHECK=1` が無ければ skip する)
+- Modify: `package.json` (`"check:telop": "npm run build && YT_CLIP_TELOP_CHECK=1 playwright test e2e/telop-check.spec.ts"`)
 - Modify: `docs/manual-check.md` (「## 確認した環境」に記入)
 
-**実行者: メインセッション** (Claude in Chrome を使う)。
+**Gate: human** — 音ズレとカクつきの最終判断だけ、書き出したクリップをユーザーに再生してもらう。
 
-**Gate: human** — 拡張の読み込み (`chrome://extensions` はツールから操作できない) と、耳で確かめる項目 (音ズレ) だけユーザーに頼む。
+やり方:
+- `chromium.launchPersistentContext` を `channel: "chrome"` (インストール済みの Google Chrome。同梱の
+  Chromium は H.264 を持たず MP4 で録れない)・`headless: false` で起動し、`--load-extension=dist`、
+  `--autoplay-policy=no-user-gesture-required`、`--disable-backgrounding-occluded-windows` (ウィンドウが
+  覆われても hidden にしない。タブの切り替えで隠れる動作は本物のまま残る) を渡す
+- 設定は拡張の service worker で `chrome.storage.sync` に書く (エディットモード)
+- 録画結果は service worker から IndexedDB (`yt-clip` / `clips`) を読んで取り出し、ffprobe / ffmpeg で
+  長さを測りフレームを書き出す
+- 結果 (JSON・スクリーンショット・mp4・フレーム画像) を `test-results/telop-check/` に置く。controller が
+  画像を見て判定し、ユーザーには mp4 を 1 本聞いてもらう
 
-**Interfaces:**
-- Consumes: Task 1〜11 の全て
-- Produces: なし
-
-- [ ] **Step 1: ビルドして、ユーザーに拡張を読み込み直してもらう**
-
-実行: `npm run build`
-期待: `dist/` ができる
-
-ユーザーに「`chrome://extensions` で yt-clip の再読み込みボタンを押してください (初めてなら `dist/` を読み込んでください)」と頼み、済んだと返事が来るまで待つ。
-
-- [ ] **Step 2: Claude in Chrome で手動確認の項目を通す**
-
-Task 1 の Step 1 と同じ手順 (同じツール一覧を ToolSearch で読み込む。`find` と `get_page_text` も含まれている) で新しいタブに Big Buck Bunny を開き、再生を始める。バーの ⚙ でモードをエディットにして保存し、`docs/manual-check.md` の「テロップ (エディットモード)」節を上から確かめる。操作は `find` / `computer` (クリック・入力) で行い、確認は `read_page` とスクリーンショット、必要なら `javascript_tool` で DOM と `<video>` の状態を読む。
-
-| 項目 | 確かめ方 |
-|---|---|
-| 焼き込みとプレビューの見た目が同じ | テロップを出す位置で一時停止してスクリーンショット → 録画 → バーのプレビューで同じ位置をスクリーンショット。位置・大きさ・色・縁取りを見比べる |
-| 出力の長さが区間の合計と一致 | プレビューの `<video>` の `duration` を `javascript_tool` で読む |
-| 360p と 1080p で比率が同じ | `setPlaybackQualityRange("small")` と `("hd1080")` でそれぞれ録り、スクリーンショットで見比べる |
-| テロップなしの録画が変わらない | テロップを全部消して録り、出力が普段どおりか |
-| 入力中にショートカットが発火しない | テロップの入力欄をクリックして `f` とスペースを打ち、全画面にならず再生状態も変わらないこと |
-| 一時停止中の描き直し | 止めたまま文言・時刻を変え、スクリーンショットで反映を見る |
-| シアターモード・全画面 | `t` キー / 全画面ボタンで切り替え、スクリーンショットでテロップの位置を見る |
-| 最後の区間の ✕ が止まる | ステータスの文言を `read_page` で読む |
-| タブが隠れたときの中断 (Task 10 を実施した場合) | **ツールではタブを隠せない** (spec §9.1)。録画を始めたらユーザーに別のタブへ切り替えて戻ってもらい、ステータスと popup の状態を見る |
-
-**ユーザーに頼む項目:** 音と映像のずれ (焼き込み済みのクリップを 1 本再生して聞いてもらう)、1080p60 のカクつきの最終判断 (スクリーンショットでは分からないため)。
-
-1 つでも通らなければ、ここで止めて原因を調べる (whole-branch レビューの前に直す)。
-
-- [ ] **Step 3: 確認した環境を記入する**
-
-`docs/manual-check.md` の「## 確認した環境」の表に、確かめた日 (JST)・Chrome のバージョン (`javascript_tool` で `navigator.userAgent` を読む)・OS を記入する。
-
-- [ ] **Step 4: スクリーンショットを撮り直す**
-
-`release/screenshots/` は git 管理外。
-
-実行: `npm run screenshots` (timeout 600 秒。ネットワークが要る)
-期待: `release/screenshots/` に設定パネルを含む画像が出る。`Read` で画像を開き、設定パネルに「テロップの…」の 5 項目が写っていることを確かめる。撮り直したことをユーザーに伝える (commit はしない)
-
-- [ ] **Step 5: 後片付けと commit**
-
-`tabs_close_mcp` で作ったタブを閉じる。
-
-```bash
-git -C /Users/trapple/repos/github.com/trapple/yt-clip add docs/manual-check.md
-git -C /Users/trapple/repos/github.com/trapple/yt-clip commit -m "$(cat <<'MSG'
-docs: テロップを実機で通しで確かめた環境を記録する
-
-Claude-Session: b82d7fb3-2278-45ea-9692-62c7246061e3
-MSG
-)"
-```
+確かめること (`docs/manual-check.md` の「テロップ」節に対応):
+焼き込みとプレビューの見た目の一致 / 出力の長さ = 区間の合計 / 360p と 1080p で比率が同じ /
+テロップなしの録画が今までどおり / 入力中にショートカットが発火しない / 一時停止中の描き直し /
+シアターモードでのプレビューの位置 / 最後の区間の ✕ が止まる / シンプルモードで一覧が出ない /
+テロップ付きの録画中にタブが隠れたら中断し、もう一度で区間とテロップが残る
 
 ---
 

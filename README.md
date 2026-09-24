@@ -142,6 +142,7 @@ npm run build      # dist/ に拡張を出力
 npm test           # 単体テスト
 npm run typecheck  # 型チェック
 npm run e2e        # E2E (ネットワーク必須。CI では実行しない)
+npm run check:telop # テロップの実機確認 (Google Chrome が開く。結果は test-results/telop-check/)
 npm run icons      # アイコンを描き直す (public/icons/)
 npm run screenshots # 掲載用スクリーンショットを release/screenshots/ に撮る
 npm run package    # ウェブストアへ上げる zip を release/ に作る
