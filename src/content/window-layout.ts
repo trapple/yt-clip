@@ -22,6 +22,21 @@ export type Viewport = { width: number; height: number };
 export type GripBox = { left: number; top: number; width: number; height: number };
 export type SizeLimits = { minWidth: number; minHeight?: number };
 
+/*
+ * YouTube のヘッダーの寸法。**実機の値に合わせている。**
+ * 出所: 2026-09-24 に `npm run check:telop` の「パネルの位置の出所 (YouTube の実測)」で測った
+ * (viewport 1920x1080): #masthead-container の高さ 56px・z-index 2020。YouTube のレイアウトが
+ * 変わったら測り直す。
+ *
+ * **ここに置く (side-panel.ts ではなく)。** パネルの窓の最初の上端 (side-panel.ts) とバーの窓の
+ * 上端の下限 (initialBarRect) の 2 箇所が使う。side-panel.ts は floating-window.ts を経て
+ * このファイルを読むので、逆向きに読むと循環する
+ */
+/** YouTube のヘッダー (#masthead-container) の高さ */
+export const MASTHEAD_HEIGHT_PX = 56;
+/** ヘッダーとの間 */
+export const TOP_GAP_PX = 12;
+
 /** バーの窓の最初の位置: プレイヤーの下端との間 (spec A.2) */
 export const BAR_GAP_PX = 8;
 /** 画面の下端との間。画面に収まらないバーの窓はここまで詰める (spec A.2) */
@@ -125,7 +140,10 @@ export function fitRect(
 /**
  * バーの窓の最初の位置 (spec A.2)。プレイヤーの直下に、左端を揃えてプレイヤーの幅で置く。
  * 画面に収まらなければ画面の下端から SCREEN_BOTTOM_GAP_PX に詰める (このときだけプレイヤーに
- * 重なりうる)。上端は画面の上へ出さない。
+ * 重なりうる)。**上端はヘッダーの下 (MASTHEAD_HEIGHT_PX + TOP_GAP_PX、パネルの窓の最初の上端と
+ * 同じ) より上へ出さない。** 窓 (z-index 2000) はヘッダー (z-index 2020) より下なので、上端 0 に
+ * 置くと拡大バーがヘッダーの裏に隠れる。プレイヤーが画面の上へスクロールされて消えている間に
+ * 取り直したとき (ブラウザの大きさを変えたなど) に起きる。
  *
  * player は**画面上の位置** (getBoundingClientRect)。ページがスクロールされていても、そのまま使う
  */
@@ -136,7 +154,8 @@ export function initialBarRect(
 ): WindowRect {
   const below = player.bottom + BAR_GAP_PX;
   const lowest = viewport.height - SCREEN_BOTTOM_GAP_PX - barHeight;
-  return { left: player.left, top: Math.max(0, Math.min(below, lowest)), width: player.width };
+  const highest = MASTHEAD_HEIGHT_PX + TOP_GAP_PX;
+  return { left: player.left, top: Math.max(highest, Math.min(below, lowest)), width: player.width };
 }
 
 /**

@@ -942,6 +942,11 @@ function initialWindowRect(id: WindowId): WindowRect | null {
   const player = document.querySelector(YT_SELECTORS.player);
   if (player === null) return null;
   const box = player.getBoundingClientRect();
+  // **高さを測る前にプレイヤーの幅を当てる。** 覚えた位置が無い読み込みでは窓は最小の幅
+  // (480px) のままで、エディットモードの操作の行は 2 段に折り返して背が高く測れる。その高さで
+  // 画面の下端に詰めると、プレイヤーの直下より上に置かれてシークバーに重なる。
+  // place は style を同期で当てるので、直後の測定は新しい幅でレイアウトされる
+  barWindow.place({ left: box.left, top: barWindow.rect().top, width: box.width });
   return initialBarRect(
     { left: box.left, bottom: box.bottom, width: box.width },
     barWindow.element.getBoundingClientRect().height,

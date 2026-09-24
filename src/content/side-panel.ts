@@ -4,7 +4,7 @@ import {
   type WindowRect,
 } from "@/content/floating-window";
 import { SIDE_PANEL_STYLE } from "@/content/styles";
-import type { Viewport } from "@/content/window-layout";
+import { MASTHEAD_HEIGHT_PX, TOP_GAP_PX, type Viewport } from "@/content/window-layout";
 
 /**
  * 画面右側のパネル。区間の一覧・テロップの一覧・設定を入れる
@@ -23,16 +23,14 @@ export const SIDE_PANEL_BODY_ID = `${SIDE_PANEL_ID}-body`;
  * 最初の位置と寸法。**YouTube の実機の値に合わせている。**
  * 出所: 2026-09-24 に `npm run check:telop` の「パネルの位置の出所 (YouTube の実測)」で測った
  * (viewport 1920x1080): #masthead-container の高さ 56px・z-index 2020、#secondary の幅 544px。
+ * ヘッダーの高さとの間 (MASTHEAD_HEIGHT_PX / TOP_GAP_PX) はバーの窓の上端の下限と共有するので
+ * window-layout.ts に置く。
  * z-index は「ヘッダー (#masthead-container、z-index 2020) より下」であることだけ実測
  * (重なり順の値は floating-window.ts の Z_BACK / Z_FRONT が持つ)。
  * ヘッダーのメニュー本体は自前の z-index を持つため測っておらず、ytd-popup-container の
  * z-index auto はその根拠にならない。#secondary の幅は viewport で変わるので WIDTH_PX の
  * doc に別で書く。YouTube のレイアウトが変わったら測り直す
  */
-/** YouTube のヘッダー (#masthead-container) の高さ */
-const MASTHEAD_HEIGHT_PX = 56;
-/** ヘッダーとの間 */
-const TOP_GAP_PX = 12;
 /** 画面の右端との間 (下端との間 16px は floating-window.ts の BOTTOM_GAP_PX) */
 const EDGE_GAP_PX = 16;
 /**

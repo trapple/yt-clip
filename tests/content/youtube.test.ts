@@ -2854,6 +2854,35 @@ describe("フロートの窓", () => {
     }
   });
 
+  test("バーの窓の高さは、プレイヤーの幅を当ててから測る (最小の幅で折り返した高さで詰めない)", () => {
+    // 最小の幅 (480px) では操作の行が 2 段に折り返して背が高くなる。プレイヤーの幅を
+    // 当てたときだけ 1 段 (106px) になる stub。折り返した高さで測ると画面の下端に詰めて
+    // プレイヤーに重なる (768 - 16 - 300 = 452 < 538)
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, 80, 800, 450);
+        if (this.id === "yt-clip-bar-window") {
+          const height = (this as HTMLElement).style.width === "800px" ? 106 : 300;
+          return boxAt(0, 0, 0, height);
+        }
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      // beforeEach の戻しはプレイヤーの幅 0 で測るので、窓は最小の幅 480px のまま
+      expect(barWindowElement().style.width).toBe("480px");
+      dblclick(barGrip());
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test("画面に収まらなければ、バーの窓を画面の下端から 16px に詰める", () => {
     // jsdom の画面は 1024x768。下端 700 のプレイヤーの下には 106px のバーが入らない
     const spy = placePlayer({ left: 24, top: 80, width: 800, height: 620 }, 106);

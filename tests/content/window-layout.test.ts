@@ -195,8 +195,18 @@ describe("initialBarRect", () => {
     });
   });
 
-  test("画面より高いバーでも、上端は画面の上へ出さない", () => {
-    expect(initialBarRect({ left: 0, bottom: 700, width: 1440 }, 2000, VIEWPORT).top).toBe(0);
+  test("画面より高いバーでも、上端は YouTube のヘッダーの下 (68px) より上へ出さない", () => {
+    expect(initialBarRect({ left: 0, bottom: 700, width: 1440 }, 2000, VIEWPORT).top).toBe(68);
+  });
+
+  test("プレイヤーが画面の上へスクロールされて消えていても、ヘッダーの裏に潜らせない", () => {
+    // コメント欄まで送ると、プレイヤーの下端は画面の上 (負) にある。上端 0 だと
+    // 窓 (z-index 2000) がヘッダー (z-index 2020、高さ 56px) の裏に隠れる
+    expect(initialBarRect({ left: 24, bottom: -900, width: 988 }, 106, VIEWPORT)).toEqual({
+      left: 24,
+      top: 68,
+      width: 988,
+    });
   });
 });
 
