@@ -2499,3 +2499,108 @@ describe("右側のパネル", () => {
     expect(panelElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
   });
 });
+
+describe("足した行をパネルの見える範囲に入れる", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  /**
+   * 本体は画面の 100〜500px。行は並び順に 900px から 100px ずつ下に置く。
+   * 末尾の行が選ばれたかを送り先の値で見分けられる
+   */
+  function placeRows(role: "segment" | "telop") {
+    const body = panelBody();
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this === body) return rectAt(100, 400);
+        if (this instanceof HTMLElement && this.dataset.role === role) {
+          const index =
+            this.parentElement === null
+              ? 0
+              : [...this.parentElement.children].indexOf(this);
+          return rectAt(900 + index * 100, 60);
+        }
+        return rectAt(0, 0);
+      });
+  }
+
+  function addTelopButton(): HTMLButtonElement {
+    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
+    if (button === null) throw new Error("＋ テロップがありません");
+    return button;
+  }
+
+  test("区間を足したら、畳んでいても開いて末尾の行へ送る", async () => {
+    const first: ClipRange = { startSec: 83, endSec: 98 };
+    const added: ClipRange = { startSec: 300, endSec: 315 };
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [first], telops: [], meta: META_A });
+    await flush();
+    const spy = placeRows("segment");
+    try {
+      collapseButton().click();
+      video.element.currentTime = 300;
+      clickButton("＋ 区間を追加");
+      await flush();
+      // 押した時点では行がまだ無い。送るのは状態機械の答えを描いた後
+      expect(panelBody().scrollTop).toBe(0);
+
+      emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
+
+      expect(panelBody().hidden).toBe(false);
+      // 末尾 (2 行目: 1000px) の先頭を本体の上端 (100px) に揃える
+      expect(panelBody().scrollTop).toBe(900);
+
+      // 送るのは足した直後の 1 回だけ。見ている位置を勝手に戻さない
+      panelBody().scrollTop = 0;
+      emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
+      expect(panelBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("テロップを足したら、畳んでいても開いて末尾の行へ送る", async () => {
+    const added: Telop = { startSec: 15, endSec: 18, text: "" };
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [TELOP], meta: META_A });
+    await flush();
+    const spy = placeRows("telop");
+    try {
+      collapseButton().click();
+      video.element.currentTime = 15;
+      await flush();
+      addTelopButton().click();
+      await flush();
+      expect(panelBody().scrollTop).toBe(0);
+
+      emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
+
+      expect(panelBody().hidden).toBe(false);
+      expect(panelBody().scrollTop).toBe(900);
+
+      panelBody().scrollTop = 0;
+      emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
+      expect(panelBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("足していない状態の通知では送らない", async () => {
+    changeSettings({ mode: "edit" });
+    const spy = placeRows("segment");
+    try {
+      emit({
+        kind: "ready",
+        segments: [RANGE, { startSec: 30, endSec: 40 }],
+        telops: [],
+        meta: META_A,
+      });
+      await flush();
+      expect(panelBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

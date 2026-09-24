@@ -146,6 +146,13 @@ let pendingMode: ClipMode | null = null;
  */
 let selectLastOnNextState = false;
 /**
+ * 次に状態が届いたとき、テロップの一覧の末尾の行をパネルの見える範囲に入れる。
+ *
+ * `selectLastOnNextState` と同じ形。**クリックの時点では行がまだ無い** (状態機械の
+ * 答えを待って描く) ので、応答を描いた後に 1 回だけ送る
+ */
+let revealLastTelopOnNextState = false;
+/**
  * 次に状態が届いたとき、この位置が消えたものとして選択を詰める。
  *
  * 選択より前が消えると、選んでいた区間は 1 つ手前へ移る。位置を覚えずに
@@ -390,11 +397,8 @@ function onMarkIn(): void {
  * 選び直しは状態の変化ではないので、`send` を通すと往復のぶん反応が遅れる
  */
 function applyStateToSelection(): void {
-  segmentList?.update(
-    mode === "edit" ? currentSegments : [],
-    selectedIndex,
-    maxClipSec,
-  );
+  // 一覧に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
+  segmentList?.update(listedItems().segments, selectedIndex, maxClipSec);
 
   const segment = selectedSegment();
   if (segment === null) return;
@@ -498,6 +502,8 @@ function onAddTelop(): void {
     setStatus("動画の終わりにはテロップを足せません");
     return;
   }
+  // 足した行をパネルの見える範囲に入れる。畳んでいても開く (spec §3)
+  revealLastTelopOnNextState = true;
   send({ type: "ADD_TELOP", telop: { startSec, endSec, text: "" } });
 }
 
@@ -889,6 +895,24 @@ function refreshLists(): void {
   refreshSidePanel();
 }
 
+/**
+ * 足した行をパネルの見える範囲に入れる。**応答を描いた後に呼ぶ** (クリックの時点では
+ * 行がまだ無い)。畳んでいても開く。押した結果が見えないと無反応に見える (spec §3)。
+ *
+ * パネルが隠れている (全画面など) ときは何もしない。出す判断は `refreshSidePanel` のもの
+ */
+function revealLastRow(
+  list: HTMLElement | undefined,
+  role: "segment" | "telop",
+): void {
+  if (list === undefined || sidePanel.element.hidden) return;
+  const rows = list.querySelectorAll<HTMLElement>(`[data-role='${role}']`);
+  const last = rows[rows.length - 1];
+  if (last === undefined) return;
+  sidePanel.reveal();
+  sidePanel.scrollTo(last);
+}
+
 function applyStateToDisplay(state: ClipState): void {
   const stateSegments = "segments" in state ? state.segments : [];
   const stateMeta = "meta" in state ? state.meta : null;
@@ -950,7 +974,11 @@ function applyStateToDisplay(state: ClipState): void {
       selectedIndex = liveSegments.length - 1;
     }
   }
+  // 足した直後の 1 回だけ、足した行へ送る。描き終えてから送るので、ここでは覚えるだけ
+  const revealSegment = selectLastOnNextState;
+  const revealTelop = revealLastTelopOnNextState;
   selectLastOnNextState = false;
+  revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;
 
   const current = selectedSegment();
@@ -979,6 +1007,9 @@ function applyStateToDisplay(state: ClipState): void {
   // ただし録画中は、打ち切られたドラッグの見た目が最後の位置に残るため、
   // ずれていなくても確定済みの範囲で描き直す
   refreshLists();
+  // 一覧とパネルの表示が決まってから送る (出す → 開く → 送る の順)
+  if (revealSegment) revealLastRow(segmentList?.element, "segment");
+  if (revealTelop) revealLastRow(telopList?.element, "telop");
 
   lastKind = state.kind;
   // 待たせていた切り替えを拾う。`applyMode` はバーを作り直すので、
