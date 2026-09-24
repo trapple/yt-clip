@@ -2441,6 +2441,175 @@ describe("テロップの一覧", () => {
   });
 });
 
+describe("拡大バーの下のテロップの帯", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  function track(): HTMLElement {
+    const element = document.querySelector<HTMLElement>(
+      "#yt-clip-bar [data-role='telop-track']",
+    );
+    if (element === null) throw new Error("帯の段がありません");
+    return element;
+  }
+
+  function bands(): HTMLElement[] {
+    return [...track().querySelectorAll<HTMLElement>("[data-role='telop-band']")];
+  }
+
+  function firstBand(): HTMLElement {
+    const band = bands()[0];
+    if (band === undefined) throw new Error("帯がありません");
+    return band;
+  }
+
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  async function showReady(
+    telops: Telop[],
+    segments: ClipRange[] = [RANGE],
+    clipMode: "edit" | "simple" = "edit",
+  ): Promise<void> {
+    changeSettings({ mode: clipMode });
+    emit({ kind: "ready", segments, meta: META_A, telops });
+    await flush();
+    sent = [];
+  }
+
+  /**
+   * 拡大バーの窓は 0〜30 秒 (範囲 10〜20 の 2 倍と 30 秒の広い方)。帯の段の箱を幅 300px
+   * (10px/秒) に、テロップ (11〜14 秒) の帯を 110〜140px に決め打ちする。ほかの要素は 0
+   */
+  function stubLayout() {
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        const role = this instanceof HTMLElement ? this.dataset.role : undefined;
+        if (role === "telop-lanes") return boxAt(0, 0, 300, 30);
+        if (role === "telop-band") return boxAt(110, 0, 30, 14);
+        return boxAt(0, 0, 0, 0);
+      });
+  }
+
+  function updateTelopEvents(): unknown[] {
+    return clipEvents().filter(
+      (event) => (event as { type: string }).type === "UPDATE_TELOP",
+    );
+  }
+
+  test("エディットモードで、拡大バーの窓に入るテロップを拡大バーの直下に帯で出す", async () => {
+    await showReady([TELOP, { startSec: 100, endSec: 103, text: "窓の外" }]);
+
+    expect(track().hidden).toBe(false);
+    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
+    expect(track().previousElementSibling?.id).toBe("yt-clip-range");
+  });
+
+  test("シンプルモードでは出さない", async () => {
+    await showReady([TELOP], [RANGE], "simple");
+
+    expect(track().hidden).toBe(true);
+  });
+
+  test("テロップが 1 つも無ければ段ごと出さない (バーを高くしない)", async () => {
+    await showReady([]);
+
+    expect(track().hidden).toBe(true);
+  });
+
+  test("区間を選び直すと、選んだ区間の拡大バーの窓で帯を描き直す", async () => {
+    await showReady(
+      [TELOP, { startSec: 205, endSec: 208, text: "二つ目" }],
+      [RANGE, { startSec: 200, endSec: 215 }],
+    );
+    // 状態の通知では選択は動かない (selectedIndex はテストをまたいで残り、index 0 = RANGE のまま)。
+    // 行を押して区間 2 (200〜215、窓 192.5〜222.5) を選ぶ
+    segmentRows()[1]?.click();
+    expect(bands().map((band) => band.textContent)).toEqual(["二つ目"]);
+
+    segmentRows()[0]?.click();
+
+    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
+  });
+
+  test("帯の中をドラッグすると、指を離したときに UPDATE_TELOP を 1 回だけ送る", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 135, 5);
+      pointer(band, "pointermove", 145, 5);
+      // 動かしている間は送らない (区間の拡大バーと同じ。往復を増やさない)
+      expect(updateTelopEvents()).toEqual([]);
+      pointer(band, "pointerup", 145, 5);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // 20px = 2 秒。長さ (3 秒) と文言は保つ
+    expect(updateTelopEvents()).toEqual([
+      {
+        type: "UPDATE_TELOP",
+        index: 0,
+        telop: { startSec: 13, endSec: 16, text: "こんにちは" },
+      },
+    ]);
+  });
+
+  test("帯を押して動かさずに離すと、そのテロップの頭から再生する", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointerup", 126, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    expect(updateTelopEvents()).toEqual([]);
+    expect(video.element.currentTime).toBe(11);
+    expect(statusText()).toBe("テロップ 1 の頭から再生中…");
+  });
+
+  test("preview では帯を薄く出し、動かしも再生もしない", async () => {
+    // 区間の拡大バーと同じ条件 (canEditTelops)。テロップだけ触れる非対称を作らない
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [RANGE],
+      meta: META_A,
+      telops: [TELOP],
+    });
+    await flush();
+    sent = [];
+
+    expect(track().hidden).toBe(false);
+    expect(track().style.opacity).toBe("0.4");
+
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 145, 5);
+      pointer(band, "pointerup", 145, 5);
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointerup", 125, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).not.toBe("テロップ 1 の頭から再生中…");
+  });
+});
+
 describe("右側のパネル", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
 
@@ -2461,7 +2630,7 @@ describe("右側のパネル", () => {
     expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
   });
 
-  test("一覧と設定はパネルに入り、バーには拡大バーと操作の行だけが残る", async () => {
+  test("一覧と設定はパネルに入り、バーには拡大バー・テロップの帯の段・操作の行だけが残る", async () => {
     await showEdit([TELOP]);
 
     const body = panelBody();
@@ -2476,9 +2645,10 @@ describe("右側のパネル", () => {
     expect(bar.querySelector("[data-role='segment']")).toBeNull();
     expect(bar.querySelector("[data-role='add-telop']")).toBeNull();
     expect(bar.querySelector("#yt-clip-setting-mode")).toBeNull();
-    // 並びは今のまま: 拡大バー → 操作の行
-    expect(bar.children.length).toBe(2);
+    // 並び: 拡大バー → テロップの帯の段 (フロートの窓の spec B.3) → 操作の行
+    expect(bar.children.length).toBe(3);
     expect(bar.firstElementChild?.id).toBe("yt-clip-range");
+    expect(bar.children[1]?.getAttribute("data-role")).toBe("telop-track");
     expect(
       bar.lastElementChild?.contains(document.getElementById("yt-clip-bar-status")),
     ).toBe(true);

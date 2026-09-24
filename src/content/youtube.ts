@@ -40,6 +40,7 @@ import {
 import { createSidePanel, initialPanelRect } from "@/content/side-panel";
 import { createTelopList, type TelopList } from "@/content/telop-list";
 import { createTelopPreview } from "@/content/telop-preview";
+import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
 import { YT_SELECTORS } from "@/content/selectors";
 import {
   TelopRenderError,
@@ -213,6 +214,11 @@ let rangeEditable = false;
 let cancelWatch: (() => void) | null = null;
 let cancelPreview: (() => void) | null = null;
 let rangeBar: RangeBar | null = null;
+/**
+ * 拡大バーの下のテロップの帯の段 (フロートの窓の spec B)。拡大バーと同じ時間の軸で描くので、
+ * 拡大バーと一緒に buildBar が作り直す
+ */
+let telopTrack: TelopTrack | null = null;
 /** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
 let playheadWatched = false;
 /**
@@ -390,7 +396,7 @@ function applyRange(range: ClipRange, videoDurationSec: number): void {
   // `selectedIndex` を 0 にするので、エディットからは呼ばない
   currentSegments = [range];
   selectedIndex = 0;
-  rangeBar?.update(range, videoDurationSec);
+  paintRangeBar(range, videoDurationSec);
   paintOverlay(currentSegments, videoDurationSec);
   setStatus(rangeLabel(range));
 }
@@ -449,7 +455,7 @@ function applyStateToSelection(): void {
   const segment = selectedSegment();
   if (segment === null) return;
   try {
-    rangeBar?.update(segment, getVideo().duration);
+    paintRangeBar(segment, getVideo().duration);
     setStatus(rangeLabel(segment));
   } catch (error) {
     // 選択は変わっている。拡大バーを描けないことは操作を止める理由にならない
@@ -607,6 +613,27 @@ async function playTelop(index: number): Promise<void> {
   cancelPreviewWatch();
   if ((await seekAndPlay(telop.startSec)) === null) return;
   setStatus(`テロップ ${index + 1} の頭から再生中…`);
+}
+
+/**
+ * 帯のドラッグが確定した (フロートの窓の spec B.2)。帯の段は指を離したときに 1 回だけ、時刻が
+ * 変わったときだけ呼ぶ。
+ *
+ * **応答の状態で受理を確かめる。** 帯は動かした場所に楽観的に描かれているので、拒まれたまま
+ * にすると画面と状態が食い違う。拒まれたら正の状態で描き直す (`send` の作法)。テロップは並べ
+ * 替えもマージもしないので、受理されれば送った時刻がそのまま載る
+ */
+function onTelopDragged(index: number, startSec: number, endSec: number): void {
+  const telop = currentTelops[index];
+  if (telop === undefined || !canEditTelops()) return;
+  if (telop.startSec === startSec && telop.endSec === endSec) return;
+  send(
+    { type: "UPDATE_TELOP", index, telop: { ...telop, startSec, endSec } },
+    (state) =>
+      "telops" in state &&
+      state.telops[index]?.startSec === startSec &&
+      state.telops[index]?.endSec === endSec,
+  );
 }
 
 /**
@@ -1011,7 +1038,42 @@ function refreshWindows(): void {
 }
 
 /**
- * 一覧を手元の写しに合わせて描き直し、パネルを出すかを決め直す。
+ * 拡大バーを描き直し、同じ時間の軸で帯の段も描き直す。**拡大バーの窓が変わる経路はここを通す**
+ * (帯だけが古い窓のまま残らないように)
+ */
+function paintRangeBar(range: ClipRange, videoDurationSec: number): void {
+  rangeBar?.update(range, videoDurationSec);
+  refreshTelopTrack();
+}
+
+/**
+ * 拡大バーの下のテロップの帯を描き直す (フロートの窓の spec B)。拡大バーを描き直したとき
+ * (`paintRangeBar`) と、テロップや出す条件が変わったとき (`refreshLists`) に呼ぶ。
+ *
+ * 出すテロップは一覧と同じ規則 (`listedItems`: エディットモードで、範囲を作った動画を見ている
+ * とき)。拡大バーがまだ窓を持たない (範囲を描く前) ときは渡さない (時間の軸が無い)。
+ * 動かせる条件も一覧と同じ (`canEditTelops`)。
+ *
+ * **1 回の状態通知で 2 回呼ばれうる** (`applyStateToDisplay` が `refreshLists` の後に、拡大バーが
+ * ずれていれば `paintRangeBar` も呼ぶ)。同じ入力なら同じ絵になる (冪等) ので、二重呼び出しは不具合ではない
+ */
+function refreshTelopTrack(): void {
+  if (telopTrack === null) return;
+  const timeWindow = rangeBar?.window() ?? null;
+  const wasHidden = telopTrack.element.hidden;
+  telopTrack.setEnabled(canEditTelops());
+  telopTrack.update(
+    timeWindow === null ? [] : listedItems().telops,
+    timeWindow ?? { startSec: 0, endSec: 0 },
+  );
+  // 段が出る・消えるとバーの窓の高さが 34px 変わる。つまみ (操作の行) が画面の下へ押し出され
+  // ないよう、置いた場所から詰め直す。**最初の位置は取り直さない** (取り直すきっかけは resize と
+  // プレイヤーの大きさの変化だけ。spec A.2)
+  if (wasHidden !== telopTrack.element.hidden) barWindow.refit();
+}
+
+/**
+ * 一覧と帯の段を手元の写しに合わせて描き直し、パネルを出すかを決め直す。
  * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ
  */
 function refreshLists(): void {
@@ -1020,6 +1082,7 @@ function refreshLists(): void {
   segmentList?.update(segments, selectedIndex, maxClipSec);
   telopList?.setEnabled(canEditTelops());
   telopList?.update(telops, segments);
+  refreshTelopTrack();
   refreshWindows();
 }
 
@@ -1148,7 +1211,7 @@ function applyStateToDisplay(state: ClipState): void {
 
   if (current !== null && (drifted || busy)) {
     try {
-      rangeBar?.update(current, getVideo().duration);
+      paintRangeBar(current, getVideo().duration);
     } catch (error) {
       // ここは同期リスナーの中。投げると呼び出し元の録画処理まで届かず、
       // SEEK_DONE が送られないまま録画が無音で止まる。
@@ -1594,6 +1657,14 @@ function buildBar(): HTMLElement {
   });
   rangeBar.element.id = RANGE_ID;
 
+  // 拡大バーの下のテロップの帯。拡大バーと同じ時間の軸で描くので、拡大バーと一緒に作り直す。
+  // ドラッグ中のシークは拡大バーと同じ onScrub、押して離したときは一覧の ▶ と同じ再生
+  telopTrack = createTelopTrack({
+    onScrub,
+    onCommit: onTelopDragged,
+    onPlay: (index) => void playTelop(index),
+  });
+
   segmentList = createSegmentList({
     onSelect: (index) => {
       selectedIndex = index;
@@ -1630,9 +1701,11 @@ function buildBar(): HTMLElement {
     onText: onTelopText,
   });
 
-  // バーは拡大バー → 操作の行だけ。拡大バーは幅がそのまま精度になるので、パネルの幅には
-  // 縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の spec A.1)
-  bar.append(rangeBar.element, row);
+  // バーは拡大バー → テロップの帯の段 → 操作の行だけ。拡大バーは幅がそのまま精度になるので、
+  // パネルの幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の
+  // spec A.1)。帯の段は拡大バーのトラックの**下**に置く: トラックの中に重ねると、区間のハンドルと
+  // 帯の当たり判定が重なる (spec B.1)
+  bar.append(rangeBar.element, telopTrack.element, row);
   // 一覧と設定は右側のパネルへ。**中身ごと入れ替える。** 足すだけにすると、
   // バーを作り直すたびに古い一覧が残って 2 重になる
   sidePanel.body.replaceChildren(
@@ -1709,9 +1782,12 @@ function mount(): void {
   // 前のバーが外されていることがある (モードの切り替え)。参照だけ差し替えると
   // rAF とリスナを抱えた古いインスタンスが解放されないまま残る
   const previousBar = rangeBar;
-  // buildBar が rangeBar を新しいインスタンスに差し替える
+  const previousTrack = telopTrack;
+  // buildBar が rangeBar と telopTrack を新しいインスタンスに差し替える
   const bar = buildBar();
   previousBar?.destroy();
+  // 帯の段も rAF (シークの間引き) とドラッグのリスナを抱えうる。拡大バーと同じく捨てる
+  previousTrack?.destroy();
 
   // 窓の中身だけを入れ替える。窓は作り直さないので、位置も大きさも変わらない (spec A.3)
   barWindow.body.replaceChildren(bar);
@@ -1728,7 +1804,7 @@ function mount(): void {
   const restored = selectedSegment();
   if (restored !== null) {
     try {
-      rangeBar?.update(restored, getVideo().duration);
+      paintRangeBar(restored, getVideo().duration);
       setStatus(rangeLabel(restored));
     } catch (error) {
       // 表示を戻せないだけで、範囲そのものは service worker が持っている
