@@ -4,6 +4,7 @@ import {
   expect,
   test,
   type BrowserContext,
+  type Locator,
   type Worker,
 } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -846,11 +847,15 @@ test("テロップの実機確認", async () => {
     });
   });
 
-  // --- 受け入れ条件 (spec の冒頭): 1440x795 でバーが画面に収まり、一覧はパネルの中で届く ---
+  // --- 受け入れ条件 (フロートの窓の spec A.4): 1440x795 で、最初の位置のままのバーの窓が
+  // プレイヤーの下に重ならずに収まり、一覧はパネルの窓の中で届く -----------------------------
   // 1920x1080 の確認がすべて済んでから切り替え、最後に戻す
   await check(
-    "受け入れ条件 1440x795: バーとパネルが画面に収まり、パネルの中でスクロールする",
+    "受け入れ条件 1440x795: バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
     async () => {
+      // **先にページを先頭へ戻す。** 動かしていない窓は viewport が変わったときのプレイヤーの
+      // 画面上の位置で最初の位置を取り直し、スクロールでは取り直さない (spec A.2)
+      await page.evaluate(() => window.scrollTo(0, 0));
       await page.setViewportSize({ width: 1440, height: 795 });
       try {
         // 直前の項目でシンプルに切り替えたので、区間とテロップは消えている
@@ -882,24 +887,33 @@ test("テロップの実機確認", async () => {
           };
           const body = document.getElementById("yt-clip-panel-body");
           if (body === null) throw new Error("#yt-clip-panel-body がありません");
-          const player = document.getElementById("movie_player")?.getBoundingClientRect();
+          const player = document.getElementById("movie_player");
+          if (player === null) throw new Error("#movie_player がありません");
+          const p = player.getBoundingClientRect();
           return {
+            innerWidth: window.innerWidth,
             innerHeight: window.innerHeight,
             scrollY: window.scrollY,
-            bar: rect("yt-clip-bar"),
+            // **窓の枠の外形で測る。** 中身の根 (#yt-clip-bar) ではない (spec A.4)
+            bar: rect("yt-clip-bar-window"),
             panel: rect("yt-clip-panel"),
+            playerBottom: p.bottom,
+            // 合否には入れない。パネルが動画に重なっていないかを人が見る材料
+            playerRight: p.right,
             bodyScrollHeight: body.scrollHeight,
             bodyClientHeight: body.clientHeight,
-            // 合否には入れない。パネルが動画やバーに重なっていないかを人が見る材料
-            playerRight: player?.right ?? null,
           };
         });
         const file = join(OUT_DIR, "layout-1440x795.png");
         await page.screenshot({ path: file });
         record(
-          "受け入れ条件 1440x795: バーとパネルが画面に収まり、パネルの中でスクロールする",
+          "受け入れ条件 1440x795: バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
           measured.scrollY === 0 &&
+            measured.playerBottom <= measured.bar.top &&
             measured.bar.bottom <= measured.innerHeight &&
+            measured.panel.top >= 0 &&
+            measured.panel.left >= 0 &&
+            measured.panel.right <= measured.innerWidth &&
             measured.panel.bottom <= measured.innerHeight &&
             measured.bodyScrollHeight > measured.bodyClientHeight,
           { ...measured, file },
@@ -909,6 +923,180 @@ test("テロップの実機確認", async () => {
       }
     },
   );
+
+  // --- フロートの窓 (spec A.4): 動かす・大きさを変える・画面の外へ出しきれない・戻す ---------
+  // 1920x1080 に戻した後に行う。受け入れ条件の確認で足した区間 5 つと、開いた設定が残っている
+  const barWindow = page.locator("#yt-clip-bar-window");
+  const barGrip = bar.locator("[data-role=grip]");
+  const panelHeader = panel.locator("[data-role=window-header]");
+
+  type Box = { x: number; y: number; width: number; height: number };
+  async function boxOf(locator: Locator): Promise<Box> {
+    const box = await locator.boundingBox();
+    if (box === null) throw new Error("要素が画面に出ていません");
+    return box;
+  }
+  const centerOf = (box: Box) => ({ x: box.x + box.width / 2, y: box.y + box.height / 2 });
+  const near = (a: number, b: number, tolerance = 1) => Math.abs(a - b) <= tolerance;
+
+  /** from を押して to まで動かして離す。途中も刻んで動かし、pointermove を届ける */
+  async function dragFromTo(
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+  ): Promise<void> {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 8 });
+    await page.mouse.up();
+    // 覚える (chrome.storage.local への保存) のは指を離した後に非同期で走る
+    await page.waitForTimeout(500);
+  }
+
+  /** 拡張が覚えた窓の位置 (何も覚えていなければ null) */
+  async function readWindowLayout(): Promise<Record<string, unknown> | null> {
+    const worker = await getWorker();
+    return worker.evaluate(async () => {
+      const stored = await chrome.storage.local.get("windowLayout");
+      return (stored.windowLayout as Record<string, unknown> | undefined) ?? null;
+    });
+  }
+
+  await check("窓を動かすと、読み込み直しても同じ位置に出る", async () => {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    const barStart = await boxOf(barWindow);
+    const panelStart = await boxOf(panel);
+
+    const grip = centerOf(await boxOf(barGrip));
+    await dragFromTo(grip, { x: grip.x + 80, y: grip.y + 40 });
+    const header = await boxOf(panelHeader);
+    // 見出しの左寄り (「yt-clip」の文字の上) を掴む。右端の折り畳みボタンでは窓は動かない。
+    // 左へは少しだけ動かす (大きく動かすと、次の項目でバーの窓の右下の角に重なる)
+    const headerAt = { x: header.x + 40, y: header.y + header.height / 2 };
+    await dragFromTo(headerAt, { x: headerAt.x - 60, y: headerAt.y + 40 });
+    const barMoved = await boxOf(barWindow);
+    const panelMoved = await boxOf(panel);
+    const saved = await readWindowLayout();
+
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+    await expect(bar).toBeVisible({ timeout: 60_000 });
+    await waitNoAd();
+    // エディットで区間があるのでパネルも出る (受け入れ条件の確認で足した区間が状態機械に残っている)
+    await expect(segmentRows).toHaveCount(LAYOUT_SEGMENT_STARTS.length, { timeout: 30_000 });
+    await expect(panel).toBeVisible();
+    const barAfter = await boxOf(barWindow);
+    const panelAfter = await boxOf(panel);
+
+    const samePlace = (a: Box, b: Box) => near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width);
+    record(
+      "窓を動かすと、読み込み直しても同じ位置に出る",
+      near(barMoved.x, barStart.x + 80) &&
+        near(barMoved.y, barStart.y + 40) &&
+        near(panelMoved.x, panelStart.x - 60) &&
+        near(panelMoved.y, panelStart.y + 40) &&
+        samePlace(barAfter, barMoved) &&
+        samePlace(panelAfter, panelMoved) &&
+        saved !== null &&
+        "bar" in saved &&
+        "panel" in saved,
+      { barStart, barMoved, barAfter, panelStart, panelMoved, panelAfter, saved },
+    );
+  });
+
+  await check("右下をドラッグすると大きさが変わる (バーの窓は幅だけ)", async () => {
+    // バーの窓を上にしておく (右下の角がパネルの窓の下に潜っていても掴めるように)。
+    // 押して離すだけなので、位置は変わらず覚え直しもしない
+    await barGrip.click();
+    const barBefore = await boxOf(barWindow);
+    const barCorner = centerOf(await boxOf(barWindow.locator("[data-role=window-resize]")));
+    await dragFromTo(barCorner, { x: barCorner.x - 200, y: barCorner.y + 50 });
+    const barAfter = await boxOf(barWindow);
+
+    const panelBefore = await boxOf(panel);
+    const panelCorner = centerOf(await boxOf(panel.locator("[data-role=window-resize]")));
+    await dragFromTo(panelCorner, { x: panelCorner.x - 60, y: panelCorner.y - 100 });
+    const panelAfter = await boxOf(panel);
+
+    record(
+      "右下をドラッグすると大きさが変わる (バーの窓は幅だけ)",
+      near(barAfter.width, barBefore.width - 200, 2) &&
+        near(barAfter.height, barBefore.height) &&
+        near(barAfter.x, barBefore.x) &&
+        near(panelAfter.width, panelBefore.width - 60, 2) &&
+        near(panelAfter.height, panelBefore.height - 100, 2),
+      { barBefore, barAfter, panelBefore, panelAfter },
+    );
+  });
+
+  await check("窓を画面の外へドラッグしても、掴む場所が画面に残る", async () => {
+    const viewport = page.viewportSize();
+    if (viewport === null) throw new Error("viewport が取れません");
+    // 掴んだ点を画面の隅まで運ぶ。掴む場所の残りは画面の外へ出ようとするが、詰められて残る。
+    // 画面の外の座標へはマウスを運べない (ページにイベントが届かない) ので、隅で止める。
+    // バーのつまみは右下、パネルの見出しは左下へ。反対の隅へ送るのは、次の項目で
+    // ダブルクリックするときに 2 つの窓が重ならないようにするため
+    const grip = centerOf(await boxOf(barGrip));
+    await dragFromTo(grip, { x: viewport.width - 1, y: viewport.height - 1 });
+    const header = await boxOf(panelHeader);
+    const headerAt = { x: header.x + 40, y: header.y + header.height / 2 };
+    await dragFromTo(headerAt, { x: 1, y: viewport.height - 1 });
+
+    const gripBox = await boxOf(barGrip);
+    const headerBox = await boxOf(panelHeader);
+    const inside = (b: Box) =>
+      b.x >= -0.5 &&
+      b.y >= -0.5 &&
+      b.x + b.width <= viewport.width + 0.5 &&
+      b.y + b.height <= viewport.height + 0.5;
+    record(
+      "窓を画面の外へドラッグしても、掴む場所が画面に残る",
+      inside(gripBox) && inside(headerBox),
+      { viewport, gripBox, headerBox },
+    );
+  });
+
+  await check("掴む場所をダブルクリックすると最初の位置に戻り、覚えた位置も消える", async () => {
+    // バーを先に戻す。パネルを先に右上へ戻すと、高さが画面の下まで伸びて右下のつまみに被さる
+    await barGrip.dblclick();
+    const header = await boxOf(panelHeader);
+    await panelHeader.dblclick({ position: { x: 40, y: header.height / 2 } });
+    await page.waitForTimeout(500);
+
+    const measured = await page.evaluate(() => {
+      const box = (id: string) => {
+        const element = document.getElementById(id);
+        if (element === null) throw new Error(`#${id} がありません`);
+        const b = element.getBoundingClientRect();
+        return { left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height };
+      };
+      return {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        player: box("movie_player"),
+        bar: box("yt-clip-bar-window"),
+        panel: box("yt-clip-panel"),
+      };
+    });
+    const saved = await readWindowLayout();
+    // バーの最初の位置: プレイヤーの下端 + 8px。収まらなければ画面の下端から 16px
+    // (window-layout.ts の initialBarRect)。パネルは右 16px・上 68px・幅 400px (side-panel.ts)
+    const expectedBarTop = Math.max(
+      0,
+      Math.min(measured.player.bottom + 8, measured.innerHeight - 16 - measured.bar.height),
+    );
+    record(
+      "掴む場所をダブルクリックすると最初の位置に戻り、覚えた位置も消える",
+      near(measured.bar.left, measured.player.left) &&
+        near(measured.bar.width, measured.player.width) &&
+        near(measured.bar.top, expectedBarTop) &&
+        near(measured.panel.right, measured.innerWidth - 16) &&
+        near(measured.panel.top, 68) &&
+        near(measured.panel.width, 400) &&
+        saved !== null &&
+        !("bar" in saved) &&
+        !("panel" in saved),
+      { ...measured, expectedBarTop, saved },
+    );
+  });
 
   await writeResults();
   const failed = Object.entries(results)
