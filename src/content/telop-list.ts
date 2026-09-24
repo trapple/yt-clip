@@ -127,6 +127,10 @@ export function createTelopList(callbacks: TelopListCallbacks): TelopList {
     const textarea = document.createElement("textarea");
     textarea.style.cssText = TELOP_STYLE.textarea;
     textarea.placeholder = "文言 (改行できます)";
+    // **作った時点の enabled を反映する。** `setEnabled` は既存行だけを更新
+    // するので、無効な間に update で初めて作られた行は、ここが無いと
+    // 見た目 (opacity) だけ薄いのに打てる状態のまま残る
+    textarea.disabled = !enabled;
     // 1 文字ごとに送ると、そのたびにクリップが外れて状態通知が飛ぶ
     textarea.addEventListener("change", () => {
       if (!enabled) return;

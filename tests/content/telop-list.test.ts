@@ -146,4 +146,15 @@ describe("createTelopList", () => {
     button(row, "remove").click();
     expect(calls).toEqual([]);
   });
+
+  test("無効な間に作った行の入力欄も無効", () => {
+    // setEnabled(false) → update の順で呼ばれると (content script の読み直し
+    // 直後の preview / 録画中など)、この時点で初めて作られる行がある。
+    // 見た目だけ薄くして中身は押せるままにしない
+    const list = createTelopList(makeCallbacks().callbacks);
+    list.setEnabled(false);
+    list.update([HELLO], SEGMENTS);
+    const textarea = rows(list)[0]?.querySelector("textarea");
+    expect(textarea?.disabled).toBe(true);
+  });
 });
