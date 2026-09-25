@@ -10,6 +10,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getWorker as sharedGetWorker } from "./helpers";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist", import.meta.url));
 
@@ -52,21 +53,9 @@ test.afterAll(async () => {
   await rm(userDataDir, { recursive: true, force: true });
 });
 
-/**
- * service worker は MV3 で止まりうる。止まっていたら popup を開いて起こす
- * (popup は service worker に状態を問い合わせる。telop-check.spec.ts の getWorker と同じ)
- */
-async function getWorker(): Promise<Worker> {
-  const found = context
-    .serviceWorkers()
-    .find((w) => new URL(w.url()).host === extensionId);
-  if (found !== undefined) return found;
-  const waiting = context.waitForEvent("serviceworker", { timeout: 30_000 });
-  const popup = await context.newPage();
-  await popup.goto(`chrome-extension://${extensionId}/src/popup/popup.html`);
-  const worker = await waiting;
-  await popup.close();
-  return worker;
+/** e2e/helpers.ts の getWorker を、この場のモジュール変数 (context / extensionId) で呼ぶ (telop-check.spec.ts と共有) */
+function getWorker(): Promise<Worker> {
+  return sharedGetWorker(context, extensionId);
 }
 
 /**

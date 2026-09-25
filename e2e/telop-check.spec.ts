@@ -12,6 +12,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getWorker as sharedGetWorker } from "./helpers";
 
 /**
  * テロップの実機確認 (docs/manual-check.md の「テロップ」節)。**手動実行専用。**
@@ -175,21 +176,9 @@ let context: BrowserContext;
 let userDataDir: string;
 let extensionId: string;
 
-/**
- * service worker は MV3 で止まりうる。止まっていたら popup を開いて起こす
- * (popup は service worker に状態を問い合わせる)
- */
-async function getWorker(): Promise<Worker> {
-  const found = context
-    .serviceWorkers()
-    .find((w) => new URL(w.url()).host === extensionId);
-  if (found !== undefined) return found;
-  const waiting = context.waitForEvent("serviceworker", { timeout: 30_000 });
-  const popup = await context.newPage();
-  await popup.goto(`chrome-extension://${extensionId}/src/popup/popup.html`);
-  const worker = await waiting;
-  await popup.close();
-  return worker;
+/** e2e/helpers.ts の getWorker を、この場のモジュール変数 (context / extensionId) で呼ぶ (smoke.spec.ts と共有) */
+function getWorker(): Promise<Worker> {
+  return sharedGetWorker(context, extensionId);
 }
 
 async function writeSettings(settings: Record<string, unknown>): Promise<void> {
