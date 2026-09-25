@@ -3740,6 +3740,13 @@ describe("ドック枠とタブ", () => {
       .map((tab) => tab.textContent ?? "");
   }
 
+  function activeLabel(slot: "below" | "side"): string | null {
+    return (
+      slotElement(slot).querySelector<HTMLElement>("[data-role='dock-tab'][data-active='true']")
+        ?.textContent ?? null
+    );
+  }
+
   /** 落とし先の帯が出ているか (dock.ts がドラッグの間だけ data-drop-target を立てる) */
   function bandShown(slot: "below" | "side"): boolean {
     return slotElement(slot).querySelector("[data-drop-target='true']") !== null;
@@ -4081,5 +4088,47 @@ describe("ドック枠とタブ", () => {
     }
     document.dispatchEvent(new Event("fullscreenchange"));
     expect(slotElement("below").style.display).toBe("block");
+  });
+
+  test("⚙ で設定を開くと、ドック中の設定のタブが前に出る (閉じるとタブが消える)", async () => {
+    // 最初の配置 (右の枠 [list, settings]) で、区間・テロップのタブを押して前に出しておく
+    const listTab = tabElement("side", "list");
+    pointer(listTab, "pointerdown", 850, 70);
+    pointer(listTab, "pointerup", 850, 70);
+    expect(activeLabel("side")).toBe("区間・テロップ");
+
+    clickButton("⚙");
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
+    expect(activeLabel("side")).toBe("設定");
+
+    clickButton("⚙");
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+
+    clickButton("⚙");
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
+    expect(activeLabel("side")).toBe("設定");
+  });
+
+  test("区間を足すと、ドック中の区間・テロップのタブが前に出る (窓の中は送らない)", async () => {
+    // 最初の配置で ⚙ を開き、設定のタブを前に出しておく
+    clickButton("⚙");
+    await flush();
+    expect(activeLabel("side")).toBe("設定");
+
+    video.element.currentTime = 300;
+    clickButton("＋ 区間を追加");
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [RANGE, { startSec: 300, endSec: 315 }],
+      telops: [],
+      meta: META_A,
+    });
+
+    expect(activeLabel("side")).toBe("区間・テロップ");
+    expect(listBody().scrollTop).toBe(0);
   });
 });

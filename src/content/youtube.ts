@@ -1260,12 +1260,22 @@ function refreshLists(): void {
 }
 
 /**
+ * 使える枠に入っている (ページの中にある) か。退避中 (入っている枠が使えない間の浮いた窓) は false:
+ * 見えている形 (浮いた窓) に合わせて、⚙ と足した行の扱いを浮いた窓と同じにする
+ */
+function isDockedInPage(id: WindowId): boolean {
+  const slot = dockManager.slotOf(id);
+  return slot !== null && dockManager.isUsable(slot);
+}
+
+/**
  * 足した行を区間・テロップの窓の見える範囲に入れる。**応答を描いた後に呼ぶ** (クリックの時点では
  * 行がまだ無い)。押した結果が見えないと無反応に見える (右側パネルの spec §3)。
  *
- * **窓を前には出さない** (C1.2 は窓の中を送ることだけを求める)。前に出すと、設定の窓で値を
- * 見ながら区間を足したときに設定が潜る。窓が隠れている (全画面など) ときは何もしない。
- * 出す判断は `refreshWindows` のもの
+ * **浮いた窓は前には出さない** (C1.2 は窓の中を送ることだけを求める)。前に出すと、設定の窓で値を
+ * 見ながら区間を足したときに設定が潜る。**ドック中ならタブを前に出すだけ** (C2.2): ページの中の窓は中身なりの
+ * 高さで中でスクロールしないので送る先が無く、ページもスクロールしない (右側パネルの spec §3 と同じ理由)。
+ * 窓が隠れている (全画面など) ときは何もしない。出す判断は `refreshWindows` のもの
  */
 function revealLastRow(
   list: HTMLElement | undefined,
@@ -1275,6 +1285,10 @@ function revealLastRow(
   const rows = list.querySelectorAll<HTMLElement>(`[data-role='${role}']`);
   const last = rows[rows.length - 1];
   if (last === undefined) return;
+  if (isDockedInPage("list")) {
+    dockManager.activate("list");
+    return;
+  }
   listWindow.scrollTo(last);
 }
 
@@ -1749,10 +1763,10 @@ function readChannelContext(): SettingsContext {
 /**
  * ⚙。設定の窓を開閉する (窓の分割の spec C1.2)。**開いたら設定の窓を前に出す。** 最初の位置では
  * 区間・テロップの窓に下へ 32px ずれて重なるので、前に出さないと一覧の窓の下に潜り、押しても
- * 開いていないように見える。
+ * 開いていないように見える。**ドック中ならそのタブを前に出す** (C2.2。ページはスクロールしない)。
  *
  * **開く → 出す → 前に出す の順を崩さない。** 窓を出すかは設定パネルの `hidden` を見て
- * refreshWindows が決める。窓の中は送らない (中身は設定だけで、送る先が無い)
+ * refreshWindows が決める (ドック中ならタブもそこで出る)。窓の中は送らない (中身は設定だけで、送る先が無い)
  */
 function onToggleSettings(): void {
   // ⚙ は buildBar の中で設定パネルを作った後に作るので、押せた時点で null は
@@ -1763,6 +1777,10 @@ function onToggleSettings(): void {
   settingsPanel.toggle();
   refreshWindows();
   if (settingsPanel.element.hidden) return;
+  if (isDockedInPage("settings")) {
+    dockManager.activate("settings");
+    return;
+  }
   settingsWindow.frame.bringToFront();
 }
 
@@ -2113,7 +2131,8 @@ function loadInitialSettings(): void {
 }
 
 /**
- * 起動時に覚えた窓の位置を読む。**済むまで窓を出さない** (refreshWindows が layoutReady を見る)。
+ * 起動時に覚えた窓の配置 (浮いた窓の位置と、どの枠に入れたか) を読む。**済むまで窓も枠も出さない**
+ * (refreshWindows が layoutReady を見る。枠は窓が隠れていれば隠れる)。
  *
  * 覚えた位置も画面に収まるよう詰めてから使う (place が詰める。大きい画面で覚えた位置を
  * 小さい画面で開いたとき)。読めなくても最初の位置で出す (loadWindowLayout は失敗を warn して
@@ -2122,11 +2141,17 @@ function loadInitialSettings(): void {
 function loadInitialLayout(): void {
   void loadWindowLayout()
     .then((layout) => {
-      for (const id of ["bar", "list", "settings"] as const) {
+      // 枠の中身を先に入れる。窓を枠へ置くのは下の refreshWindows の sync (出す条件が決まってから)。
+      // **読み込みは保存しない** (load は onChange を呼ばない。C1.3)
+      dockManager.load(layout.docks);
+      for (const id of WINDOW_IDS) {
         const rect = layout.float[id];
         if (rect === undefined) continue;
         // 写しを書き換える 3 箇所の 1 つ (floatLayout の doc)
         floatLayout[id] = rect;
+        // float と docks の両方にある窓は枠を採る (C2.6)。float は引き出したときの大きさにだけ使うので、
+        // 写しには入れ、位置は当てない
+        if (dockManager.slotOf(id) !== null) continue;
         windowOf(id).place(rect);
       }
     })
