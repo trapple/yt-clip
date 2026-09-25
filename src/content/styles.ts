@@ -5,7 +5,7 @@
  * 場所 (`#below` 配下の light DOM) では 1 つも解決せず、書いたフォールバック値
  * だけが効く。実機で確認済み。そのため配色は自前で持ち、テーマは自分で判定する。
  *
- * 配色は自前の変数 (`--ytc-*`) としてバーと右側のパネルの根に置く。テーマが
+ * 配色は自前の変数 (`--ytc-*`) としてバーと窓の根に置く。テーマが
  * 切り替わったらその 7 個を差し替えるだけで全体が追従する。
  */
 
@@ -17,7 +17,7 @@ export type Palette = {
   accent: string;
   onAccent: string;
   /**
-   * 右側のパネルの地。**`surface` とは別に持つ。** `surface` はテロップ行・選択中の
+   * 窓の地。**`surface` とは別に持つ。** `surface` はテロップ行・選択中の
    * 区間行・設定の背景に使っており、それを地にすると行と設定が地に溶ける
    */
   panel: string;
@@ -188,24 +188,6 @@ export const TELOP_STYLE = {
 } as const;
 
 /**
- * 右側のパネル (`side-panel.ts`) の中身。**枠の見た目 (地・影・見出し) は
- * `FLOATING_WINDOW_STYLE` が持つ** (パネルはフロートの窓の上に作る)。位置・幅は
- * YouTube の実機の値に合わせるので、出所と一緒に `side-panel.ts` が持つ。
- *
- * **`body` は display を持たない。** 畳むときの出し入れは `side-panel.ts` が
- * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の
- * display が勝って出たままになる
- */
-export const SIDE_PANEL_STYLE = {
-  collapseButton: SEGMENT_STYLE.iconButton,
-  /**
-   * 中身の箱。**超えた分はここだけでスクロールする。** `min-height:0` が無いと
-   * flex の子は中身より縮まず、パネルごと画面の下へ伸びる
-   */
-  body: "flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
-} as const;
-
-/**
  * 見出しのある「幅と高さ」の窓 (`panel-window.ts`。区間・テロップの窓と設定の窓) の中身の箱。
  * **枠の見た目 (地・影・見出し) は `FLOATING_WINDOW_STYLE` が持つ。** 位置・幅は YouTube の実機の値に
  * 合わせるので、出所と一緒に `panel-window.ts` が持つ。
@@ -223,7 +205,7 @@ export const PANEL_WINDOW_STYLE = {
 } as const;
 
 /**
- * フロートの窓の枠 (`floating-window.ts`)。バーの窓とパネルの窓で同じものを使う。
+ * フロートの窓の枠 (`floating-window.ts`)。バーの窓・区間・テロップの窓・設定の窓で同じものを使う。
  *
  * **`root` と `resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
  * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の display が

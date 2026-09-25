@@ -37,7 +37,11 @@ import {
   type FloatingWindow,
   type WindowRect,
 } from "@/content/floating-window";
-import { createSidePanel, initialPanelRect } from "@/content/side-panel";
+import {
+  createPanelWindow,
+  initialListRect,
+  initialSettingsRect,
+} from "@/content/panel-window";
 import { createTelopList, type TelopList } from "@/content/telop-list";
 import { createTelopPreview } from "@/content/telop-preview";
 import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
@@ -89,6 +93,12 @@ const OVERLAY_ID = "yt-clip-overlay";
 const BAR_WINDOW_ID = "yt-clip-bar-window";
 /** バーの窓の最小の幅 (spec A.1)。これより狭いと拡大バーの精度が出ず、操作の行も折り返す */
 const BAR_MIN_WIDTH_PX = 480;
+/**
+ * 区間・テロップの窓と設定の窓の枠 (窓の分割の spec C1.1)。中身の箱は `${id}-body`
+ * (panel-window.ts)。E2E と screenshots.mjs もこの id で探す
+ */
+const LIST_WINDOW_ID = "yt-clip-list";
+const SETTINGS_WINDOW_ID = "yt-clip-settings";
 
 /**
  * 録画品質は再生解像度が上限になるため、低いときは事前に知らせる。
@@ -128,7 +138,7 @@ let telopList: TelopList | null = null;
 /** プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため) */
 const telopPreview = createTelopPreview();
 /**
- * 覚えた位置 (chrome.storage.local) の読み込みが済んだか。**済むまで 2 つの窓を出さない**
+ * 覚えた位置 (chrome.storage.local) の読み込みが済んだか。**済むまで 3 つの窓を出さない**
  * (spec A.2)。最初の位置に出してから覚えた位置へ跳ぶ絵にしない。読めなかったときも済んだ
  * 扱いにする (最初の位置で出す。出さないままにしない)
  */
@@ -150,19 +160,31 @@ let layoutReady = false;
  */
 const floatLayout: Partial<Record<WindowId, WindowRect>> = {};
 /**
- * 右側のパネル (パネルの窓)。区間の一覧・テロップの一覧・設定を入れる。
+ * 区間・テロップの窓。区間の一覧とテロップの一覧を入れる (窓の分割の spec C1.1)。
  *
- * **1 つを使い回す。** 畳んだ状態はタブを開いている間だけ覚える (右側パネルの spec §3) うえ、
- * 窓の位置も持つので、バーを作り直すたびに作り直さない。中身の入れ替えは `buildBar`、body への
- * 付け直しは `mount`、出すかの判定は `refreshWindows` が行う
+ * **1 つを使い回す。** 窓の位置を持つので、バーを作り直すたびに作り直さない。中身の入れ替えは
+ * `buildBar`、body への付け直しは `mount`、出すかの判定は `refreshWindows` が行う
  */
-// パネルの位置は、窓を分けた後に区間・テロップの窓が継ぐ鍵 (list) で覚える
-const sidePanel = createSidePanel({
+const listWindow = createPanelWindow({
+  id: LIST_WINDOW_ID,
+  title: "区間・テロップ",
   onUserMove: (rect) => rememberWindowRect("list", rect),
   onResetRequest: () => resetWindow("list"),
 });
-// パネルは body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
-applyPalette(sidePanel.element, isDarkTheme());
+// 窓は body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
+applyPalette(listWindow.element, isDarkTheme());
+/**
+ * 設定の窓。設定パネル (`settings-panel.ts`) を入れ、⚙ で開閉する (C1.2)。**閉じるボタン (×) は
+ * 置かない** (右側パネルの spec で不採用にしたのと同じ。閉じ方を ⚙ の 1 つにする)。使い回すのは
+ * 区間・テロップの窓と同じ理由
+ */
+const settingsWindow = createPanelWindow({
+  id: SETTINGS_WINDOW_ID,
+  title: "設定",
+  onUserMove: (rect) => rememberWindowRect("settings", rect),
+  onResetRequest: () => resetWindow("settings"),
+});
+applyPalette(settingsWindow.element, isDarkTheme());
 /**
  * バーの窓。拡大バーと操作の行 (中身の根 #yt-clip-bar) を入れる。
  *
@@ -179,7 +201,7 @@ const barWindow = createFloatingWindow({
 });
 // バーの窓も body の直下にあり、ページの配色は継がれない
 applyPalette(barWindow.element, isDarkTheme());
-/** 設定パネル。⚙ の開閉と、パネルを出すかの判定の両方が読む。`buildBar` が作る */
+/** 設定パネル。⚙ の開閉と、設定の窓を出すかの判定の両方が読む。`buildBar` が作る */
 let settingsPanel: SettingsPanel | null = null;
 /**
  * 状態機械から最後に届いた種類。
@@ -205,7 +227,7 @@ let pendingMode: ClipMode | null = null;
  */
 let selectLastOnNextState = false;
 /**
- * 次に状態が届いたとき、テロップの一覧の末尾の行をパネルの見える範囲に入れる。
+ * 次に状態が届いたとき、テロップの一覧の末尾の行を区間・テロップの窓の見える範囲に入れる。
  *
  * `selectLastOnNextState` と同じ形。**クリックの時点では行がまだ無い** (状態機械の
  * 答えを待って描く) ので、応答を描いた後に 1 回だけ送る
@@ -505,19 +527,19 @@ function applyMode(next: ClipMode): void {
   mode = next;
   // 作り直す前に開いていたかを覚えておく。バーを作り直すと設定パネルも
   // 新しい隠れたものに替わるので、覚えておかないとモードを変えた瞬間に
-  // 設定 (シンプルならパネルごと) が消える。1 つのパネルを使い回す設計に
+  // 設定 (設定の窓ごと) が消える。1 つの設定の窓を使い回す設計に
   // なったので、開いたままにする
   const settingsWasOpen = settingsPanel?.element.hidden === false;
   // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
   // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
   document.getElementById(BAR_ID)?.remove();
   mount();
-  // 開いていたなら、⚙ と同じ経路 (開く → refreshWindows → reveal → scrollTo)
+  // 開いていたなら、⚙ と同じ経路 (開く → refreshWindows → 前に出す)
   // で新しい設定パネルを開き直す。保存済みの値は toggle の fill が入れ直すので、
   // 未保存の入力は失われてよい (モード変更は設定の保存を経由するため保存済み)
-  // **新しい隠れたパネルがあるときだけ開く。** onToggleSettings は toggle なので、
+  // **新しい隠れた設定パネルがあるときだけ開く。** onToggleSettings は toggle なので、
   // mount() がバーを作り直さなかった場合 (#below が無い) に呼ぶと、開いたままの
-  // 古いパネルを逆に閉じてしまう
+  // 古い設定パネルを逆に閉じてしまう
   if (settingsWasOpen && settingsPanel?.element.hidden === true) onToggleSettings();
 
   if (currentSegments.length > 0) {
@@ -578,7 +600,7 @@ function onAddTelop(): void {
     setStatus("動画の終わりにはテロップを足せません");
     return;
   }
-  // 足した行をパネルの見える範囲に入れる。畳んでいても開く (spec §3)
+  // 足した行を区間・テロップの窓の見える範囲に入れる (右側パネルの spec §3)
   revealLastTelopOnNextState = true;
   send({ type: "ADD_TELOP", telop: { startSec, endSec, text: "" } });
 }
@@ -952,7 +974,7 @@ function renderActions(kind: ClipState["kind"]): void {
  * 一覧に出す区間とテロップ。**エディットモードで、範囲を作った動画を見ているときだけ。**
  *
  * シンプルで使っている人に、関係のない概念を見せない。別の動画の区間は出さない
- * (帯・プレビューと同じ規則)。固定のパネルに出すので、SPA で動画 B へ移ったのに
+ * (帯・プレビューと同じ規則)。画面に浮いた窓に出すので、SPA で動画 B へ移ったのに
  * 動画 A の区間が出続けると目立つ (spec §4)
  */
 function listedItems(): { segments: ClipRange[]; telops: Telop[] } {
@@ -963,21 +985,25 @@ function listedItems(): { segments: ClipRange[]; telops: Telop[] } {
 }
 
 /** 窓の枠。id で引く (覚えた配置の鍵と同じ名前) */
-function windowOf(id: "bar" | "list"): FloatingWindow {
-  return id === "bar" ? barWindow : sidePanel.frame;
+function windowOf(id: WindowId): FloatingWindow {
+  if (id === "bar") return barWindow;
+  return id === "list" ? listWindow.frame : settingsWindow.frame;
 }
 
 /**
- * 窓の最初の位置 (spec A.2)。バーはプレイヤーの直下、パネルは画面の右上。
+ * 窓の最初の位置 (spec A.2 / C1.3)。バーはプレイヤーの直下、区間・テロップの窓は画面の右上、
+ * 設定の窓は区間・テロップの窓の最初の位置から下へ 32px。
  * プレイヤーがまだ無ければ null (出たときに取り直す)。
  *
  * **プレイヤーの画面上の位置をそのまま使う。** ページがスクロールされていても、今見えている
  * 位置の直下に置く (窓は画面に固定なので、ページの座標に直さない)。バーの高さは出ている窓で
  * 測る (隠れている窓は 0 になる。そのため出した直後に取り直す: refreshWindows)
  */
-function initialWindowRect(id: "bar" | "list"): WindowRect | null {
+function initialWindowRect(id: WindowId): WindowRect | null {
   const viewport = { width: window.innerWidth, height: window.innerHeight };
-  if (id === "list") return initialPanelRect(viewport);
+  if (id === "list") return initialListRect(viewport);
+  // 区間・テロップの窓の**最初の位置**から下へずらす。一覧を動かしていても、その位置には付いていかない
+  if (id === "settings") return initialSettingsRect(viewport);
   const player = document.querySelector(YT_SELECTORS.player);
   if (player === null) return null;
   const box = player.getBoundingClientRect();
@@ -997,7 +1023,7 @@ function initialWindowRect(id: "bar" | "list"): WindowRect | null {
  * 動かしていない窓 (覚えた `float` に無い窓) を最初の位置に置く。覚えた配置の読み込みが済む前は
  * 何もしない (まだ出さない)
  */
-function placeInitial(id: "bar" | "list"): void {
+function placeInitial(id: WindowId): void {
   if (!layoutReady || floatLayout[id] !== undefined) return;
   const rect = initialWindowRect(id);
   if (rect !== null) windowOf(id).place(rect);
@@ -1026,7 +1052,7 @@ function rememberWindowRect(id: WindowId, rect: WindowRect): void {
 }
 
 /** 掴む場所のダブルクリック。最初の位置に戻し、覚えた位置も消す (spec A.2) */
-function resetWindow(id: "bar" | "list"): void {
+function resetWindow(id: WindowId): void {
   // 先に写しから消す。placeInitial は写しにある窓 (動かした窓) を置き直さない
   delete floatLayout[id];
   placeInitial(id);
@@ -1034,16 +1060,18 @@ function resetWindow(id: "bar" | "list"): void {
 }
 
 /**
- * 2 つの窓 (バーの窓・パネルの窓) を出すか隠すかを決める。**`setVisible` を呼ぶのはここだけ**
- * (右側パネルの spec §4 を 2 つの窓へ広げた。spec A.1)。
+ * 3 つの窓 (バーの窓・区間・テロップの窓・設定の窓) を出すか隠すかを決める。**`setVisible` を
+ * 呼ぶのはここだけ** (右側パネルの spec §4 を 3 つの窓へ広げた。窓の分割の spec C1.2)。
  *
- * どちらも隠すのは、覚えた位置を読み込む前 / 全画面 / 動画ページ以外。パネルはさらに中身が
- * 無いときも隠す。中身があるかは各部品の `hidden` で見る (一覧は区間が無いと自分で隠れ、
- * 設定は ⚙ で開閉する)。バーは中身の根 (BAR_ID) がまだ無い間は出さない
+ * どれも隠すのは、覚えた位置を読み込む前 / 全画面 / 動画ページ以外。そのうえで、バーは中身の根
+ * (BAR_ID) がある間、区間・テロップの窓は一覧のどちらかが見えている間 (一覧は中身が無いと自分で
+ * 隠れる)、設定の窓は ⚙ で開いている間 (設定パネルの `hidden` が偽) だけ出す
  */
 function refreshWindows(): void {
-  const parts = [segmentList?.element, telopList?.element, settingsPanel?.element];
-  const hasContent = parts.some((part) => part !== undefined && !part.hidden);
+  const listShown = [segmentList?.element, telopList?.element].some(
+    (part) => part !== undefined && !part.hidden,
+  );
+  const settingsOpen = settingsPanel?.element.hidden === false;
   // **`!= null` にする。** jsdom は fullscreenElement を持たず undefined を返すので、
   // `!== null` だとテストで常に全画面扱いになる。body 直下の fixed 要素は全画面の
   // 動画の上に残りうるので、全画面では出さない
@@ -1053,14 +1081,17 @@ function refreshWindows(): void {
   const canShow = layoutReady && !fullscreen && onVideoPage;
 
   const barWasHidden = barWindow.element.hidden;
-  const panelWasHidden = sidePanel.element.hidden;
+  const listWasHidden = listWindow.element.hidden;
+  const settingsWasHidden = settingsWindow.element.hidden;
   barWindow.setVisible(canShow && document.getElementById(BAR_ID) !== null);
-  sidePanel.setVisible(canShow && hasContent);
+  listWindow.setVisible(canShow && listShown);
+  settingsWindow.setVisible(canShow && settingsOpen);
   // 隠れていた窓は寸法が 0 で、最初の位置 (バーの高さで画面の下端に詰める) を測れていない。
   // **出した直後にだけ**取り直す。出ている間に状態が届くたびに取り直すと、ページを
   // スクロールした後に IN を押しただけで、バーがプレイヤーを追って跳ぶ (spec A.2)
   if (barWasHidden && !barWindow.element.hidden) placeInitial("bar");
-  if (panelWasHidden && !sidePanel.element.hidden) placeInitial("list");
+  if (listWasHidden && !listWindow.element.hidden) placeInitial("list");
+  if (settingsWasHidden && !settingsWindow.element.hidden) placeInitial("settings");
 }
 
 /**
@@ -1099,7 +1130,7 @@ function refreshTelopTrack(): void {
 }
 
 /**
- * 一覧と帯の段を手元の写しに合わせて描き直し、パネルを出すかを決め直す。
+ * 一覧と帯の段を手元の写しに合わせて描き直し、窓を出すかを決め直す。
  * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ
  */
 function refreshLists(): void {
@@ -1113,21 +1144,22 @@ function refreshLists(): void {
 }
 
 /**
- * 足した行をパネルの見える範囲に入れる。**応答を描いた後に呼ぶ** (クリックの時点では
- * 行がまだ無い)。畳んでいても開く。押した結果が見えないと無反応に見える (spec §3)。
+ * 足した行を区間・テロップの窓の見える範囲に入れる。**応答を描いた後に呼ぶ** (クリックの時点では
+ * 行がまだ無い)。押した結果が見えないと無反応に見える (右側パネルの spec §3)。
  *
- * パネルが隠れている (全画面など) ときは何もしない。出す判断は `refreshWindows` のもの
+ * **窓を前には出さない** (C1.2 は窓の中を送ることだけを求める)。前に出すと、設定の窓で値を
+ * 見ながら区間を足したときに設定が潜る。窓が隠れている (全画面など) ときは何もしない。
+ * 出す判断は `refreshWindows` のもの
  */
 function revealLastRow(
   list: HTMLElement | undefined,
   role: "segment" | "telop",
 ): void {
-  if (list === undefined || sidePanel.element.hidden) return;
+  if (list === undefined || listWindow.element.hidden) return;
   const rows = list.querySelectorAll<HTMLElement>(`[data-role='${role}']`);
   const last = rows[rows.length - 1];
   if (last === undefined) return;
-  sidePanel.reveal();
-  sidePanel.scrollTo(last);
+  listWindow.scrollTo(last);
 }
 
 function applyStateToDisplay(state: ClipState): void {
@@ -1224,7 +1256,7 @@ function applyStateToDisplay(state: ClipState): void {
   // ただし録画中は、打ち切られたドラッグの見た目が最後の位置に残るため、
   // ずれていなくても確定済みの範囲で描き直す
   refreshLists();
-  // 一覧とパネルの表示が決まってから送る (出す → 開く → 送る の順)
+  // 一覧と窓の表示が決まってから送る (出す → 送る の順)
   if (revealSegment) revealLastRow(segmentList?.element, "segment");
   if (revealTelop) revealLastRow(telopList?.element, "telop");
 
@@ -1589,7 +1621,7 @@ async function finishRecording(): Promise<void> {
  * 設定パネルに渡す文脈。**開くたびに読む** (SPA 遷移で別のチャンネルへ移る)。
  *
  * `getChannel` は見つからなくても throw しないので、ここに try/catch は要らない。
- * `buildBar` の中に閉じ込めないのは、同じスコープの他のクロージャがパネルを
+ * `buildBar` の中に閉じ込めないのは、同じスコープの他のクロージャが設定パネルを
  * 捕捉しているため、`buildBar` のスコープごと生き残ることになるから
  */
 function readChannelContext(): SettingsContext {
@@ -1599,11 +1631,12 @@ function readChannelContext(): SettingsContext {
 }
 
 /**
- * ⚙。設定をパネルに開閉する。**開いたら畳みを解き、設定の先頭まで送る** (spec §3)。
- * 設定は一覧の下に入るので、区間とテロップが多いと押しても見えないところで開く。
+ * ⚙。設定の窓を開閉する (窓の分割の spec C1.2)。**開いたら設定の窓を前に出す。** 最初の位置では
+ * 区間・テロップの窓に下へ 32px ずれて重なるので、前に出さないと一覧の窓の下に潜り、押しても
+ * 開いていないように見える。
  *
- * **出す → 開く → 送る の順を崩さない。** 隠れていた・畳んでいたパネルは寸法が 0 で、
- * 先に送っても scrollTop が効かない (シンプルモードで ⚙ を押す経路で効く)
+ * **開く → 出す → 前に出す の順を崩さない。** 窓を出すかは設定パネルの `hidden` を見て
+ * refreshWindows が決める。窓の中は送らない (中身は設定だけで、送る先が無い)
  */
 function onToggleSettings(): void {
   // ⚙ は buildBar の中で設定パネルを作った後に作るので、押せた時点で null は
@@ -1614,8 +1647,7 @@ function onToggleSettings(): void {
   settingsPanel.toggle();
   refreshWindows();
   if (settingsPanel.element.hidden) return;
-  sidePanel.reveal();
-  sidePanel.scrollTo(settingsPanel.element);
+  settingsWindow.frame.bringToFront();
 }
 
 function buildBar(): HTMLElement {
@@ -1728,17 +1760,14 @@ function buildBar(): HTMLElement {
   });
 
   // バーは拡大バー → テロップの帯の段 → 操作の行だけ。拡大バーは幅がそのまま精度になるので、
-  // パネルの幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の
+  // 一覧の窓の幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の
   // spec A.1)。帯の段は拡大バーのトラックの**下**に置く: トラックの中に重ねると、区間のハンドルと
   // 帯の当たり判定が重なる (spec B.1)
   bar.append(rangeBar.element, telopTrack.element, row);
-  // 一覧と設定は右側のパネルへ。**中身ごと入れ替える。** 足すだけにすると、
-  // バーを作り直すたびに古い一覧が残って 2 重になる
-  sidePanel.body.replaceChildren(
-    segmentList.element,
-    telopList.element,
-    settings.element,
-  );
+  // 一覧は区間・テロップの窓へ、設定は設定の窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
+  // 足すだけにすると、バーを作り直すたびに古い一覧や設定が残って 2 重になる
+  listWindow.body.replaceChildren(segmentList.element, telopList.element);
+  settingsWindow.body.replaceChildren(settings.element);
   return bar;
 }
 
@@ -1770,6 +1799,7 @@ function watchPlayhead(): void {
 function placeUnmovedWindows(): void {
   placeInitial("bar");
   placeInitial("list");
+  placeInitial("settings");
 }
 
 /** 大きさを見ているプレイヤー。**SPA 遷移や再描画で要素が替わる**ので、mount のたびに確かめる */
@@ -1786,9 +1816,9 @@ function watchPlayerSize(): void {
 }
 
 function mount(): void {
-  // 2 つの窓は body の直下に置く (#below の中だと YouTube の再描画で外れる)。
+  // 3 つの窓は body の直下に置く (#below の中だと YouTube の再描画で外れる)。
   // **バーの有無より先に見る。** body の子を差し替えられると窓だけが外れる
-  for (const frame of [barWindow.element, sidePanel.element]) {
+  for (const frame of [barWindow.element, listWindow.element, settingsWindow.element]) {
     if (frame.parentElement !== document.body) document.body.append(frame);
   }
   // **バーの有無より先に見る。** バーを作り直さなくても、プレイヤーの要素だけが替わることがある
@@ -1840,7 +1870,7 @@ function mount(): void {
   refreshOverlay();
   refreshTelopPreview();
   // 作り直した一覧は空で隠れている。次の状態通知を待たずに手元の写しで描き直し、
-  // パネルの表示も決め直す
+  // 窓の表示も決め直す
   refreshLists();
 }
 
@@ -1970,7 +2000,7 @@ function loadInitialSettings(): void {
 function loadInitialLayout(): void {
   void loadWindowLayout()
     .then((layout) => {
-      for (const id of ["bar", "list"] as const) {
+      for (const id of ["bar", "list", "settings"] as const) {
         const rect = layout.float[id];
         if (rect === undefined) continue;
         // 写しを書き換える 3 箇所の 1 つ (floatLayout の doc)
@@ -2012,16 +2042,17 @@ const themeObserver = new MutationObserver(() => {
   const dark = isDarkTheme();
   const bar = document.getElementById(BAR_ID);
   if (bar !== null) applyPalette(bar, dark);
-  // 2 つの窓は body の直下にある。ページの配色は継がれない
+  // 3 つの窓は body の直下にある。ページの配色は継がれない
   applyPalette(barWindow.element, dark);
-  applyPalette(sidePanel.element, dark);
+  applyPalette(listWindow.element, dark);
+  applyPalette(settingsWindow.element, dark);
 });
 themeObserver.observe(document.documentElement, {
   attributes: true,
   attributeFilter: ["dark"],
 });
 
-// 全画面の間は 2 つの窓を隠す。body 直下の fixed 要素は全画面の動画の上に残りうる
+// 全画面の間は 3 つの窓を隠す。body 直下の fixed 要素は全画面の動画の上に残りうる
 document.addEventListener("fullscreenchange", refreshWindows);
 
 // ブラウザの大きさが変わったら、動かしていない窓の最初の位置を取り直す (spec A.2)。
@@ -2038,8 +2069,8 @@ const observer = new MutationObserver(() => {
     rangeBar?.setEnabled(canAdjustRange());
     refreshOverlay();
     refreshTelopPreview();
-    // 一覧も同じ規則で描き直す。固定のパネルに A の区間が B の画面で出続けないように。
-    // 動画ページ以外へ移ったら、2 つの窓ごと隠れる (refreshWindows)
+    // 一覧も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
+    // 動画ページ以外へ移ったら、3 つの窓ごと隠れる (refreshWindows)
     refreshLists();
   }
   mount();

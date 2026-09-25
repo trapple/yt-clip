@@ -51,8 +51,8 @@ export function emptyWindowLayout(): WindowLayout {
  * (viewport 1920x1080): #masthead-container の高さ 56px・z-index 2020。YouTube のレイアウトが
  * 変わったら測り直す。
  *
- * **ここに置く (side-panel.ts ではなく)。** パネルの窓の最初の上端 (side-panel.ts) とバーの窓の
- * 上端の下限 (initialBarRect) の 2 箇所が使う。side-panel.ts は floating-window.ts を経て
+ * **ここに置く (panel-window.ts ではなく)。** 区間・テロップの窓の最初の上端 (panel-window.ts) とバーの窓の
+ * 上端の下限 (initialBarRect) の 2 箇所が使う。panel-window.ts は floating-window.ts を経て
  * このファイルを読むので、逆向きに読むと循環する
  */
 /** YouTube のヘッダー (#masthead-container) の高さ */
@@ -208,7 +208,7 @@ export function fitRect(
 /**
  * バーの窓の最初の位置 (spec A.2)。プレイヤーの直下に、左端を揃えてプレイヤーの幅で置く。
  * 画面に収まらなければ画面の下端から SCREEN_BOTTOM_GAP_PX に詰める (このときだけプレイヤーに
- * 重なりうる)。**上端はヘッダーの下 (MASTHEAD_HEIGHT_PX + TOP_GAP_PX、パネルの窓の最初の上端と
+ * 重なりうる)。**上端はヘッダーの下 (MASTHEAD_HEIGHT_PX + TOP_GAP_PX、区間・テロップの窓の最初の上端と
  * 同じ) より上へ出さない。** 窓 (z-index 2000) はヘッダー (z-index 2020) より下なので、上端 0 に
  * 置くと拡大バーがヘッダーの裏に隠れる。プレイヤーが画面の上へスクロールされて消えている間に
  * 取り直したとき (ブラウザの大きさを変えたなど) に起きる。

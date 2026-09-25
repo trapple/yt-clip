@@ -8,12 +8,12 @@ export type { WindowRect } from "@/content/window-layout";
  *
  * **枠だけを持つ**: 見出し・本体の箱・右下のつまみ・ドラッグで動かす・大きさを変える・
  * 画面の中に詰める・重なり順。中身と「いつ出すか・最初にどこへ置くか」は知らない
- * (side-panel.ts と youtube.ts が決める)。パネルの窓とバーの窓で同じ処理を 2 回書かないために
+ * (panel-window.ts と youtube.ts が決める)。3 つの窓で同じ処理を何度も書かないために
  * 1 つにしている
  */
 
 /*
- * 重なり順。**YouTube のヘッダー (#masthead-container、z-index 2020。出所は side-panel.ts の
+ * 重なり順。**YouTube のヘッダー (#masthead-container、z-index 2020。出所は panel-window.ts の
  * 実測のコメント) より下**、ページ本体より上。窓が重なったら、**触った順が新しいほど上**
  * (Z_BASE + 触った順。窓は 3 つなので最大 2002。窓の分割の spec C1.1)。
  * 「最後に触った窓だけ 1 つ上げ、残りは同じ値」にしない: 窓が 3 つになると残り 2 つの順が
@@ -21,7 +21,7 @@ export type { WindowRect } from "@/content/window-layout";
  */
 const Z_BASE = 2000;
 /**
- * 高さを決めていない「幅と高さ」の窓 (パネル) の下端と、画面の下端との間。右側パネルの
+ * 高さを決めていない「幅と高さ」の窓 (区間・テロップの窓・設定の窓) の下端と、画面の下端との間。右側パネルだったときの
  * 最大の高さ (画面の下端から 16px) と同じ
  */
 const BOTTOM_GAP_PX = 16;
@@ -44,8 +44,8 @@ function raise(target: HTMLElement): void {
 }
 
 /**
- * 押した場所が、掴む場所の中のボタンや入力欄か。**そこでは窓を動かさない** (折り畳みの ▶ を
- * 押したら畳むだけ。spec A.1)
+ * 押した場所が、掴む場所の中のボタンや入力欄か。**そこでは窓を動かさない** (見出しの右側のボタンを
+ * 押したら、そのボタンの操作だけ。spec A.1)
  */
 function isOnControl(target: EventTarget | null, handle: HTMLElement): boolean {
   if (!(target instanceof Element)) return false;
@@ -59,7 +59,7 @@ function sameRect(a: WindowRect, b: WindowRect): boolean {
 
 export type FloatingWindow = {
   element: HTMLElement;
-  /** 見出しの右側に置く部品 (折り畳みボタンなど) の箱。見出しの無い窓では null */
+  /** 見出しの右側に置く部品の箱 (今は何も置いていない)。見出しの無い窓では null */
   headerActions: HTMLElement | null;
   /** この要素を押してドラッグすると窓が動く (中のボタンを押したときは動かさない) */
   addDragHandle(element: HTMLElement): void;
@@ -171,7 +171,7 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     element.style.left = `${fitted.left}px`;
     element.style.top = `${fitted.top}px`;
     element.style.width = `${fitted.width}px`;
-    // 本体を隠した (畳んだ) 窓は見出しだけにする。高さを残すと空の枠が残る
+    // 本体を隠した窓は見出しだけにする。高さを残すと空の枠が残る (今は本体を隠す者はいない)
     const bodyShown = !body.hidden;
     if (fitted.height !== undefined && bodyShown) {
       element.style.height = `${fitted.height}px`;
