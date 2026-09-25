@@ -1,4 +1,4 @@
-import { applyBadge, syncBadge } from "@/background/badge";
+import { applyBadge, createBadgeQueue, syncBadge } from "@/background/badge";
 import { createRouter, type RouterSnapshot } from "@/background/router";
 import { normalizeSnapshot } from "@/background/snapshot";
 import { getClip, saveClip } from "@/background/storage";
@@ -79,14 +79,16 @@ function reportBadgeError(error: unknown): void {
 // オフの間はアイコンに OFF のバッジを出す (マスタースイッチの spec §6.2)。**router と状態機械はスイッチを知らない**
 // (オフ ≒ YouTube のタブが無い。spec §4.2)。service worker がスイッチを読むのはバッジのためだけ。
 // service worker が起きるたび (このモジュールの評価) と、ブラウザの起動・拡張の入れ直しで当て直し、変わるたびに当てる。
-// listener はモジュールの最初の評価で同期に張る (MV3 で起こされたイベントを取りこぼさない)
-void syncBadge().catch(reportBadgeError);
+// listener はモジュールの最初の評価で同期に張る (MV3 で起こされたイベントを取りこぼさない)。
+// 当て直しはすべて 1 本の列に並べる (オフ → オンが短い間隔で来ても最後の値のバッジになる。createBadgeQueue の doc)
+const queueBadge = createBadgeQueue(reportBadgeError);
+void queueBadge(() => syncBadge());
 chrome.runtime.onStartup.addListener(() => {
-  void syncBadge().catch(reportBadgeError);
+  void queueBadge(() => syncBadge());
 });
 chrome.runtime.onInstalled.addListener(() => {
-  void syncBadge().catch(reportBadgeError);
+  void queueBadge(() => syncBadge());
 });
 watchEnabled((enabled) => {
-  void applyBadge(enabled).catch(reportBadgeError);
+  void queueBadge(() => applyBadge(enabled));
 });

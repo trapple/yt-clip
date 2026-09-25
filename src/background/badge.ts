@@ -40,6 +40,22 @@ export async function applyBadge(
 }
 
 /**
+ * バッジの当て直しを 1 本の列に並べる。**直列にしないと、オフ → オンが短い間隔で来たときにオンなのに `OFF` が残る**:
+ * オフは 3 回 await し、オンは 1 回なので、後から始めたオンの空文字が先に当たり、最後にオフの `OFF` が当たる。
+ * 入口 (起動時の syncBadge と watchEnabled) が複数あるので、sw.ts はすべてこの列を通す。
+ * 失敗した回は onError へ渡し、列は止めない (次の回は当てる)。返す Promise はその回が済んだ (失敗を含む) ときに解決する
+ */
+export function createBadgeQueue(
+  onError: (error: unknown) => void,
+): (job: () => Promise<void>) => Promise<void> {
+  let tail: Promise<void> = Promise.resolve();
+  return (job) => {
+    tail = tail.then(job).catch(onError);
+    return tail;
+  };
+}
+
+/**
  * 保存された値を読んでバッジを当てる。service worker が起きたとき・ブラウザの起動・拡張の入れ直しで呼ぶ
  * (バッジの文言がブラウザの再起動をまたいで残るかは実装時に確かめる。残らなくても onStartup で当て直す)
  */
