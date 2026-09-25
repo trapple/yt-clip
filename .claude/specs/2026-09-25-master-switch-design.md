@@ -489,3 +489,6 @@ E2E (`e2e/smoke.spec.ts`。録画しないので `npm run e2e` に入れる) と
 - [plan] .claude/plans/2026-09-25-master-switch.md (10 タスク、判断メモ 35)。[review:plan/ゼロ context の実装者/fable] 1 往復目 Issues 3 件 (advanceToSegment の
   非同期の続きが棚卸しから漏れていた / テストの期待件数 / grep パターン) → 修正。Recommendations を取り込み、cancelForSwitch の応答の guard に stateSeq を新設。
   2 往復目 Approved。残りの Recommendations (stale() が同じ録画の中の状態の進みでも応答を捨てるトレードオフの明記 / 継ぎ目のテストの見方) は実装時に扱う。Gate は付けない
+- [実機] 2026-09-25 npm run e2e の smoke 7 項目と check:telop 32 項目が通過。バッジはブラウザの再起動をまたいで残った (ユーザーが手で確認)。E2E の service worker の数える listener は測る間に止まらなかった
+- [実装] 権限を足していない (manifest.config.ts は変えていない。バッジの setBadge* は action を持つ拡張なら権限なしで使えた)
+- [実装] plan の判断メモ 1〜4 で、残りの Recommendations 4 件を扱った (中止の応答と state/changed の両方で片付ける / hint は区切り線の下の 1 行・端末の注意は popup.html に固定 / 抜け道は README と manual-check に / notify の then・catch の両方の後で reconcile)
