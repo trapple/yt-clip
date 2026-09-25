@@ -233,3 +233,34 @@ export const FLOATING_WINDOW_STYLE = {
   resizeGrip:
     "position:absolute;right:0;bottom:0;width:16px;height:16px;touch-action:none;background:linear-gradient(135deg,transparent 50%,var(--ytc-border) 50%);",
 } as const;
+
+/**
+ * ページの中のドック枠 (`dock.ts`。窓の分割の spec C2)。**根・タブの列・目印は display を持たない**
+ * (出し入れは dock.ts が style.display で行う。ここに書くと hidden を立てても出たままになる)。配色は youtube.ts が
+ * 枠の根に applyPalette で当てる (枠は #below / #secondary-inner の中にあるが、YouTube の CSS 変数には頼らない方針のまま)
+ */
+export const DOCK_STYLE = {
+  /**
+   * 枠の根 (#yt-clip-dock-below / #yt-clip-dock-side)。**ページの流れの中** (static) にあり、ページと一緒に
+   * スクロールする (C2.1)。**余白は持たない**: 動画のタイトル・おすすめ動画との間 (下の余白) と下の枠の上の余白の補正は、
+   * 窓が見えている間だけ dock.ts が当てる (ドラッグの間の目印だけの枠で、下の内容が 40px より多く下がらないように)
+   */
+  root: `position:static;box-sizing:border-box;border-radius:8px;background:var(--ytc-panel);color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
+  /** タブの列 (C2.2)。高さ 28px。ドラッグの間は落とし先の帯になる (C2.3) */
+  tabRow: "align-items:stretch;gap:4px;height:28px;padding:0 4px;box-sizing:border-box;",
+  /**
+   * タブ。押すと前に出し、ドラッグで引き出す (C2.4)。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  tab: "display:flex;align-items:center;padding:0 12px;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:none;white-space:nowrap;font-size:13px;font-weight:500;color:var(--ytc-text-sub);border-bottom:2px solid transparent;",
+  /** 前に出しているタブ。文字の色と、アクセントの下線 2px で見分ける (C2.2) */
+  tabActive:
+    "display:flex;align-items:center;padding:0 12px;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:none;white-space:nowrap;font-size:13px;font-weight:500;color:var(--ytc-text);border-bottom:2px solid var(--ytc-accent);",
+  /** 隠れている枠・バーだけの枠の落とし先 (C2.3)。高さ 40px の箱に「ここにドック」 */
+  marker:
+    "align-items:center;justify-content:center;height:40px;box-sizing:border-box;border-radius:8px;color:var(--ytc-text-sub);font-size:13px;",
+  /** 落とし先の帯の縁 (タブの列にも目印にも当てる。outline なので帯の高さを変えない) */
+  bandOutline: "2px dashed var(--ytc-accent)",
+  /** 指が中にある帯の塗り (アクセントの 12%。Chrome 111 以降の color-mix) */
+  bandFill: "color-mix(in srgb,var(--ytc-accent) 12%,transparent)",
+} as const;
