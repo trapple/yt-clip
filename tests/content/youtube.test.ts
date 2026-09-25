@@ -21,7 +21,7 @@ import {
 } from "vitest";
 import { reduce } from "@/background/state";
 import type { Message } from "@/shared/messages";
-import type { WindowLayout } from "@/content/window-layout";
+import type { WindowId, WindowLayout } from "@/content/window-layout";
 import {
   FAILURE_MESSAGES,
   type ClipRange,
@@ -221,6 +221,13 @@ function buildPage(): void {
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
+  // 右の列 (#secondary > #secondary-inner)。右のドック枠を差す先 (窓の分割の spec C2.1)
+  const secondary = document.createElement("div");
+  secondary.id = "secondary";
+  const secondaryInner = document.createElement("div");
+  secondaryInner.id = "secondary-inner";
+  secondary.append(secondaryInner);
+
   // 広告の判定は #movie_player の ad-showing を見る (player.ts の isAdPlaying)
   const player = document.createElement("div");
   player.id = "movie_player";
@@ -228,6 +235,7 @@ function buildPage(): void {
   video = installVideo();
   document.body.append(
     below,
+    secondary,
     title,
     author,
     progressBar,
@@ -2919,6 +2927,8 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
   /**
    * 本体は画面の 100〜500px。行は並び順に 900px から 100px ずつ下に置く。
    * 末尾の行が選ばれたかを送り先の値で見分けられる
+   * **前提: 区間・テロップの窓は枠に入っていない** (読み込み時の v1 の組で浮いた窓。この stub はほかの要素の幅を 400 で返すので
+   * 差す先が使える扱いになり、枠に入っていると足した行は送らずタブを前に出すだけになる)。前の describe でダブルクリックしない
    */
   function placeRows(role: "segment" | "telop") {
     const body = listBody();
@@ -3052,10 +3062,11 @@ describe("フロートの窓", () => {
     expect(barWindowElement().contains(barElement())).toBe(true);
   });
 
-  test("#below には何も置かない", () => {
+  test("#below にはドック枠だけを差し、最初の配置では隠しておく (窓の中身は置かない)", () => {
     const below = document.getElementById("below");
     if (below === null) throw new Error("#below がありません");
-    expect(below.children.length).toBe(0);
+    expect([...below.children].map((child) => child.id)).toEqual(["yt-clip-dock-below"]);
+    expect((below.firstElementChild as HTMLElement).style.display).toBe("none");
   });
 
   test("覚えた位置を読み込むまで、設定を開いていても窓を出さない", () => {
@@ -3182,8 +3193,13 @@ describe("フロートの窓", () => {
     expect(frame.style.left).toBe(`${left + 50}px`);
     expect(frame.style.top).toBe(`${top + 30}px`);
     // 組ごと書く (v2)。動かしていない窓の位置は書かない (float に bar だけ)
+    // 最初の配置の枠 (下の枠) の記憶から外れ、右の枠の記憶は残る
     expect(layoutWrites).toEqual([
-      { version: 2, float: { bar: { left: left + 50, top: top + 30, width } }, docks: {} },
+      {
+        version: 2,
+        float: { bar: { left: left + 50, top: top + 30, width } },
+        docks: { side: { tabs: ["list", "settings"], active: "settings" } },
+      },
     ]);
   });
 
@@ -3199,7 +3215,14 @@ describe("フロートの窓", () => {
     expect(frame.style.top).toBe("88px");
     // 動かしていないバーと設定の窓は書かない
     expect(layoutWrites).toEqual([
-      { version: 2, float: { list: { left: left - 100, top: 88, width: 400 } }, docks: {} },
+      {
+        version: 2,
+        float: { list: { left: left - 100, top: 88, width: 400 } },
+        docks: {
+          below: { tabs: ["bar"], active: "bar" },
+          side: { tabs: ["settings"], active: "settings" },
+        },
+      },
     ]);
   });
 
@@ -3214,7 +3237,11 @@ describe("フロートの窓", () => {
     expect(frame.style.left).toBe(`${left - 100}px`);
     expect(frame.style.top).toBe("120px");
     expect(layoutWrites).toEqual([
-      { version: 2, float: { settings: { left: left - 100, top: 120, width: 400 } }, docks: {} },
+      {
+        version: 2,
+        float: { settings: { left: left - 100, top: 120, width: 400 } },
+        docks: { below: { tabs: ["bar"], active: "bar" }, side: { tabs: ["list"] } },
+      },
     ]);
   });
 
@@ -3276,10 +3303,10 @@ describe("フロートの窓", () => {
     const stored = storedLayout as WindowLayout;
     expect(stored.version).toBe(2);
     expect(Object.keys(stored.float)).toEqual(["bar"]);
-    expect(stored.docks).toEqual({});
+    expect(stored.docks).toEqual({ side: { tabs: ["list", "settings"], active: "list" } });
   });
 
-  test("つまみ・見出しをダブルクリックすると最初の位置に戻り、覚えた位置を消す", async () => {
+  test("つまみ・見出しをダブルクリックすると最初の配置の枠に戻り (jsdom では枠が使えないので最初の位置に浮く)、覚えた位置を消す", async () => {
     const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
     try {
       dblclick(barGrip());
@@ -3292,7 +3319,7 @@ describe("フロートの窓", () => {
           bar: { left: 124, top: 588, width: 800 },
           list: { left: window.innerWidth - 516, top: 88, width: 400 },
         },
-        docks: {},
+        docks: { side: { tabs: ["settings"], active: "settings" } },
       });
 
       dblclick(barGrip());
@@ -3307,7 +3334,14 @@ describe("フロートの窓", () => {
       });
       expect(listElement().style.left).toBe(`${window.innerWidth - 416}px`);
       expect(listElement().style.top).toBe("68px");
-      expect(storedLayout).toEqual({ version: 2, float: {}, docks: {} });
+      expect(storedLayout).toEqual({
+        version: 2,
+        float: {},
+        docks: {
+          below: { tabs: ["bar"], active: "bar" },
+          side: { tabs: ["list", "settings"], active: "list" },
+        },
+      });
     } finally {
       spy.mockRestore();
     }
@@ -3636,5 +3670,416 @@ describe("動かしていない窓の最初の位置を取り直す", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("ドック枠とタブ", () => {
+  type Point = { x: number; y: number };
+  /** 差す先の箱 (jsdom はレイアウトを持たない)。帯 (目印 40px / タブの列 28px) はそれぞれの枠の上端に置く */
+  const BELOW = { left: 0, top: 600, width: 800 };
+  const SIDE = { left: 840, top: 60, width: 400 };
+  /**
+   * 下の枠の中のバーの窓の箱。引き出した窓の位置を、fitRect の上限 (YouTube のヘッダーの下 56px) に詰められない所で
+   * 測るため (26eaebd。判断メモ 33)
+   */
+  const DOCKED_BAR = { left: 0, top: 600, width: 800, height: 140 };
+  /** 帯の中の点 (下の枠 / 右の枠)。目印 (40px) にもタブの列 (28px) にも入る高さ */
+  const BELOW_BAND: Point = { x: 100, y: 610 };
+  const SIDE_BAND: Point = { x: 900, y: 70 };
+  /** どの帯からも離れた点 */
+  const AWAY: Point = { x: 300, y: 300 };
+  /** ドラッグを始める点 (帯の外) */
+  const START: Point = { x: 320, y: 320 };
+
+  /** 右の枠の差す先の幅。0 にすると使えない枠になる (1 列表示の代わり) */
+  let sideWidth = SIDE.width;
+  let layoutSpy: { mockRestore(): void } | null = null;
+
+  /** 差す先と、枠の中の帯・タブ・バーの窓の位置を決め打ちする。ほかの要素は 0 */
+  function stubDockLayout() {
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "below") return boxAt(BELOW.left, BELOW.top, BELOW.width, 0);
+        if (this.id === "secondary-inner") return boxAt(SIDE.left, SIDE.top, sideWidth, 0);
+        const box =
+          this.closest("#yt-clip-dock-below") !== null
+            ? BELOW
+            : this.closest("#yt-clip-dock-side") !== null
+              ? SIDE
+              : null;
+        if (box === BELOW && this.id === "yt-clip-bar-window") {
+          return boxAt(DOCKED_BAR.left, DOCKED_BAR.top, DOCKED_BAR.width, DOCKED_BAR.height);
+        }
+        const role = this instanceof HTMLElement ? this.dataset.role : undefined;
+        if (box !== null && role === "dock-marker") return boxAt(box.left, box.top, box.width, 40);
+        if (box !== null && role === "dock-tabs") return boxAt(box.left, box.top, box.width, 28);
+        if (box !== null && role === "dock-tab") return boxAt(box.left + 8, box.top, 100, 28);
+        return boxAt(0, 0, 0, 0);
+      });
+  }
+
+  function slotElement(slot: "below" | "side"): HTMLElement {
+    const element = document.getElementById(`yt-clip-dock-${slot}`);
+    if (element === null) throw new Error(`#yt-clip-dock-${slot} がありません`);
+    return element;
+  }
+
+  function tabElement(slot: "below" | "side", id: WindowId): HTMLElement {
+    const tab = slotElement(slot).querySelector<HTMLElement>(
+      `[data-role='dock-tab'][data-window='${id}']`,
+    );
+    if (tab === null) throw new Error(`${id} のタブがありません`);
+    return tab;
+  }
+
+  /** 出ているタブの文言 (並び順) */
+  function tabLabels(slot: "below" | "side"): string[] {
+    return [...slotElement(slot).querySelectorAll<HTMLElement>("[data-role='dock-tab']")]
+      .filter((tab) => tab.style.display !== "none")
+      .map((tab) => tab.textContent ?? "");
+  }
+
+  /** 落とし先の帯が出ているか (dock.ts がドラッグの間だけ data-drop-target を立てる) */
+  function bandShown(slot: "below" | "side"): boolean {
+    return slotElement(slot).querySelector("[data-drop-target='true']") !== null;
+  }
+
+  /** 最後に保存した組 */
+  function lastWrite(): WindowLayout {
+    const last = layoutWrites[layoutWrites.length - 1];
+    if (last === undefined) throw new Error("まだ保存していません");
+    return last as WindowLayout;
+  }
+
+  /** START で押し、AWAY を通って to で離す (帯へは一度その外から入れる。C2.3) */
+  function dropAt(handle: Element, to: Point): void {
+    pointer(handle, "pointerdown", START.x, START.y);
+    pointer(handle, "pointermove", AWAY.x, AWAY.y);
+    pointer(handle, "pointermove", to.x, to.y);
+    pointer(handle, "pointerup", to.x, to.y);
+  }
+
+  /**
+   * 右の枠のタブを (850, 70) で押し、20px 下で抜いてから to まで運んで離す (C2.4)。抜いた窓は (848, 74) に置かれ
+   * (タブの中の x 2・見出しの高さの半分 16)、to まで同じだけ動く
+   */
+  function pullSideTab(id: WindowId, to: Point): void {
+    const tab = tabElement("side", id);
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 90);
+    pointer(tab, "pointermove", to.x, to.y);
+    pointer(tab, "pointerup", to.x, to.y);
+  }
+
+  /** 下の枠のバーの ⠿ を (100, 700) で押し (窓の中の (100, 100))、10px 右で抜いてそのまま離す。バーは (10, 600) に浮く */
+  function pullBar(): void {
+    pointer(barGrip(), "pointerdown", 100, 700);
+    pointer(barGrip(), "pointermove", 110, 700);
+    pointer(barGrip(), "pointerup", 110, 700);
+  }
+
+  async function showEdit(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  /** 3 つの窓を最初の配置 (下の枠 [bar] / 右の枠 [list, settings]) に戻す (掴む場所のダブルクリック) */
+  function resetAll(): void {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
+  }
+
+  beforeEach(async () => {
+    sideWidth = SIDE.width;
+    layoutSpy = stubDockLayout();
+    // 差す先の幅を測り直させる (幅 0 の枠は使えない)。resize で placeUnmovedWindows → attach が走る
+    window.dispatchEvent(new Event("resize"));
+    await showEdit();
+    resetAll();
+    await flush();
+    layoutWrites = [];
+  });
+
+  afterEach(() => {
+    // 次のテストへ枠の中身を持ち越さない (最初の配置に戻す)
+    resetAll();
+    layoutSpy?.mockRestore();
+    layoutSpy = null;
+    window.dispatchEvent(new Event("resize"));
+  });
+
+  test("最初の配置では、バーは #below の枠、区間・テロップの窓と設定の窓は #secondary-inner の枠に入る。設定は開くまでタブを出さない", () => {
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(settingsWindowElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(listElement().style.position).toBe("static");
+    expect(slotElement("below").parentElement?.id).toBe("below");
+    expect(slotElement("side").parentElement?.id).toBe("secondary-inner");
+    expect(slotElement("below").style.display).toBe("block");
+    expect(slotElement("side").style.display).toBe("block");
+    // バーだけの枠はタブの列を出さない
+    expect(
+      slotElement("below").querySelector<HTMLElement>("[data-role='dock-tabs']")?.style.display,
+    ).toBe("none");
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+  });
+
+  test("タブを 8px 以上ドラッグすると枠から出て指の下に付いて動き、離した位置を覚える", async () => {
+    const tab = tabElement("side", "list");
+
+    // タブの箱は (848, 60) から (stub)。(850, 70) で押す = タブの中の (2, 10)
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 74);
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+
+    pointer(tab, "pointermove", 850, 90);
+    // 窓の左端 = 指 − タブの中で掴んだ x (850 − 2)、上端 = 指 − 見出しの高さの半分 (90 − 16)。幅は最初の位置の 400px
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual({ left: "848px", top: "74px", width: "400px", height: "" });
+    // 掴んだタブは指を離すまで残る (捕捉が付いている)
+    expect(tab.isConnected).toBe(true);
+
+    pointer(tab, "pointermove", 400, 300);
+    pointer(tab, "pointerup", 400, 300);
+    await flush();
+
+    expect(tab.isConnected).toBe(false);
+    expect(styleRect(listElement())).toEqual({ left: "398px", top: "284px", width: "400px", height: "" });
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: 398, top: 284, width: 400 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["settings"], active: "settings" },
+      },
+    });
+  });
+
+  test("浮いた区間・テロップの窓の見出しを右の枠の帯へ落とすと枠の末尾に入って前に出る。float は変えない", async () => {
+    pullSideTab("list", AWAY);
+    await flush();
+    expect(listElement().parentElement).toBe(document.body);
+
+    dropAt(listHeader(), SIDE_BAND);
+    await flush();
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(listElement().style.position).toBe("static");
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: 298, top: 284, width: 400 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["settings", "list"], active: "list" },
+      },
+    });
+  });
+
+  test("ドック中のバーの ⠿ を 8px 以上動かすと枠から出て、⠿ が指の下に残ったまま動く", async () => {
+    // 枠の中のバーの窓の左上は (0, 600) (stub)。⠿ を (100, 700) で掴む = 窓の中の (100, 100)
+    pointer(barGrip(), "pointerdown", 100, 700);
+    pointer(barGrip(), "pointermove", 104, 700);
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+
+    pointer(barGrip(), "pointermove", 110, 700);
+    expect(barWindowElement().parentElement).toBe(document.body);
+    // 窓の左上 = 指 − ⠿ の窓の中の位置。幅はプレイヤーの幅 (stub で 0) を最小の 480px に詰めたもの
+    expect(styleRect(barWindowElement())).toEqual({
+      left: "10px",
+      top: "600px",
+      width: "480px",
+      height: "",
+    });
+
+    pointer(barGrip(), "pointermove", 130, 720);
+    pointer(barGrip(), "pointerup", 130, 720);
+    await flush();
+
+    expect(styleRect(barWindowElement())).toEqual({
+      left: "30px",
+      top: "620px",
+      width: "480px",
+      height: "",
+    });
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { bar: { left: 30, top: 620, width: 480 } },
+      docks: { side: { tabs: ["list", "settings"], active: "settings" } },
+    });
+  });
+
+  test("⠿ で引き出したバーを下の枠の帯へ落とすと戻る。バーだけの枠はタブの列を出さない", async () => {
+    pullBar();
+    await flush();
+    expect(barWindowElement().parentElement).toBe(document.body);
+
+    dropAt(barGrip(), BELOW_BAND);
+    await flush();
+
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(
+      slotElement("below").querySelector<HTMLElement>("[data-role='dock-tabs']")?.style.display,
+    ).toBe("none");
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { bar: { left: 10, top: 600, width: 480 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["list", "settings"], active: "settings" },
+      },
+    });
+  });
+
+  test("バーをドラッグしている間、右の枠には落とし先を出さず、右の帯で離しても入らない", async () => {
+    pullBar();
+    await flush();
+
+    pointer(barGrip(), "pointerdown", START.x, START.y);
+    pointer(barGrip(), "pointermove", AWAY.x, AWAY.y);
+    expect(bandShown("below")).toBe(true);
+    expect(bandShown("side")).toBe(false);
+
+    pointer(barGrip(), "pointermove", SIDE_BAND.x, SIDE_BAND.y);
+    pointer(barGrip(), "pointerup", SIDE_BAND.x, SIDE_BAND.y);
+    await flush();
+
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(bandShown("below")).toBe(false);
+    expect(lastWrite().docks).toEqual({ side: { tabs: ["list", "settings"], active: "settings" } });
+  });
+
+  test("浮いた窓の見出しをダブルクリックすると最初の配置の枠 (区間・テロップ → 設定の並び) に戻って前に出て、float から消える", async () => {
+    pullSideTab("list", AWAY);
+    await flush();
+
+    dblclick(listHeader());
+    await flush();
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: {},
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["list", "settings"], active: "list" },
+      },
+    });
+  });
+
+  test("別の枠に入れた窓のタブをダブルクリックしても、最初の配置の枠に戻る", async () => {
+    // 区間・テロップのタブを下の枠 (バーだけなので目印) へ
+    const tab = tabElement("side", "list");
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 90);
+    pointer(tab, "pointermove", AWAY.x, AWAY.y);
+    pointer(tab, "pointermove", BELOW_BAND.x, BELOW_BAND.y);
+    pointer(tab, "pointerup", BELOW_BAND.x, BELOW_BAND.y);
+    await flush();
+    expect(tabLabels("below")).toEqual(["バー", "区間・テロップ"]);
+
+    dblclick(tabElement("below", "list"));
+    await flush();
+
+    expect(tabLabels("below")).toEqual([]);
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    // 下の枠の前のタブ (区間・テロップ) は抜けたので無い扱い。表示はバーだけ
+    expect(lastWrite().docks).toEqual({
+      below: { tabs: ["bar"] },
+      side: { tabs: ["list", "settings"], active: "list" },
+    });
+  });
+
+  test("右の枠の差す先が幅 0 になると、中の窓は float に位置があっても最初の位置の浮いた窓で出る。戻ると枠に戻る", async () => {
+    // 引き出して置き、戻す (float に位置がある)
+    pullSideTab("list", AWAY);
+    await flush();
+    dropAt(listHeader(), SIDE_BAND);
+    await flush();
+
+    sideWidth = 0;
+    window.dispatchEvent(new Event("resize"));
+
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual({
+      left: `${window.innerWidth - 416}px`,
+      top: "68px",
+      width: "400px",
+      height: "",
+    });
+    expect(slotElement("side").style.display).toBe("none");
+
+    sideWidth = SIDE.width;
+    window.dispatchEvent(new Event("resize"));
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+  });
+
+  test("退避中の窓を動かすと、その時点で浮いた窓になり、枠の記憶からも外れる", async () => {
+    sideWidth = 0;
+    window.dispatchEvent(new Event("resize"));
+    layoutWrites = [];
+
+    drag(listHeader(), 30, 20);
+    await flush();
+
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: window.innerWidth - 386, top: 88, width: 400 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["settings"], active: "settings" },
+      },
+    });
+    sideWidth = SIDE.width;
+    window.dispatchEvent(new Event("resize"));
+    expect(listElement().parentElement).toBe(document.body);
+  });
+
+  test("YouTube が差す先の子を作り直しても (replaceChildren)、mount で枠を中の窓ごと先頭に差し直す", async () => {
+    const slot = slotElement("side");
+    const inner = document.getElementById("secondary-inner");
+    if (inner === null) throw new Error("#secondary-inner がありません");
+
+    const related = document.createElement("div");
+    related.id = "related";
+    inner.replaceChildren(related);
+    expect(slot.isConnected).toBe(false);
+    await flush();
+
+    expect(inner.firstElementChild).toBe(slot);
+    expect(slot.contains(listElement())).toBe(true);
+  });
+
+  test("別の動画へ移ると区間・テロップのタブが消えて右の枠が隠れ、戻ると出る", async () => {
+    history.pushState({}, "", "/watch?v=video-b");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(tabLabels("side")).toEqual([]);
+    expect(slotElement("side").style.display).toBe("none");
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(slotElement("side").style.display).toBe("block");
+  });
+
+  test("全画面の間は枠も隠し、抜けたら戻す", async () => {
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(slotElement("below").style.display).toBe("none");
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(slotElement("below").style.display).toBe("block");
   });
 });

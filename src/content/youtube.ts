@@ -32,12 +32,15 @@ import {
   type RecorderHandle,
 } from "@/content/recorder";
 import { createSegmentList, type SegmentList } from "@/content/segment-list";
+import { createDockManager } from "@/content/dock";
 import {
   createFloatingWindow,
+  type DragPoint,
   type FloatingWindow,
   type WindowRect,
 } from "@/content/floating-window";
 import {
+  PANEL_HEADER_HEIGHT_PX,
   createPanelWindow,
   initialListRect,
   initialSettingsRect,
@@ -53,9 +56,14 @@ import {
   type Compositor,
 } from "@/content/telop-compositor";
 import {
+  WINDOW_IDS,
+  WINDOW_LAYOUT_VERSION,
+  acceptsDock,
   initialBarRect,
+  initialDocks,
   loadWindowLayout,
   saveWindowLayout,
+  type DockSlotId,
   type WindowId,
   type WindowLayout,
 } from "@/content/window-layout";
@@ -99,6 +107,14 @@ const BAR_MIN_WIDTH_PX = 480;
  */
 const LIST_WINDOW_ID = "yt-clip-list";
 const SETTINGS_WINDOW_ID = "yt-clip-settings";
+/**
+ * 窓の見出しの文言 = ドック枠のタブの文言 (窓の分割の spec C1.1)。バーは見出しの行を作らないので、タブだけの文言
+ */
+const WINDOW_TITLES: Record<WindowId, string> = {
+  bar: "バー",
+  list: "区間・テロップ",
+  settings: "設定",
+};
 
 /**
  * 録画品質は再生解像度が上限になるため、低いときは事前に知らせる。
@@ -167,9 +183,11 @@ const floatLayout: Partial<Record<WindowId, WindowRect>> = {};
  */
 const listWindow = createPanelWindow({
   id: LIST_WINDOW_ID,
-  title: "区間・テロップ",
+  title: WINDOW_TITLES.list,
   onUserMove: (rect) => rememberWindowRect("list", rect),
   onResetRequest: () => resetWindow("list"),
+  // 見出しのドラッグの落とし先の当たり判定 (C2.3)。枠に引き取られたら onUserMove は来ない
+  onDragPoint: (phase, point) => dockManager.drag("list", phase, point) !== null,
 });
 // 窓は body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
 applyPalette(listWindow.element, isDarkTheme());
@@ -180,9 +198,10 @@ applyPalette(listWindow.element, isDarkTheme());
  */
 const settingsWindow = createPanelWindow({
   id: SETTINGS_WINDOW_ID,
-  title: "設定",
+  title: WINDOW_TITLES.settings,
   onUserMove: (rect) => rememberWindowRect("settings", rect),
   onResetRequest: () => resetWindow("settings"),
+  onDragPoint: (phase, point) => dockManager.drag("settings", phase, point) !== null,
 });
 applyPalette(settingsWindow.element, isDarkTheme());
 /**
@@ -198,9 +217,33 @@ const barWindow = createFloatingWindow({
   minWidth: BAR_MIN_WIDTH_PX,
   onUserMove: (rect) => rememberWindowRect("bar", rect),
   onResetRequest: () => resetWindow("bar"),
+  onDragPoint: (phase, point) => dockManager.drag("bar", phase, point) !== null,
+  // 枠に入ったバーは ⠿ を 8px 動かすと引き出す (バーだけの枠にはタブが無く、⠿ が唯一の掴む場所。C2.4)
+  onUndockRequest: (point, grab) => {
+    dockManager.undock("bar");
+    placeUnderPointer("bar", point, grab);
+  },
 });
 // バーの窓も body の直下にあり、ページの配色は継がれない
 applyPalette(barWindow.element, isDarkTheme());
+/**
+ * ページの中のドック枠 2 か所 (プレイヤーの下・おすすめ動画の上) とタブ (窓の分割の spec C2)。
+ * **枠の中だけを持つ**: 窓を出す条件は refreshWindows、浮いた窓の位置は placeInitial / placeUnderPointer が決める
+ */
+const dockManager = createDockManager({
+  windows: { bar: barWindow, list: listWindow.frame, settings: settingsWindow.frame },
+  titles: WINDOW_TITLES,
+  // 最初の配置 (ドック。window-layout.ts の INITIAL_DOCKS)。ダブルクリックの戻し先
+  initial: initialDocks(),
+  accepts: acceptsDock,
+  // タブから引き出した窓を指の下に置く。バーはタブの中の位置ではなく ⠿ の位置で置く (C2.4)
+  onUndock: (id, point, grab) => placeUnderPointer(id, point, id === "bar" ? null : grab),
+  onTabDoubleClick: (id) => resetWindow(id),
+  onEvacuate: (id) => placeInitial(id),
+  onChange: () => persistWindowLayout(),
+});
+// 枠は #below / #secondary-inner の中にあるが、YouTube の CSS 変数には頼らない (配色は自前で持つ)
+for (const slot of Object.values(dockManager.elements)) applyPalette(slot, isDarkTheme());
 /** 設定パネル。⚙ の開閉と、設定の窓を出すかの判定の両方が読む。`buildBar` が作る */
 let settingsPanel: SettingsPanel | null = null;
 /**
@@ -1020,21 +1063,80 @@ function initialWindowRect(id: WindowId): WindowRect | null {
 }
 
 /**
- * 動かしていない窓 (覚えた `float` に無い窓) を最初の位置に置く。覚えた配置の読み込みが済む前は
- * 何もしない (まだ出さない)
+ * 動かしていない窓 (覚えた `float` に無い窓) と、退避中の窓 (入っている枠が使えない間の浮いた窓。C2.1) を
+ * 最初の位置に置く。**退避中の窓は `float` に位置があっても最初の位置** (C2.1 / C2.6)。ドック中の窓 (使える枠に
+ * 入っている) はページの流れが決めるので置かない。覚えた配置の読み込みが済む前は何もしない (まだ出さない)
  */
 function placeInitial(id: WindowId): void {
-  if (!layoutReady || floatLayout[id] !== undefined) return;
+  if (!layoutReady) return;
+  const slot = dockManager.slotOf(id);
+  const evacuated = slot !== null && !dockManager.isUsable(slot);
+  if (slot !== null && !evacuated) return;
+  if (!evacuated && floatLayout[id] !== undefined) return;
   const rect = initialWindowRect(id);
   if (rect !== null) windowOf(id).place(rect);
 }
 
 /**
- * 覚える配置の組を、写し (`floatLayout`) から作る。**窓の `rect()` からは作らない**
- * (floatLayout の doc)。ドック枠はまだ無いので `docks` は空
+ * 枠から引き出した窓を指の下に置く (C2.4)。幅と高さは覚えた `float`、無ければ最初の位置の大きさ
+ * (バーはプレイヤーの幅、区間・テロップの窓と設定の窓は幅 400px・高さは中身)。
+ *
+ * - バー: ⠿ が指の下に残るよう、窓の左上 = 指 − ⠿ の窓の中の位置。`grab` (⠿ で引き出したとき、押した点の窓の中の
+ *   位置) が無ければ (タブから引き出したとき) ⠿ の中心を測る
+ * - 区間・テロップの窓と設定の窓: 掴んだタブの位置関係を保つ。窓の左端 = 指 − タブの中で掴んだ x (窓の幅に収める)、
+ *   上端 = 指 − 見出しの高さの半分 (指が見出しの中に来る)
+ *
+ * **`floatLayout` は書き換えない** (書き換えるのは読み込み・onUserMove・ダブルクリックの 3 箇所)。引き出した後の
+ * ドラッグの終わりに onUserMove が来て、そこで覚える
+ */
+function placeUnderPointer(id: WindowId, point: DragPoint, grab: DragPoint | null): void {
+  const remembered = floatLayout[id];
+  if (id === "bar") {
+    const player = document.querySelector(YT_SELECTORS.player);
+    const width = remembered?.width ?? player?.getBoundingClientRect().width ?? BAR_MIN_WIDTH_PX;
+    // 幅を先に当てる (操作の行の折り返しで ⠿ の位置が変わる)
+    barWindow.place({ left: point.x, top: point.y, width });
+    const offset = grab ?? barGripCenter();
+    barWindow.place({ left: point.x - offset.x, top: point.y - offset.y, width });
+    return;
+  }
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const width = remembered?.width ?? initialListRect(viewport).width;
+  const tabX = Math.min(Math.max(grab?.x ?? 0, 0), width);
+  const left = point.x - tabX;
+  const top = point.y - PANEL_HEADER_HEIGHT_PX / 2;
+  windowOf(id).place(
+    remembered?.height === undefined
+      ? { left, top, width }
+      : { left, top, width, height: remembered.height },
+  );
+}
+
+/** バーの窓の中の ⠿ の中心 (窓の左上から)。⠿ が無ければ窓の左上 */
+function barGripCenter(): DragPoint {
+  const grip = document.getElementById(BAR_ID)?.querySelector("[data-role='grip']");
+  if (grip == null) return { x: 0, y: 0 };
+  const frame = barWindow.element.getBoundingClientRect();
+  const box = grip.getBoundingClientRect();
+  return { x: box.left - frame.left + box.width / 2, y: box.top - frame.top + box.height / 2 };
+}
+
+/** ドック枠を差す先 (C2.1)。右の枠は #secondary-inner、無ければ #secondary */
+function dockAnchors(): Record<DockSlotId, Element | null> {
+  let side: Element | null = null;
+  for (const selector of YT_SELECTORS.dockSide) {
+    side = document.querySelector(selector);
+    if (side !== null) break;
+  }
+  return { below: document.querySelector(YT_SELECTORS.dockBelow), side };
+}
+
+/**
+ * 覚える配置の組を、写し (`floatLayout`) と枠の中身 (`dockManager.state()`) から作る。**窓の `rect()` からは作らない**
+ * (floatLayout の doc)。1 つの操作で 2 つの枠が変わりうる (引き出して別の枠へ) ので、いつも組ごと書く (C1.3)
  */
 function currentWindowLayout(): WindowLayout {
-  return { version: 2, float: { ...floatLayout }, docks: {} };
+  return { version: WINDOW_LAYOUT_VERSION, float: { ...floatLayout }, docks: dockManager.state() };
 }
 
 /** 覚える配置を組ごと保存する */
@@ -1048,15 +1150,26 @@ function persistWindowLayout(): void {
 /** ユーザーが窓を動かした・大きさを変えた (指を離した時点で 1 回)。次に開いたときも同じ位置に出す */
 function rememberWindowRect(id: WindowId, rect: WindowRect): void {
   floatLayout[id] = { ...rect };
+  // 退避中 (入っている枠が使えない間の浮いた窓) の窓を動かしたら、その時点で浮いた窓になる (枠の記憶からも外す。
+  // C2.1)。外すと onChange で組ごと保存されるので、ここでは保存しない
+  if (dockManager.slotOf(id) !== null) {
+    dockManager.undock(id);
+    return;
+  }
   persistWindowLayout();
 }
 
-/** 掴む場所のダブルクリック。最初の位置に戻し、覚えた位置も消す (spec A.2) */
+/**
+ * 掴む場所 (⠿ / 見出し / タブ) のダブルクリック。**最初の配置 (ドック) の枠へ戻し**、覚えた位置も消す (spec A.2 / C2.6)。
+ * 浮いた窓も、別の枠に入れた窓も、最初の配置の枠の最初の配置の並びの位置へ入れて前に出す (dock.ts の restore)。
+ * 保存は restore の onChange が組ごと行う (消した float も含む)
+ */
 function resetWindow(id: WindowId): void {
   // 先に写しから消す。placeInitial は写しにある窓 (動かした窓) を置き直さない
   delete floatLayout[id];
+  dockManager.restore(id);
+  // 戻す先の枠が使えない (退避) か、最初の配置で枠に入らない窓は、浮いた窓の最初の位置へ置く。ドック中なら何もしない
   placeInitial(id);
-  persistWindowLayout();
 }
 
 /**
@@ -1086,6 +1199,9 @@ function refreshWindows(): void {
   barWindow.setVisible(canShow && document.getElementById(BAR_ID) !== null);
   listWindow.setVisible(canShow && listShown);
   settingsWindow.setVisible(canShow && settingsOpen);
+  // 出す条件が変わったら、枠のタブ・枠の出し入れ・退避を合わせる (C2.2 / C2.7)。**出した直後の取り直しより先に:**
+  // 使えない枠の窓は sync が body へ移して浮かせ (onEvacuate で最初の位置へ)、その後で下の取り直しが効く
+  dockManager.sync();
   // 隠れていた窓は寸法が 0 で、最初の位置 (バーの高さで画面の下端に詰める) を測れていない。
   // **出した直後にだけ**取り直す。出ている間に状態が届くたびに取り直すと、ページを
   // スクロールした後に IN を押しただけで、バーがプレイヤーを追って跳ぶ (spec A.2)
@@ -1797,9 +1913,9 @@ function watchPlayhead(): void {
  * 読む間も同じ位置で操作できるようにする
  */
 function placeUnmovedWindows(): void {
-  placeInitial("bar");
-  placeInitial("list");
-  placeInitial("settings");
+  // 枠が使えるかも見直す (1 列表示との切り替えは resize で起きる。C2.1)。変わったら窓を出し直す (退避 / 枠へ戻す)
+  if (dockManager.attach(dockAnchors())) refreshWindows();
+  for (const id of WINDOW_IDS) placeInitial(id);
 }
 
 /** 大きさを見ているプレイヤー。**SPA 遷移や再描画で要素が替わる**ので、mount のたびに確かめる */
@@ -1816,9 +1932,15 @@ function watchPlayerSize(): void {
 }
 
 function mount(): void {
-  // 3 つの窓は body の直下に置く (#below の中だと YouTube の再描画で外れる)。
-  // **バーの有無より先に見る。** body の子を差し替えられると窓だけが外れる
-  for (const frame of [barWindow.element, listWindow.element, settingsWindow.element]) {
+  // ドック枠を差す先に付け直す (C2.7)。YouTube が子を作り直すと枠ごと外れる。使えるかが変わったら
+  // (1 列表示になった・戻った・差す先が消えた) 窓を出し直す (退避 / 枠へ戻す)。**バーの有無より先に見る**
+  if (dockManager.attach(dockAnchors())) refreshWindows();
+  // 浮いた窓は body の直下に置く (#below の中だと YouTube の再描画で外れる)。**バーの有無より先に見る。**
+  // body の子を差し替えられると窓だけが外れる。**使える枠に入っている窓は枠の中のまま** (枠ごと差し直すのは attach)
+  for (const id of WINDOW_IDS) {
+    const slot = dockManager.slotOf(id);
+    if (slot !== null && dockManager.isUsable(slot)) continue;
+    const frame = windowOf(id).element;
     if (frame.parentElement !== document.body) document.body.append(frame);
   }
   // **バーの有無より先に見る。** バーを作り直さなくても、プレイヤーの要素だけが替わることがある
@@ -2046,6 +2168,8 @@ const themeObserver = new MutationObserver(() => {
   applyPalette(barWindow.element, dark);
   applyPalette(listWindow.element, dark);
   applyPalette(settingsWindow.element, dark);
+  // ドック枠 (タブの列と目印) も自前の配色
+  for (const slot of Object.values(dockManager.elements)) applyPalette(slot, dark);
 });
 themeObserver.observe(document.documentElement, {
   attributes: true,
