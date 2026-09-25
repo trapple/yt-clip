@@ -1,4 +1,9 @@
-import type { DragPoint, FloatingWindow } from "@/content/floating-window";
+import {
+  UNDOCK_THRESHOLD_PX,
+  type DragPhase,
+  type DragPoint,
+  type FloatingWindow,
+} from "@/content/floating-window";
 import { DOCK_STYLE } from "@/content/styles";
 import {
   DOCK_SLOT_IDS,
@@ -14,9 +19,9 @@ export type { DockSlotId, DockState } from "@/content/window-layout";
  * 下の枠 (#yt-clip-dock-below) は #below の先頭、右の枠 (#yt-clip-dock-side) は #secondary-inner の先頭に差し、
  * ページと一緒にスクロールする。
  *
- * 枠 (根・タブの列・窓の置き場)、入れる / 出す / 前に出す、差し直し、退避、保存用の形を持つ。**窓の中身と、
- * 窓を出す条件は知らない** (youtube.ts が決め、窓の `hidden` として見える)。浮いた窓の位置も知らない: 退避した窓は
- * onEvacuate、引き出した窓は onUndock で youtube.ts が置く
+ * 枠 (根・タブの列・窓の置き場)、入れる / 出す / 前に出す、落とし先の見せ方と当たり判定、タブからの引き出し、
+ * 差し直し、退避、保存用の形を持つ。**窓の中身と、窓を出す条件は知らない** (youtube.ts が決め、窓の `hidden` として
+ * 見える)。浮いた窓の位置も知らない: 退避した窓は onEvacuate、引き出した窓は onUndock で youtube.ts が置く
  */
 
 /**
@@ -30,6 +35,13 @@ export const BELOW_SLOT_MARGIN_TOP_PX = 0;
  * 下の内容が目印の高さ (40px) だけ下がるようにする (C2.3)
  */
 export const DOCK_SLOT_GAP_PX = 12;
+
+/**
+ * 落とし先に当てるまでに、指がドラッグの開始点から離れていなければならない距離 (C2.3 の距離の武装)。目印の高さと
+ * 同じ。最初の位置の窓は帯とずれて重なるので、「帯に外から入った」だけでは、掴む高さ次第で少し動かしただけで
+ * 吸い込まれる。値は可逆
+ */
+export const DOCK_ARM_DISTANCE_PX = 40;
 
 export type DockManager = {
   /** 2 つの枠の根。配色 (applyPalette) を当てるために見せる */
@@ -58,6 +70,13 @@ export type DockManager = {
   slotOf(id: WindowId): DockSlotId | null;
   /** 窓の出す条件 (hidden) が変わった後に呼ぶ。窓の置き場・タブ・枠の出し入れ・退避を合わせる */
   sync(): void;
+  /**
+   * 浮いた窓のドラッグの落とし先 (C2.3)。start で入れられる枠に帯を出して (隠れている枠・バーだけの枠は 40px の目印を
+   * ページの流れへ出して) から測り、指が既に中にある帯は「出るまで待ち」にする。move で当たり判定と塗り、end で
+   * 当たっている枠の末尾に入れて前に出し、その枠を返す (入れなければ null)。当たるのは、指が帯の中にあり、開始点から
+   * DOCK_ARM_DISTANCE_PX 以上離れ、その帯に外から入ったときだけ
+   */
+  drag(id: WindowId, phase: DragPhase, point: DragPoint): DockSlotId | null;
   /** 保存用の形 (写し) */
   state(): DockState;
   destroy(): void;
@@ -103,7 +122,24 @@ type Slot = {
   active: WindowId | undefined;
   /** 差す先があり、幅があるか (attach で測る) */
   usable: boolean;
+  /** ドラッグの間、落とし先の帯になっている要素 (タブの列か目印)。ドラッグしていない・入れられない枠では null */
+  band: HTMLElement | null;
 };
+
+/** ドラッグ中の窓 (C2.3)。drag("start") から drag("end") まで */
+type Dragging = {
+  id: WindowId;
+  /** ドラッグの開始点。ここから DOCK_ARM_DISTANCE_PX 離れるまで当てない */
+  origin: DragPoint;
+  /** 始めたときに指が中にあった帯。一度その帯の外へ出るまで当てない */
+  waitingOut: Set<DockSlotId>;
+  /** 当たっている帯 (離すとここに入れる) */
+  hover: DockSlotId | null;
+};
+
+function contains(box: DOMRect, point: DragPoint): boolean {
+  return point.x >= box.left && point.x <= box.right && point.y >= box.top && point.y <= box.bottom;
+}
 
 function createSlot(id: DockSlotId): Slot {
   const root = document.createElement("div");
@@ -123,7 +159,17 @@ function createSlot(id: DockSlotId): Slot {
   content.dataset.role = "dock-content";
   // 目印は枠の先頭 (C2.3: 帯は枠の上の段だけ)。タブの列 → 置き場の順
   root.append(marker, tabRow, content);
-  return { id, root, marker, tabRow, content, tabs: [], active: undefined, usable: false };
+  return {
+    id,
+    root,
+    marker,
+    tabRow,
+    content,
+    tabs: [],
+    active: undefined,
+    usable: false,
+    band: null,
+  };
 }
 
 export function createDockManager(options: DockManagerOptions): DockManager {
@@ -141,6 +187,12 @@ export function createDockManager(options: DockManagerOptions): DockManager {
   const tabElements = new Map<WindowId, HTMLElement>();
   /** 入っている枠が使えないため、浮いた窓で出している窓 (退避。C2.1)。onEvacuate を 2 度呼ばないため */
   const evacuated = new Set<WindowId>();
+  let dragging: Dragging | null = null;
+  /**
+   * タブから引き出した窓の、掴んだタブの要素。**指を離す (drag の end) まで DOM に残す** (display: none)。
+   * Pointer Events の捕捉がこの要素に付いており、外すと lostpointercapture でドラッグが終わる (C2.4)
+   */
+  let grabbedTab: HTMLElement | null = null;
 
   function findSlot(id: WindowId): Slot | null {
     return allSlots.find((slot) => slot.tabs.includes(id)) ?? null;
@@ -164,8 +216,74 @@ export function createDockManager(options: DockManagerOptions): DockManager {
     tab.dataset.window = id;
     tab.textContent = options.titles[id];
     tab.title = "押すと前に出す。ドラッグで取り出す (ダブルクリックで最初の位置へ)";
+    tab.addEventListener("pointerdown", (event: PointerEvent) => pressTab(id, tab, event));
+    tab.addEventListener("dblclick", () => options.onTabDoubleClick(id));
     tabElements.set(id, tab);
     return tab;
+  }
+
+  /**
+   * タブを押した (C2.4)。UNDOCK_THRESHOLD_PX 未満で離したら前に出す。それ以上動いたら枠から引き出し、
+   * ドラッグは窓の移動として続ける。捕捉はタブに付けたまま渡す
+   */
+  function pressTab(id: WindowId, tab: HTMLElement, event: PointerEvent): void {
+    if (event.button !== 0) return;
+    // 文字の選択やページのスクロールを始めさせない
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    const origin: DragPoint = { x: event.clientX, y: event.clientY };
+    const box = tab.getBoundingClientRect();
+    /** タブの左上から見た押した点 (引き出した窓を、掴んだ位置関係を保って置くため) */
+    const grab: DragPoint = { x: origin.x - box.left, y: origin.y - box.top };
+    tab.setPointerCapture(pointerId);
+
+    const stop = (): void => {
+      tab.removeEventListener("pointermove", onMove);
+      tab.removeEventListener("pointerup", onUp);
+      tab.removeEventListener("pointercancel", onCancel);
+      tab.removeEventListener("lostpointercapture", onCancel);
+    };
+    const onMove = (move: PointerEvent): void => {
+      if (move.pointerId !== pointerId) return;
+      if (Math.hypot(move.clientX - origin.x, move.clientY - origin.y) < UNDOCK_THRESHOLD_PX) return;
+      // 捕捉は解かない。続きのドラッグ (窓の移動) が同じタブの捕捉を使う
+      stop();
+      pullOut(id, tab, move, origin, grab);
+    };
+    const onUp = (up: PointerEvent): void => {
+      if (up.pointerId !== pointerId) return;
+      stop();
+      activate(id);
+    };
+    const onCancel = (cancel: Event): void => {
+      const cancelId = (cancel as PointerEvent).pointerId;
+      if (cancelId !== undefined && cancelId !== pointerId) return;
+      stop();
+    };
+    tab.addEventListener("pointermove", onMove);
+    tab.addEventListener("pointerup", onUp);
+    tab.addEventListener("pointercancel", onCancel);
+    tab.addEventListener("lostpointercapture", onCancel);
+  }
+
+  /**
+   * タブから窓を引き出す (C2.4)。元の枠は残りの窓ですぐ描き直し (当たり判定はその後の帯で測る)、窓は youtube.ts が
+   * 指の下に置き、ドラッグは窓の beginMoveFrom で続ける (開始点はタブを押した点。C2.3 の距離の起点)
+   */
+  function pullOut(
+    id: WindowId,
+    tab: HTMLElement,
+    move: PointerEvent,
+    origin: DragPoint,
+    grab: DragPoint,
+  ): void {
+    // 掴んだタブは外さず隠すだけ。次にこの窓を入れたときは新しいタブを作る
+    tabElements.delete(id);
+    tab.style.display = "none";
+    grabbedTab = tab;
+    undock(id);
+    options.onUndock(id, { x: move.clientX, y: move.clientY }, grab);
+    options.windows[id].beginMoveFrom(tab, move, origin);
   }
 
   /** 窓を body へ戻して浮いた窓にする (箱は捨てる) */
@@ -199,7 +317,8 @@ export function createDockManager(options: DockManagerOptions): DockManager {
 
   /**
    * タブの列を ids の並びにする。前のタブ (shown) は見た目と data-active で見分ける。**差分だけを動かす**: 要らなくなった
-   * タブだけを外し、並びの違うタブだけを差し直す (押している最中のタブを付け直すと捕捉が外れる。判断メモ 36)
+   * タブだけを外し、並びの違うタブだけを差し直す (押している最中のタブを付け直すと捕捉が外れる。判断メモ 36)。
+   * **掴んで引き出したタブは動かさない** (列の末尾に残し、ほかのタブはその前に差す)
    */
   function renderTabs(slot: Slot, ids: WindowId[], shown: WindowId | undefined): void {
     const desired = ids.map((id) => {
@@ -209,19 +328,23 @@ export function createDockManager(options: DockManagerOptions): DockManager {
       tab.dataset.active = String(active);
       return tab;
     });
+    const kept = grabbedTab !== null && grabbedTab.parentElement === slot.tabRow ? grabbedTab : null;
     for (const child of [...slot.tabRow.children]) {
-      if (!desired.includes(child as HTMLElement)) child.remove();
+      if (child !== kept && !desired.includes(child as HTMLElement)) child.remove();
     }
     desired.forEach((tab, index) => {
-      const at = slot.tabRow.children[index] ?? null;
+      const others = [...slot.tabRow.children].filter((child) => child !== kept);
+      const at = others[index] ?? kept;
       if (at !== tab) slot.tabRow.insertBefore(tab, at);
     });
   }
 
   /**
-   * 1 つの枠を描き直す (C2.2)。見えている窓 (hidden でない) のタブだけを出し、前のタブの窓だけを置き場に出す。
+   * 1 つの枠を描き直す (C2.2 / C2.3)。見えている窓 (hidden でない) のタブだけを出し、前のタブの窓だけを置き場に出す。
    * **枠の中の窓が 1 つでバーのときだけタブの列を出さない** (⠿ で掴めるうえ、1440x795 の高さの予算に 28px が入らない)。
-   * 見えている窓が無い枠・使えない枠は枠ごと隠す
+   * ドラッグの間は、入れられる枠に落とし先の帯を出す: タブの列が出ていればタブの列、無ければ枠の先頭の 40px の目印
+   * (ページの流れの中に出る。上に重ねる目印はスクロールで落ちる場所とずれる)。見えている窓も目印も無い枠・
+   * 使えない枠は枠ごと隠す
    */
   function render(slot: Slot): void {
     const visible = slot.tabs.filter((id) => !options.windows[id].element.hidden);
@@ -231,11 +354,27 @@ export function createDockManager(options: DockManagerOptions): DockManager {
     const showTabs = visible.length > 0 && !(visible.length === 1 && visible[0] === "bar");
     renderTabs(slot, showTabs ? visible : [], shown);
     slot.tabRow.style.display = showTabs ? "flex" : "none";
-    slot.root.style.display = slot.usable && visible.length > 0 ? "block" : "none";
+
+    const target = dragging !== null && slot.usable && options.accepts(dragging.id, slot.id);
+    const showMarker = target && !showTabs;
+    slot.marker.style.display = showMarker ? "flex" : "none";
+    slot.band = target ? (showTabs ? slot.tabRow : slot.marker) : null;
+    for (const element of [slot.tabRow, slot.marker]) {
+      const isBand = element === slot.band;
+      const hovered = isBand && dragging?.hover === slot.id;
+      if (isBand) element.dataset.dropTarget = "true";
+      else delete element.dataset.dropTarget;
+      if (hovered) element.dataset.dropHover = "true";
+      else delete element.dataset.dropHover;
+      element.style.outline = isBand ? DOCK_STYLE.bandOutline : "";
+      element.style.outlineOffset = isBand ? "-2px" : "";
+      element.style.background = hovered ? DOCK_STYLE.bandFill : "";
+    }
+    slot.root.style.display = slot.usable && (visible.length > 0 || showMarker) ? "block" : "none";
     applyGaps(slot, visible.length > 0);
   }
 
-  /** 枠の余白。窓が見えている間だけ下の余白と、下の枠の上の余白の補正を当てる (判断メモ 37) */
+  /** 枠の余白。窓が見えている間だけ下の余白と、下の枠の上の余白の補正を当てる (目印だけの間は 0。判断メモ 37) */
   function applyGaps(slot: Slot, hasWindows: boolean): void {
     slot.root.style.marginBottom = `${hasWindows ? DOCK_SLOT_GAP_PX : 0}px`;
     slot.root.style.marginTop = `${hasWindows && slot.id === "below" ? BELOW_SLOT_MARGIN_TOP_PX : 0}px`;
@@ -322,6 +461,62 @@ export function createDockManager(options: DockManagerOptions): DockManager {
     options.onChange(state());
   }
 
+  /**
+   * 当たっている帯。**帯の箱 (getBoundingClientRect) を毎回測る** (YouTube の再描画で差し直された後の位置で測る。
+   * C2.7)。elementFromPoint は使わない (掴んでいる窓が指の下にあり、帯が取れない)
+   */
+  function hitTest(current: Dragging, point: DragPoint): DockSlotId | null {
+    const armed =
+      Math.hypot(point.x - current.origin.x, point.y - current.origin.y) >= DOCK_ARM_DISTANCE_PX;
+    let hit: DockSlotId | null = null;
+    for (const slot of allSlots) {
+      if (slot.band === null) continue;
+      if (!contains(slot.band.getBoundingClientRect(), point)) {
+        current.waitingOut.delete(slot.id);
+        continue;
+      }
+      if (armed && !current.waitingOut.has(slot.id) && hit === null) hit = slot.id;
+    }
+    return hit;
+  }
+
+  function drag(id: WindowId, phase: DragPhase, point: DragPoint): DockSlotId | null {
+    if (phase === "start") {
+      const started: Dragging = { id, origin: point, waitingOut: new Set(), hover: null };
+      dragging = started;
+      // 帯を出して (隠れている枠の目印はページの流れへ差して) から測る。差す前に測ると、目印の分だけ下の帯の
+      // 位置がずれる (C2.3)
+      for (const slot of allSlots) render(slot);
+      for (const slot of allSlots) {
+        if (slot.band !== null && contains(slot.band.getBoundingClientRect(), point)) {
+          started.waitingOut.add(slot.id);
+        }
+      }
+      return null;
+    }
+    const current = dragging;
+    if (current === null || current.id !== id) return null;
+    const hover = hitTest(current, point);
+    if (hover !== current.hover) {
+      current.hover = hover;
+      for (const slot of allSlots) render(slot);
+    }
+    if (phase === "move") return null;
+
+    dragging = null;
+    // 引き出しに使ったタブは、ここで捨てる (捕捉はもう窓の枠が解いた)
+    grabbedTab?.remove();
+    grabbedTab = null;
+    if (hover === null) {
+      for (const slot of allSlots) render(slot);
+      return null;
+    }
+    dock(id, hover);
+    // 入れなかった方の枠の帯も消す
+    for (const slot of allSlots) render(slot);
+    return hover;
+  }
+
   return {
     elements: { below: slots.below.root, side: slots.side.root },
 
@@ -367,6 +562,7 @@ export function createDockManager(options: DockManagerOptions): DockManager {
       for (const slot of allSlots) render(slot);
     },
 
+    drag,
     state,
 
     destroy(): void {

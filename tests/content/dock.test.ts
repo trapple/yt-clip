@@ -72,6 +72,7 @@ function setup(): Setup {
   const side = document.createElement("div");
   side.id = "secondary-inner";
   document.body.append(below, side);
+  let manager: DockManager | null = null;
   const make = (id: WindowId): FloatingWindow => {
     const frame = createFloatingWindow({
       id: `win-${id}`,
@@ -80,6 +81,7 @@ function setup(): Setup {
       minWidth: 280,
       onUserMove: () => undefined,
       onResetRequest: () => undefined,
+      onDragPoint: (phase, point) => (manager?.drag(id, phase, point) ?? null) !== null,
     });
     document.body.append(frame.element);
     frame.setVisible(true);
@@ -90,7 +92,7 @@ function setup(): Setup {
   const onEvacuate = vi.fn();
   const onUndock = vi.fn();
   const onTabDoubleClick = vi.fn();
-  const manager = createDockManager({
+  manager = createDockManager({
     windows,
     titles: TITLES,
     initial: initialDocks(),
@@ -136,6 +138,34 @@ function paneDisplay(frame: FloatingWindow): string {
   const pane = frame.element.parentElement;
   if (pane === null || pane.dataset.role !== "dock-pane") throw new Error("枠の置き場に入っていません");
   return pane.style.display;
+}
+
+/** 帯の中の点 (下の枠 / 右の枠)。目印 (40px) にもタブの列 (28px) にも入る高さ */
+const BELOW_BAND = { x: 100, y: 610 };
+const SIDE_BAND = { x: 900, y: 70 };
+/** どの帯からも離れた点 */
+const AWAY = { x: 300, y: 300 };
+
+function markerOf(slot: DockSlotId): HTMLElement {
+  const marker = slotRoot(slot).querySelector<HTMLElement>("[data-role='dock-marker']");
+  if (marker === null) throw new Error("目印がありません");
+  return marker;
+}
+
+/** 落とし先の帯になっている要素 (無ければ null) */
+function bandOf(slot: DockSlotId): HTMLElement | null {
+  return slotRoot(slot).querySelector<HTMLElement>("[data-drop-target='true']");
+}
+
+function tabOf(slot: DockSlotId, id: WindowId): HTMLElement {
+  const tab = tabRowOf(slot).querySelector<HTMLElement>(`[data-role='dock-tab'][data-window='${id}']`);
+  if (tab === null) throw new Error(`${id} のタブがありません`);
+  return tab;
+}
+
+/** jsdom は PointerEvent を持たない。MouseEvent に pointer* の名前を付けて配る */
+function pointer(target: Element, type: string, x: number, y: number): void {
+  target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
 }
 
 beforeAll(() => {
@@ -402,5 +432,307 @@ describe("差し直しと退避", () => {
       side: { tabs: ["list", "settings"], active: "list" },
     });
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("落とし先 (drag)", () => {
+  test("帯の外から入り、開始点から 40px 以上離れた点で離すと、その枠の末尾に入れて前に出す", () => {
+    const { manager, windows, onChange } = setup();
+
+    manager.drag("list", "start", AWAY);
+    manager.drag("list", "move", SIDE_BAND);
+    const slot = manager.drag("list", "end", SIDE_BAND);
+
+    expect(slot).toBe("side");
+    expect(windows.list.element.closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(onChange).toHaveBeenLastCalledWith({ side: { tabs: ["list"], active: "list" } });
+  });
+
+  test("枠の中身 (置き場) の上や、帯の外で離しても入れない", () => {
+    const { manager } = setup();
+    manager.dock("settings", "side");
+
+    manager.drag("list", "start", AWAY);
+    manager.drag("list", "move", { x: 900, y: 200 });
+    expect(manager.drag("list", "end", { x: 900, y: 200 })).toBeNull();
+
+    manager.drag("list", "start", AWAY);
+    expect(manager.drag("list", "end", { x: 500, y: 400 })).toBeNull();
+    expect(manager.slotOf("list")).toBeNull();
+  });
+
+  test("開始点から 40px 未満では、帯の中で離しても入れない (距離の武装)", () => {
+    const { manager } = setup();
+    // 帯 (右の枠の目印: 上端 60・高さ 40) のすぐ下から始め、30px 上の帯の中で離す
+    manager.drag("list", "start", { x: 900, y: 110 });
+    manager.drag("list", "move", { x: 900, y: 80 });
+    expect(manager.drag("list", "end", { x: 900, y: 80 })).toBeNull();
+  });
+
+  test("始めたときに帯の中にあった指は、一度その帯の外へ出るまで当てない (40px 以上離れていても)", () => {
+    const { manager } = setup();
+    manager.drag("list", "start", { x: 850, y: 70 });
+    manager.drag("list", "move", { x: 1200, y: 70 });
+    expect(manager.drag("list", "end", { x: 1200, y: 70 })).toBeNull();
+
+    manager.drag("list", "start", { x: 850, y: 70 });
+    manager.drag("list", "move", { x: 900, y: 200 });
+    manager.drag("list", "move", SIDE_BAND);
+    expect(manager.drag("list", "end", SIDE_BAND)).toBe("side");
+  });
+
+  test("隠れている枠は start で目印をページの流れへ出し、出した後で帯を測る", () => {
+    const { manager } = setup();
+    const displaysWhenMeasured: string[] = [];
+    const spy = vi.mocked(Element.prototype.getBoundingClientRect);
+    const measure = spy.getMockImplementation();
+    spy.mockImplementation(function (this: Element) {
+      if (this instanceof HTMLElement && this.dataset.role === "dock-marker") {
+        displaysWhenMeasured.push(this.style.display);
+      }
+      return measure === undefined ? boxAt(0, 0, 0, 0) : measure.call(this);
+    });
+    expect(markerOf("side").style.display).toBe("none");
+
+    manager.drag("list", "start", AWAY);
+
+    expect(markerOf("side").style.display).toBe("flex");
+    expect(slotRoot("side").style.display).toBe("block");
+    expect(displaysWhenMeasured.length).toBeGreaterThan(0);
+    expect(displaysWhenMeasured.every((display) => display === "flex")).toBe(true);
+    manager.drag("list", "end", AWAY);
+  });
+
+  test("落とし先の帯は入れられる枠にだけ出す (バーのドラッグでは右の枠に出さない)", () => {
+    const { manager } = setup();
+
+    manager.drag("bar", "start", AWAY);
+
+    expect(bandOf("below")).toBe(markerOf("below"));
+    expect(bandOf("side")).toBeNull();
+    expect(markerOf("side").style.display).toBe("none");
+    expect(manager.drag("bar", "end", SIDE_BAND)).toBeNull();
+  });
+
+  test("タブの列がある枠は、タブの列そのものが帯になる (目印は出さない)", () => {
+    const { manager } = setup();
+    manager.dock("settings", "side");
+
+    manager.drag("list", "start", AWAY);
+
+    expect(bandOf("side")).toBe(tabRowOf("side"));
+    expect(markerOf("side").style.display).toBe("none");
+    manager.drag("list", "end", AWAY);
+  });
+
+  test("指が中にある帯は塗り (data-drop-hover)、離すと帯も塗りも消す", () => {
+    const { manager } = setup();
+    manager.drag("list", "start", AWAY);
+    manager.drag("list", "move", SIDE_BAND);
+    expect(markerOf("side").dataset.dropHover).toBe("true");
+
+    manager.drag("list", "move", AWAY);
+    expect(markerOf("side").dataset.dropHover).toBeUndefined();
+
+    manager.drag("list", "end", AWAY);
+    expect(bandOf("side")).toBeNull();
+    expect(bandOf("below")).toBeNull();
+    expect(slotRoot("side").style.display).toBe("none");
+  });
+
+  test("目印だけの間は、枠の余白を 0 にする (下の内容は目印の高さだけ下がる)", () => {
+    const { manager } = setup();
+    manager.drag("list", "start", AWAY);
+    expect(markerOf("side").style.display).toBe("flex");
+    expect(slotRoot("side").style.marginBottom).toBe("0px");
+    manager.drag("list", "end", AWAY);
+  });
+
+  test("窓の見出しのドラッグ (onDragPoint) からそのまま入る", () => {
+    const { windows } = setup();
+    const header = windows.list.element.querySelector<HTMLElement>("[data-role='window-header']");
+    if (header === null) throw new Error("見出しがありません");
+
+    pointer(header, "pointerdown", AWAY.x, AWAY.y);
+    pointer(header, "pointermove", AWAY.x + 10, AWAY.y);
+    pointer(header, "pointermove", SIDE_BAND.x, SIDE_BAND.y);
+    pointer(header, "pointerup", SIDE_BAND.x, SIDE_BAND.y);
+
+    expect(windows.list.element.closest("#yt-clip-dock-side")).not.toBeNull();
+  });
+});
+
+describe("タブ", () => {
+  test("押して 8px 未満で離すと、そのタブを前に出す", () => {
+    const { manager, onUndock } = setup();
+    manager.dock("list", "side");
+    manager.dock("settings", "side");
+
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 863, 70);
+    pointer(tab, "pointerup", 863, 70);
+
+    expect(activeLabel("side")).toBe("区間・テロップ");
+    expect(onUndock).not.toHaveBeenCalled();
+  });
+
+  test("8px 以上動かすと枠から出して onUndock (指の位置・タブの中で押した点) を呼び、元の枠は残りの窓ですぐ描き直す", () => {
+    const { manager, windows, onUndock } = setup();
+    manager.dock("list", "side");
+    manager.dock("settings", "side");
+    manager.activate("list");
+
+    // タブの箱は (848, 60) から (stub)。(860, 70) で押す = タブの中の (12, 10)
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 860, 80);
+
+    expect(onUndock).toHaveBeenCalledWith("list", { x: 860, y: 80 }, { x: 12, y: 10 });
+    expect(windows.list.element.parentElement).toBe(document.body);
+    expect(manager.slotOf("list")).toBeNull();
+    expect(tabLabels("side")).toEqual(["設定"]);
+    pointer(tab, "pointerup", 860, 80);
+  });
+
+  test("残りが 0 になった枠は、ドラッグの間は 40px の目印に変わる", () => {
+    const { manager } = setup();
+    manager.dock("list", "side");
+
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 860, 90);
+
+    expect(tabRowOf("side").style.display).toBe("none");
+    expect(markerOf("side").style.display).toBe("flex");
+    expect(slotRoot("side").style.display).toBe("block");
+    pointer(tab, "pointerup", 860, 90);
+  });
+
+  test("掴んだタブの要素だけは、指を離すまで DOM に残す (display: none。捕捉が付いている)", () => {
+    const { manager } = setup();
+    manager.dock("list", "side");
+    manager.dock("settings", "side");
+
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 860, 90);
+    expect(tab.isConnected).toBe(true);
+    expect(tab.style.display).toBe("none");
+
+    // 設定のタブが描き直されても、掴んだタブは外さない
+    manager.sync();
+    expect(tab.isConnected).toBe(true);
+
+    pointer(tab, "pointermove", 400, 300);
+    pointer(tab, "pointerup", 400, 300);
+    expect(tab.isConnected).toBe(false);
+  });
+
+  test("引き出した直後は元の枠の帯の中にあるので、一度帯を出て入り直すまで戻さない", () => {
+    const { manager, windows } = setup();
+    manager.dock("list", "side");
+    manager.dock("settings", "side");
+
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 1100, 70);
+    pointer(tab, "pointerup", 1100, 70);
+    expect(windows.list.element.parentElement).toBe(document.body);
+  });
+
+  test("引き出したまま別の枠へ落とせる", () => {
+    const { manager, windows } = setup();
+    manager.dock("list", "side");
+
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 860, 90);
+    pointer(tab, "pointermove", AWAY.x, AWAY.y);
+    pointer(tab, "pointermove", BELOW_BAND.x, BELOW_BAND.y);
+    pointer(tab, "pointerup", BELOW_BAND.x, BELOW_BAND.y);
+
+    expect(windows.list.element.closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(manager.state()).toEqual({ below: { tabs: ["list"], active: "list" } });
+  });
+
+  test("押している最中に別のタブが消えても、押しているタブは付け直さない (捕捉が外れない)", () => {
+    const { manager, windows } = setup();
+    manager.dock("list", "side");
+    manager.dock("settings", "side");
+    const tab = tabOf("side", "list");
+    const observer = new MutationObserver(() => undefined);
+    observer.observe(tabRowOf("side"), { childList: true });
+    pointer(tab, "pointerdown", 860, 70);
+
+    windows.settings.setVisible(false);
+    manager.sync();
+
+    const removed = observer.takeRecords().flatMap((record) => [...record.removedNodes]);
+    observer.disconnect();
+    expect(removed).not.toContain(tab);
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    pointer(tab, "pointerup", 860, 70);
+  });
+
+  test("タブのダブルクリックで onTabDoubleClick", () => {
+    const { manager, onTabDoubleClick } = setup();
+    manager.dock("list", "side");
+    tabOf("side", "list").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(onTabDoubleClick).toHaveBeenCalledWith("list");
+  });
+});
+
+describe("タブからの引き出し中の DOM (Task 4・5 のレビューからの申し送り)", () => {
+  test("掴んだタブは、描き直し (sync・帯の塗り) のたびに見た目を上書きされず、隠れたまま列に残る", () => {
+    const { manager } = setup();
+    manager.dock("list", "side");
+    manager.dock("settings", "side");
+
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 860, 90);
+    manager.sync();
+    pointer(tab, "pointermove", AWAY.x, AWAY.y);
+    pointer(tab, "pointermove", BELOW_BAND.x, BELOW_BAND.y);
+
+    expect(tab.parentElement).toBe(tabRowOf("side"));
+    expect(tab.style.display).toBe("none");
+    pointer(tab, "pointerup", AWAY.x, AWAY.y);
+  });
+
+  test("タブ自身のリスナは引き出す前に外す (その後の move で 2 度引き出さず、離しても前に出す扱いにしない)", () => {
+    const { manager, windows, onUndock, onChange } = setup();
+    manager.dock("list", "side");
+    manager.dock("settings", "side");
+    const beginMoveFrom = vi.spyOn(windows.list, "beginMoveFrom");
+
+    const tab = tabOf("side", "list");
+    pointer(tab, "pointerdown", 860, 70);
+    pointer(tab, "pointermove", 860, 90);
+    pointer(tab, "pointermove", 860, 120);
+    const changes = onChange.mock.calls.length;
+    pointer(tab, "pointerup", AWAY.x, AWAY.y);
+
+    expect(onUndock).toHaveBeenCalledTimes(1);
+    expect(beginMoveFrom).toHaveBeenCalledTimes(1);
+    expect(beginMoveFrom.mock.calls[0]?.[0]).toBe(tab);
+    expect(onChange).toHaveBeenCalledTimes(changes);
+    expect(manager.slotOf("list")).toBeNull();
+  });
+
+  test("undock は窓の要素ごと body へ移し、⠿ (掴む場所) を作り直さない", () => {
+    const { manager, windows } = setup();
+    const grip = document.createElement("span");
+    grip.dataset.role = "grip";
+    windows.bar.element.append(grip);
+    windows.bar.addDragHandle(grip);
+    manager.dock("bar", "below");
+
+    manager.undock("bar");
+
+    expect(windows.bar.element.parentElement).toBe(document.body);
+    expect(windows.bar.element.querySelector("[data-role='grip']")).toBe(grip);
+    expect(grip.isConnected).toBe(true);
   });
 });
