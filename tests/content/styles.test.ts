@@ -2,9 +2,10 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   BAR_STYLE,
+  DOCK_STYLE,
   FLOATING_WINDOW_STYLE,
+  PANEL_WINDOW_STYLE,
   RANGE_STYLE,
-  SIDE_PANEL_STYLE,
   TELOP_TRACK_STYLE,
   applyPalette,
   isDarkTheme,
@@ -115,19 +116,20 @@ describe("状態の文言", () => {
   });
 });
 
-describe("右側のパネル", () => {
+describe("見出しのある窓の中身の箱", () => {
   test("本体の中だけでスクロールする", () => {
-    expect(SIDE_PANEL_STYLE.body).toContain("overflow-y:auto");
-    // flex の子は min-height:0 が無いと中身より縮まず、パネルごと伸びる
-    expect(SIDE_PANEL_STYLE.body).toContain("min-height:0");
+    expect(PANEL_WINDOW_STYLE.body).toContain("overflow-y:auto");
+    // flex の子は min-height:0 が無いと中身より縮まず、窓ごと伸びる
+    expect(PANEL_WINDOW_STYLE.body).toContain("min-height:0");
   });
 
-  test("本体は display を持たない (畳むときの出し入れは side-panel.ts が決める)", () => {
-    expect(SIDE_PANEL_STYLE.body).not.toContain("display:");
+  test("本体は flex で縦に並べる (折り畳みが無いので、出し入れする者がいない)", () => {
+    expect(PANEL_WINDOW_STYLE.body).toContain("display:flex");
+    expect(PANEL_WINDOW_STYLE.body).toContain("flex-direction:column");
   });
 
-  test("枠の見た目 (地・見出し) は持たない (窓の枠が持つ)", () => {
-    expect(Object.keys(SIDE_PANEL_STYLE)).toEqual(["collapseButton", "body"]);
+  test("枠の見た目 (地・見出し) と折り畳みのボタンは持たない", () => {
+    expect(Object.keys(PANEL_WINDOW_STYLE)).toEqual(["body"]);
   });
 });
 
@@ -150,6 +152,25 @@ describe("フロートの窓", () => {
   test("右下のつまみは 16px 四方", () => {
     expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("width:16px");
     expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("height:16px");
+  });
+
+  test("ドック中はページの流れの中 (static)・幅いっぱい・影なし・角丸 8px・z-index auto。display は持たない", () => {
+    const docked = FLOATING_WINDOW_STYLE.docked;
+    for (const rule of [
+      "position:static",
+      "width:100%",
+      "box-shadow:none",
+      "border-radius:8px",
+      "z-index:auto",
+      "background:var(--ytc-panel)",
+    ]) {
+      expect(docked).toContain(rule);
+    }
+    expect(docked).not.toContain("display");
+  });
+
+  test("見出しの右側の部品の箱は持たない (置く部品が無い)", () => {
+    expect("headerActions" in FLOATING_WINDOW_STYLE).toBe(false);
   });
 });
 
@@ -188,5 +209,40 @@ describe("テロップの帯の段", () => {
       expect(TELOP_TRACK_STYLE.root).toContain(rule);
     }
     expect(TELOP_TRACK_STYLE.ghost).toContain("visibility:hidden");
+  });
+});
+
+describe("ドック枠", () => {
+  test("枠の根はページの流れの中 (static) で、地は窓と同じ。display は持たない (出し入れは dock.ts)", () => {
+    expect(DOCK_STYLE.root).toContain("position:static");
+    expect(DOCK_STYLE.root).toContain("background:var(--ytc-panel)");
+    expect(DOCK_STYLE.root).not.toContain("display");
+    // 余白は dock.ts が描くたびに当てる (目印だけの間は 0。判断メモ 37)
+    expect(DOCK_STYLE.root).not.toContain("margin");
+  });
+
+  test("タブの列は高さ 28px、目印は高さ 40px。どちらも display は持たない", () => {
+    expect(DOCK_STYLE.tabRow).toContain("height:28px");
+    expect(DOCK_STYLE.marker).toContain("height:40px");
+    expect(DOCK_STYLE.tabRow).not.toContain("display");
+    expect(DOCK_STYLE.marker).not.toContain("display");
+  });
+
+  test("前のタブは文字の色とアクセントの下線 2px、ほかのタブは薄い文字 (C2.2)", () => {
+    expect(DOCK_STYLE.tabActive).toContain("color:var(--ytc-text);");
+    expect(DOCK_STYLE.tabActive).toContain("border-bottom:2px solid var(--ytc-accent)");
+    expect(DOCK_STYLE.tab).toContain("color:var(--ytc-text-sub)");
+  });
+
+  test("タブは掴めることが分かる見た目で、文字を選ばせず、タッチでスクロールに取られない", () => {
+    for (const style of [DOCK_STYLE.tab, DOCK_STYLE.tabActive]) {
+      expect(style).toContain("user-select:none");
+      expect(style).toContain("touch-action:none");
+    }
+  });
+
+  test("落とし先の帯は点線の縁、指が中にあるとアクセントの 12% で塗る (C2.3)", () => {
+    expect(DOCK_STYLE.bandOutline).toBe("2px dashed var(--ytc-accent)");
+    expect(DOCK_STYLE.bandFill).toContain("12%");
   });
 });

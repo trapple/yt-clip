@@ -5,7 +5,7 @@
  * 場所 (`#below` 配下の light DOM) では 1 つも解決せず、書いたフォールバック値
  * だけが効く。実機で確認済み。そのため配色は自前で持ち、テーマは自分で判定する。
  *
- * 配色は自前の変数 (`--ytc-*`) としてバーと右側のパネルの根に置く。テーマが
+ * 配色は自前の変数 (`--ytc-*`) としてバーと窓の根に置く。テーマが
  * 切り替わったらその 7 個を差し替えるだけで全体が追従する。
  */
 
@@ -17,7 +17,7 @@ export type Palette = {
   accent: string;
   onAccent: string;
   /**
-   * 右側のパネルの地。**`surface` とは別に持つ。** `surface` はテロップ行・選択中の
+   * 窓の地。**`surface` とは別に持つ。** `surface` はテロップ行・選択中の
    * 区間行・設定の背景に使っており、それを地にすると行と設定が地に溶ける
    */
   panel: string;
@@ -188,27 +188,26 @@ export const TELOP_STYLE = {
 } as const;
 
 /**
- * 右側のパネル (`side-panel.ts`) の中身。**枠の見た目 (地・影・見出し) は
- * `FLOATING_WINDOW_STYLE` が持つ** (パネルはフロートの窓の上に作る)。位置・幅は
- * YouTube の実機の値に合わせるので、出所と一緒に `side-panel.ts` が持つ。
+ * 見出しのある「幅と高さ」の窓 (`panel-window.ts`。区間・テロップの窓と設定の窓) の中身の箱。
+ * **枠の見た目 (地・影・見出し) は `FLOATING_WINDOW_STYLE` が持つ。** 位置・幅は YouTube の実機の値に
+ * 合わせるので、出所と一緒に `panel-window.ts` が持つ。
  *
- * **`body` は display を持たない。** 畳むときの出し入れは `side-panel.ts` が
- * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の
- * display が勝って出たままになる
+ * **`body` は display を持つ (flex)。** 右側のパネルの本体が display を持たなかったのは、折り畳みで
+ * 本体を出し入れしていたため。折り畳みをやめた (窓の分割の spec C1.2) ので、本体を出し入れする者はいない
+ * (窓ごとの出し入れは `floating-window.ts` が窓の根の style.display で行う)
  */
-export const SIDE_PANEL_STYLE = {
-  collapseButton: SEGMENT_STYLE.iconButton,
+export const PANEL_WINDOW_STYLE = {
   /**
    * 中身の箱。**超えた分はここだけでスクロールする。** `min-height:0` が無いと
-   * flex の子は中身より縮まず、パネルごと画面の下へ伸びる
+   * flex の子は中身より縮まず、窓ごと画面の下へ伸びる
    */
-  body: "flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
+  body: "display:flex;flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
 } as const;
 
 /**
- * フロートの窓の枠 (`floating-window.ts`)。バーの窓とパネルの窓で同じものを使う。
+ * フロートの窓の枠 (`floating-window.ts`)。バーの窓・区間・テロップの窓・設定の窓で同じものを使う。
  *
- * **`root` と `resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
+ * **`root`・`docked`・`resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
  * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の display が
  * 勝って出たままになる。位置・大きさ・重なり順も `floating-window.ts` が決める
  */
@@ -216,18 +215,52 @@ export const FLOATING_WINDOW_STYLE = {
   /** 下のページが透けると読めないので、不透明な地と影を付ける */
   root: `position:fixed;flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
   /**
+   * ページの中の枠に入っている間 (窓の分割の spec C2.8)。**ページの流れの中** (static) で枠の幅いっぱい。
+   * ページに埋まるので影は付けず、角丸は枠に合わせて小さくする。z-index は効かないので auto
+   */
+  docked: `position:static;flex-direction:column;box-sizing:border-box;width:100%;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:8px;box-shadow:none;z-index:auto;font-family:${FONT};font-size:13px;`,
+  /**
    * 見出し。空いたところを掴んで動かす。文字を選べると、掴んだつもりで選択が始まる。
    * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
    */
   header:
     "display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:move;user-select:none;touch-action:none;",
   title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
-  /** 見出しの右側の部品の箱。ボタンの上では窓を動かさないので、掴めそうなカーソルを出さない */
-  headerActions: "display:flex;align-items:center;gap:4px;cursor:default;",
   /**
    * 右下の角のつまみ (16px 四方。spec A.1)。カーソルは窓の向き (幅だけ / 幅と高さ) で
    * `floating-window.ts` が足す
    */
   resizeGrip:
     "position:absolute;right:0;bottom:0;width:16px;height:16px;touch-action:none;background:linear-gradient(135deg,transparent 50%,var(--ytc-border) 50%);",
+} as const;
+
+/**
+ * ページの中のドック枠 (`dock.ts`。窓の分割の spec C2)。**根・タブの列・目印は display を持たない**
+ * (出し入れは dock.ts が style.display で行う。ここに書くと hidden を立てても出たままになる)。配色は youtube.ts が
+ * 枠の根に applyPalette で当てる (枠は #below / #secondary-inner の中にあるが、YouTube の CSS 変数には頼らない方針のまま)
+ */
+export const DOCK_STYLE = {
+  /**
+   * 枠の根 (#yt-clip-dock-below / #yt-clip-dock-side)。**ページの流れの中** (static) にあり、ページと一緒に
+   * スクロールする (C2.1)。**余白は持たない**: 動画のタイトル・おすすめ動画との間 (下の余白) と下の枠の上の余白の補正は、
+   * 窓が見えている間だけ dock.ts が当てる (ドラッグの間の目印だけの枠で、下の内容が 40px より多く下がらないように)
+   */
+  root: `position:static;box-sizing:border-box;border-radius:8px;background:var(--ytc-panel);color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
+  /** タブの列 (C2.2)。高さ 28px。ドラッグの間は落とし先の帯になる (C2.3) */
+  tabRow: "align-items:stretch;gap:4px;height:28px;padding:0 4px;box-sizing:border-box;",
+  /**
+   * タブ。押すと前に出し、ドラッグで引き出す (C2.4)。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  tab: "display:flex;align-items:center;padding:0 12px;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:none;white-space:nowrap;font-size:13px;font-weight:500;color:var(--ytc-text-sub);border-bottom:2px solid transparent;",
+  /** 前に出しているタブ。文字の色と、アクセントの下線 2px で見分ける (C2.2) */
+  tabActive:
+    "display:flex;align-items:center;padding:0 12px;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:none;white-space:nowrap;font-size:13px;font-weight:500;color:var(--ytc-text);border-bottom:2px solid var(--ytc-accent);",
+  /** 隠れている枠・バーだけの枠の落とし先 (C2.3)。高さ 40px の箱に「ここにドック」 */
+  marker:
+    "align-items:center;justify-content:center;height:40px;box-sizing:border-box;border-radius:8px;color:var(--ytc-text-sub);font-size:13px;",
+  /** 落とし先の帯の縁 (タブの列にも目印にも当てる。outline なので帯の高さを変えない) */
+  bandOutline: "2px dashed var(--ytc-accent)",
+  /** 指が中にある帯の塗り (アクセントの 12%。Chrome 111 以降の color-mix) */
+  bandFill: "color-mix(in srgb,var(--ytc-accent) 12%,transparent)",
 } as const;

@@ -51,10 +51,12 @@ try {
     timeout: NAV_TIMEOUT_MS,
   });
 
-  // **関連動画を隠す。** 掲載画像に他人の動画のサムネイルが写り込むのを避ける。
-  // 拡張と関係ない要素が減って、見せたいものにも目が行く
+  // **関連動画の中身を隠す。** 掲載画像に他人の動画のサムネイルが写り込むのを避ける。
+  // **右の列 (#secondary) そのものは残す**: 最初の配置では区間・テロップと設定が右の列の先頭の枠に入る
+  // (窓の分割の spec C2.6)。列ごと隠すと右の枠が使えない扱いになり、設定が浮いた窓で出て、実際の絵と違ってしまう
   await page.addStyleTag({
-    content: "#secondary, ytd-watch-next-secondary-results-renderer { display: none !important; }",
+    content:
+      "#related, #chat, ytd-watch-next-secondary-results-renderer { display: none !important; }",
   });
 
   const bar = page.locator("#yt-clip-bar");
@@ -78,68 +80,26 @@ try {
   await page.locator("#yt-clip-bar-status").waitFor({ timeout: WAIT_TIMEOUT_MS });
 
   /**
-   * バーの窓が画面の下寄り (上端が画面の高さの ratio) に来るよう送る。プレイヤーと操作の両方を
-   * 1 枚に収める。
-   *
-   * **バーの窓はページのスクロールに付いてこない** (画面に浮いたまま。フロートの窓の spec A.2)。
-   * 送った後に resize を配り、動かしていないバーの窓に最初の位置 (その時点のプレイヤーの
-   * 下端 + 8px。youtube.ts / window-layout.ts の BAR_GAP_PX) を取り直させる
+   * ページの先頭へ戻す。最初の配置ではバーはプレイヤーの直下 (#below の先頭の枠)、設定はおすすめ動画の上の枠に
+   * ページの一部として入っている (窓の分割の spec C2.6) ので、先頭のままでプレイヤーと操作の両方が 1 枚に入る
+   * (1280x800 でプレイヤーの下端 + バー約 140px < 800)。浮いた窓の置き直し (resize) は要らなくなった
    */
-  const framePlayerAndBar = async (ratio) => {
-    await page.evaluate((r) => {
-      const player = document.getElementById("movie_player");
-      if (player === null) throw new Error("プレイヤーが見つかりません");
-      const barTop = player.getBoundingClientRect().bottom + 8 + window.scrollY;
-      window.scrollTo({ top: barTop - window.innerHeight * r, behavior: "instant" });
-      window.dispatchEvent(new Event("resize"));
-    }, ratio);
-    // スクロールと置き直しの後の再描画を待つ
+  const frameTop = async () => {
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
     await page.waitForTimeout(500);
   };
 
-  await framePlayerAndBar(0.72);
+  await frameTop();
   await page.screenshot({ path: `${OUT_DIR}/1-range.png` });
   console.log(`${OUT_DIR}/1-range.png`);
 
-  // 設定を開く。**設定は右側の固定のパネルに開き、ページのスクロールでは動かない。**
-  // 枠取りは 1-range と同じ (プレイヤーとバーが下寄り) にして、パネルの中を設定の
-  // 先頭まで送って撮る。1280x800 ではパネルの最大高さ (716px) に 8 項目と保存ボタンが
-  // 収まらず末尾は切れるが、それでよい。パネルの中でスクロールすることが見て分かる
+  // 設定を開く。最初の配置では、おすすめ動画の上の枠で設定のタブが前に出る (窓の分割の spec C2.2)。
+  // ページの中の窓は中身なりに伸びるので、1280x800 では設定の末尾が画面の下で切れるが、それでよい
   await bar.getByRole("button", { name: "⚙" }).click();
   await page
-    .locator("#yt-clip-panel")
+    .locator("#yt-clip-settings")
     .waitFor({ state: "visible", timeout: WAIT_TIMEOUT_MS });
-
-  // **このスクリーンショットだけ**、動画 (#primary) の幅をパネルのぶん空ける。
-  // 掲載画像はおすすめ列 (#secondary) を隠しているのでプレイヤーが画面右端まで
-  // 広がり、固定パネルと重なって「動画は隠れない」設計と食い違う絵になる。実際の
-  // YouTube にはおすすめ列があるので重ならない (1440 幅の実測で
-  // playerRight 1012 < panel.left 1024)。
-  // 実測 (1280x800、YouTube 2026-09-24): #secondary を隠すと #columns は
-  // justify-content: center になり、max-width だけ足すとプレイヤーが中央へ
-  // 寄って逆に重なりが深くなる (primary right 1072 > panel.left 864) ので、
-  // 左詰めに戻す指定も一緒に足す。448 = パネル幅 400 + 右端の余白 16 +
-  // プレイヤー側の左マージン 32 (side-panel.ts の WIDTH_PX / EDGE_GAP_PX と対応)
-  await page.addStyleTag({
-    content:
-      "#columns { justify-content: flex-start !important; } #primary { max-width: calc(100vw - 448px) !important; }",
-  });
-  await page.waitForTimeout(500);
-
-  await page.evaluate(() => {
-    const body = document.getElementById("yt-clip-panel-body");
-    // 設定パネルの根は、最初の項目 (モード) の入力欄 → 項目の枠 → 根
-    const settings = document.getElementById("yt-clip-setting-mode")?.parentElement
-      ?.parentElement;
-    if (body === null || settings == null) {
-      throw new Error("パネルか設定が見つかりません");
-    }
-    // 拡張も ⚙ で送っているが、掲載画像の絵をここで確定させる (拡張の振る舞いが
-    // 変わっても、撮れる絵が変わらないように)
-    body.scrollTop +=
-      settings.getBoundingClientRect().top - body.getBoundingClientRect().top;
-  });
-  await framePlayerAndBar(0.72);
+  await frameTop();
   await page.screenshot({ path: `${OUT_DIR}/2-settings.png` });
   console.log(`${OUT_DIR}/2-settings.png`);
 } finally {

@@ -21,6 +21,7 @@ import {
 } from "vitest";
 import { reduce } from "@/background/state";
 import type { Message } from "@/shared/messages";
+import type { WindowId, WindowLayout } from "@/content/window-layout";
 import {
   FAILURE_MESSAGES,
   type ClipRange,
@@ -220,6 +221,13 @@ function buildPage(): void {
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
+  // 右の列 (#secondary > #secondary-inner)。右のドック枠を差す先 (窓の分割の spec C2.1)
+  const secondary = document.createElement("div");
+  secondary.id = "secondary";
+  const secondaryInner = document.createElement("div");
+  secondaryInner.id = "secondary-inner";
+  secondary.append(secondaryInner);
+
   // 広告の判定は #movie_player の ad-showing を見る (player.ts の isAdPlaying)
   const player = document.createElement("div");
   player.id = "movie_player";
@@ -227,6 +235,7 @@ function buildPage(): void {
   video = installVideo();
   document.body.append(
     below,
+    secondary,
     title,
     author,
     progressBar,
@@ -262,7 +271,10 @@ let releaseLayout: () => void = () => undefined;
 const layoutGate = new Promise<void>((resolve) => {
   releaseLayout = resolve;
 });
-/** 読み込み時に覚えていた窓の位置。この位置で出ることを確かめる (jsdom の画面 1024x768 に収まる値) */
+/**
+ * 読み込み時に覚えていた窓の位置。この位置で出ることを確かめる (jsdom の画面 1024x768 に収まる値)。
+ * **古い形 (v1: version が無い) で置く。** panel は区間・テロップの窓が継ぐ (窓の分割の spec C1.3)
+ */
 const LAYOUT_AT_LOAD = {
   bar: { left: 40, top: 500, width: 700 },
   panel: { left: 300, top: 120, width: 360, height: 400 },
@@ -526,17 +538,31 @@ function rectAt(top: number, height: number): DOMRect {
   } as DOMRect;
 }
 
-/** 右側のパネル。body の直下に 1 つだけある */
-function panelElement(): HTMLElement {
-  const element = document.getElementById("yt-clip-panel");
-  if (element === null) throw new Error("パネルが見つかりません");
+/** 区間・テロップの窓。body の直下に 1 つだけある */
+function listElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-list");
+  if (element === null) throw new Error("区間・テロップの窓が見つかりません");
   return element;
 }
 
-/** パネルの中身の箱。一覧と設定はここに入る */
-function panelBody(): HTMLElement {
-  const element = document.getElementById("yt-clip-panel-body");
-  if (element === null) throw new Error("パネルの本体が見つかりません");
+/** 区間・テロップの窓の中身の箱。区間の一覧とテロップの一覧が入る */
+function listBody(): HTMLElement {
+  const element = document.getElementById("yt-clip-list-body");
+  if (element === null) throw new Error("区間・テロップの窓の中身が見つかりません");
+  return element;
+}
+
+/** 設定の窓。body の直下に 1 つだけある */
+function settingsWindowElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-settings");
+  if (element === null) throw new Error("設定の窓が見つかりません");
+  return element;
+}
+
+/** 設定の窓の中身の箱。設定パネルが入る */
+function settingsBody(): HTMLElement {
+  const element = document.getElementById("yt-clip-settings-body");
+  if (element === null) throw new Error("設定の窓の中身が見つかりません");
   return element;
 }
 
@@ -545,14 +571,6 @@ function barElement(): HTMLElement {
   const element = document.getElementById("yt-clip-bar");
   if (element === null) throw new Error("バーが見つかりません");
   return element;
-}
-
-function collapseButton(): HTMLButtonElement {
-  const button = panelElement().querySelector<HTMLButtonElement>(
-    "[data-role='collapse']",
-  );
-  if (button === null) throw new Error("折り畳みボタンがありません");
-  return button;
 }
 
 /** 設定パネルの根。最初の項目 (モード) の入力欄 → 項目の枠 → 根 */
@@ -577,11 +595,23 @@ function barGrip(): HTMLElement {
   return grip;
 }
 
-/** パネルの窓の見出し (掴んで動かす所) */
-function panelHeader(): HTMLElement {
-  const header = panelElement().querySelector<HTMLElement>("[data-role='window-header']");
-  if (header === null) throw new Error("パネルの見出しが見つかりません");
+/** 区間・テロップの窓の見出し (掴んで動かす所) */
+function listHeader(): HTMLElement {
+  const header = listElement().querySelector<HTMLElement>("[data-role='window-header']");
+  if (header === null) throw new Error("区間・テロップの窓の見出しが見つかりません");
   return header;
+}
+
+/** 設定の窓の見出し (掴んで動かす所) */
+function settingsHeader(): HTMLElement {
+  const header = settingsWindowElement().querySelector<HTMLElement>("[data-role='window-header']");
+  if (header === null) throw new Error("設定の窓の見出しが見つかりません");
+  return header;
+}
+
+/** 3 つの窓 (バー・区間・テロップ・設定) が隠れているか。この順に並べる */
+function windowsHidden(): boolean[] {
+  return [barWindowElement(), listElement(), settingsWindowElement()].map((element) => element.hidden);
 }
 
 /** 位置と大きさを決め打ちした箱 (rectAt は左 0・幅 400 に固定なので別に持つ) */
@@ -673,14 +703,16 @@ let restoredAtLoad = {
   labels: [] as string[],
 };
 
-/** 覚えた位置を読み込む前の窓 (設定を開いてパネルに中身がある状態) */
-let windowsBeforeLayout = { barHidden: false, panelHidden: false };
+/** 覚えた位置を読み込む前の窓 (設定を開いて設定の窓に中身がある状態) */
+let windowsBeforeLayout = { barHidden: false, listHidden: false, settingsHidden: false };
 /** 覚えた位置を読み込んだ後の窓 */
 let windowsAfterLayout = {
   barHidden: true,
-  panelHidden: true,
+  listHidden: false,
+  settingsHidden: true,
   bar: { left: "", top: "", width: "", height: "" },
-  panel: { left: "", top: "", width: "", height: "" },
+  list: { left: "", top: "", width: "", height: "" },
+  settings: { left: "", top: "", width: "", height: "" },
 };
 
 beforeAll(async () => {
@@ -707,20 +739,23 @@ beforeAll(async () => {
     labels: handleLabels(),
   };
 
-  // 覚えた窓の位置の読み込みは layoutGate で止めてある。設定を開いてパネルに中身が
-  // ある状態にしても、読み込みが済むまではどちらの窓も出ない (最初の位置から跳ぶ絵にしない)
+  // 覚えた窓の位置の読み込みは layoutGate で止めてある。設定を開いて設定の窓に中身が
+  // ある状態にしても、読み込みが済むまではどの窓も出ない (最初の位置から跳ぶ絵にしない)
   clickButton("⚙");
   windowsBeforeLayout = {
     barHidden: barWindowElement().hidden,
-    panelHidden: panelElement().hidden,
+    listHidden: listElement().hidden,
+    settingsHidden: settingsWindowElement().hidden,
   };
   releaseLayout();
   await flush();
   windowsAfterLayout = {
     barHidden: barWindowElement().hidden,
-    panelHidden: panelElement().hidden,
+    listHidden: listElement().hidden,
+    settingsHidden: settingsWindowElement().hidden,
     bar: styleRect(barWindowElement()),
-    panel: styleRect(panelElement()),
+    list: styleRect(listElement()),
+    settings: styleRect(settingsWindowElement()),
   };
   // 設定を閉じて、以降のテストを閉じた状態から始める
   clickButton("⚙");
@@ -759,14 +794,12 @@ beforeEach(async () => {
   // DOM を作り直したので、observer に拾わせて操作 UI を載せ直す
   document.body.append(document.createElement("div"));
   await flush();
-  // パネルはタブを開いている間 1 つを使い回す (畳んだ状態を覚えるため)。
-  // 前のテストで畳んだまま・送ったままにしない
-  const collapse = document.querySelector<HTMLButtonElement>(
-    "#yt-clip-panel [data-role='collapse']",
-  );
-  if (collapse?.getAttribute("aria-expanded") === "false") collapse.click();
-  const panelBodyElement = document.getElementById("yt-clip-panel-body");
-  if (panelBodyElement !== null) panelBodyElement.scrollTop = 0;
+  // 区間・テロップの窓と設定の窓はタブを開いている間 1 つずつを使い回す (位置を持つため)。
+  // 前のテストで送ったままにしない
+  for (const id of ["yt-clip-list-body", "yt-clip-settings-body"]) {
+    const body = document.getElementById(id);
+    if (body !== null) body.scrollTop = 0;
+  }
   // モードも既定へ戻す。edit のまま次のテストに入るとバーの見た目が変わる
   changeSettings({});
   // 前のテストの範囲・録画・監視をすべて捨てさせる
@@ -781,7 +814,7 @@ afterAll(async () => {
   // 例外が出力に混ざる。ここで出し切ってから終わらせる
   document.body.innerHTML = "";
   await flush();
-  // 空にした body を mount() が拾って 2 つの窓 (バーとパネル) を付け直す。jsdom は破棄の
+  // 空にした body を mount() が拾って 3 つの窓 (バー・区間・テロップ・設定) を付け直す。jsdom は破棄の
   // ときに body.innerHTML = "" をするので、窓が残っているとその DOM 変化が破棄後に
   // 配られる。窓を外すだけだと mount() がまた付け直すので、observer が見て
   // いない空の body に差し替えて、破棄のときに外すものを無くす
@@ -2635,7 +2668,7 @@ describe("拡大バーの下のテロップの帯", () => {
   });
 });
 
-describe("右側のパネル", () => {
+describe("区間・テロップの窓と設定の窓", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
 
   async function showEdit(telops: Telop[] = []): Promise<void> {
@@ -2644,27 +2677,30 @@ describe("右側のパネル", () => {
     await flush();
   }
 
-  test("body を作り直しても、パネルを body の直下に付け直す", async () => {
-    // buildPage は body を空にする。付け直さないと、以降はパネルが DOM に無く
+  test("body を作り直しても、2 つの窓を body の直下に付け直す", async () => {
+    // buildPage は body を空にする。付け直さないと、以降は窓が DOM に無く
     // 一覧も設定も操作できない
     buildPage();
     document.body.append(document.createElement("div"));
     await flush();
 
-    expect(panelElement().parentElement).toBe(document.body);
-    expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
+    expect(listElement().parentElement).toBe(document.body);
+    expect(settingsWindowElement().parentElement).toBe(document.body);
+    expect(document.querySelectorAll("#yt-clip-list").length).toBe(1);
+    expect(document.querySelectorAll("#yt-clip-settings").length).toBe(1);
   });
 
-  test("一覧と設定はパネルに入り、バーには拡大バー・テロップの帯の段・操作の行だけが残る", async () => {
+  test("一覧は区間・テロップの窓、設定は設定の窓に入り、バーには拡大バー・テロップの帯の段・操作の行だけが残る", async () => {
     await showEdit([TELOP]);
 
-    const body = panelBody();
-    // 区間の一覧 → テロップの一覧 → 設定の順
-    expect(body.children.length).toBe(3);
+    const body = listBody();
+    // 区間の一覧 → テロップの一覧の順。設定は入らない (別の窓)
+    expect(body.children.length).toBe(2);
     expect(body.children[0]?.querySelectorAll("[data-role='segment']").length).toBe(1);
     expect(body.children[1]?.querySelector("[data-role='add-telop']")).not.toBeNull();
     expect(body.children[1]?.querySelectorAll("[data-role='telop']").length).toBe(1);
-    expect(body.children[2]).toBe(settingsRoot());
+    expect(body.contains(settingsRoot())).toBe(false);
+    expect([...settingsBody().children]).toEqual([settingsRoot()]);
 
     const bar = barElement();
     expect(bar.querySelector("[data-role='segment']")).toBeNull();
@@ -2679,94 +2715,76 @@ describe("右側のパネル", () => {
     ).toBe(true);
   });
 
-  test("エディットで区間があるとパネルを出す", async () => {
-    await showEdit();
-    expect(panelElement().hidden).toBe(false);
+  test("見出しは中身の名前 (区間・テロップ / 設定)。折り畳みのボタンは無い", () => {
+    expect(listHeader().textContent).toBe("区間・テロップ");
+    expect(settingsHeader().textContent).toBe("設定");
+    expect(document.querySelector("[data-role='collapse']")).toBeNull();
   });
 
-  test("エディットでも区間が 0 個で設定を閉じていれば出さない", async () => {
+  test("エディットで区間があると区間・テロップの窓を出す。設定を閉じていれば設定の窓は出さない", async () => {
+    await showEdit();
+    expect(listElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(true);
+  });
+
+  test("エディットでも区間が 0 個なら区間・テロップの窓を出さない", async () => {
     changeSettings({ mode: "edit" });
     await flush();
-    expect(panelElement().hidden).toBe(true);
+    expect(listElement().hidden).toBe(true);
   });
 
-  test("シンプルでは ⚙ で設定を開いている間だけ出す", async () => {
+  test("⚙ で設定の窓が出て、もう一度押すと隠れる (シンプル)", async () => {
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
-    expect(panelElement().hidden).toBe(true);
+    expect(settingsWindowElement().hidden).toBe(true);
 
     clickButton("⚙");
-    expect(panelElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(false);
     expect(settingsRoot().hidden).toBe(false);
-    expect(panelBody().contains(settingsRoot())).toBe(true);
+    expect(settingsBody().contains(settingsRoot())).toBe(true);
+    // シンプルでは一覧が空なので、区間・テロップの窓は出ないまま
+    expect(listElement().hidden).toBe(true);
 
     clickButton("⚙");
     expect(settingsRoot().hidden).toBe(true);
-    expect(panelElement().hidden).toBe(true);
+    expect(settingsWindowElement().hidden).toBe(true);
   });
 
-  test("畳んでいても ⚙ で設定を開くとパネルが開く", async () => {
+  test("⚙ で設定を開閉しても、区間・テロップの窓はそのまま", async () => {
+    await showEdit([TELOP]);
+    const before = styleRect(listElement());
+
+    clickButton("⚙");
+    expect(settingsWindowElement().hidden).toBe(false);
+    expect(listElement().hidden).toBe(false);
+    expect(styleRect(listElement())).toEqual(before);
+
+    clickButton("⚙");
+    expect(settingsWindowElement().hidden).toBe(true);
+    expect(listElement().hidden).toBe(false);
+    expect(styleRect(listElement())).toEqual(before);
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+  });
+
+  test("⚙ で開くと設定の窓を前に出す (一覧の窓に重なって出ても潜らない)", async () => {
     await showEdit();
-    collapseButton().click();
-    expect(panelBody().hidden).toBe(true);
-    // 見出しは残る
-    expect(panelElement().hidden).toBe(false);
+    // 一覧の窓を触って、いちばん上にしておく
+    pointer(listBody(), "pointerdown", 0, 0);
 
     clickButton("⚙");
 
-    expect(panelBody().hidden).toBe(false);
-    expect(settingsRoot().hidden).toBe(false);
+    expect(Number(settingsWindowElement().style.zIndex)).toBeGreaterThan(
+      Number(listElement().style.zIndex),
+    );
   });
 
-  test("隠れて畳まれたパネルでも、⚙ で出して開いてから設定の先頭へ送る", () => {
-    // シンプルで設定を閉じている (パネルは隠れている) うえに畳んである
-    collapseButton().click();
-    const body = panelBody();
-    const target = settingsRoot();
-    // 隠れている間は寸法が 0 になる実機の振る舞いを写す。出す → 開く → 送る
-    // の順が崩れると、0 同士で測って送らない
-    const shown = (): boolean =>
-      !panelElement().hidden && !body.hidden && !target.hidden;
-    const spy = vi
-      .spyOn(Element.prototype, "getBoundingClientRect")
-      .mockImplementation(function (this: Element) {
-        if (this === body) return shown() ? rectAt(100, 400) : rectAt(0, 0);
-        if (this === target) return shown() ? rectAt(900, 300) : rectAt(0, 0);
-        return rectAt(0, 0);
-      });
-    try {
-      clickButton("⚙");
+  test("⚙ で開いても、区間・テロップの窓の中は送らない (設定は別の窓に出る)", async () => {
+    await showEdit([TELOP]);
+    listBody().scrollTop = 40;
 
-      expect(panelElement().hidden).toBe(false);
-      expect(body.hidden).toBe(false);
-      // 設定の先頭を本体の上端に揃える: 900 - 100
-      expect(body.scrollTop).toBe(800);
-    } finally {
-      spy.mockRestore();
-    }
-  });
+    clickButton("⚙");
 
-  test("⚙ で閉じるときは送らない", async () => {
-    await showEdit();
-    const body = panelBody();
-    const target = settingsRoot();
-    const spy = vi
-      .spyOn(Element.prototype, "getBoundingClientRect")
-      .mockImplementation(function (this: Element) {
-        if (this === body) return rectAt(100, 400);
-        if (this === target) return rectAt(900, 300);
-        return rectAt(0, 0);
-      });
-    try {
-      clickButton("⚙");
-      expect(body.scrollTop).toBe(800);
-
-      body.scrollTop = 0;
-      clickButton("⚙");
-      expect(body.scrollTop).toBe(0);
-    } finally {
-      spy.mockRestore();
-    }
+    expect(listBody().scrollTop).toBe(40);
   });
 
   test("モードを変えてバーを作り直しても、一覧と設定が 2 重にならない", async () => {
@@ -2777,37 +2795,38 @@ describe("右側のパネル", () => {
     changeSettings({ mode: "edit" });
     await flush();
 
-    expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
-    expect(panelBody().children.length).toBe(3);
+    expect(document.querySelectorAll("#yt-clip-list").length).toBe(1);
+    expect(document.querySelectorAll("#yt-clip-settings").length).toBe(1);
+    expect(listBody().children.length).toBe(2);
+    expect(settingsBody().children.length).toBe(1);
     expect(document.querySelectorAll("[data-role='add-telop']").length).toBe(1);
     expect(document.querySelectorAll("#yt-clip-setting-mode").length).toBe(1);
 
     // 入っているのは今の一覧。状態が届けば行が出る
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
-    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
   });
 
-  test("設定を開いた状態でモードを変えても、設定は開いたまま", async () => {
+  test("設定を開いた状態でモードを変えても、設定の窓は開いたまま", async () => {
     // シンプルで ⚙ を開く
     clickButton("⚙");
     expect(settingsRoot().hidden).toBe(false);
-    expect(panelElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(false);
 
     changeSettings({ mode: "edit" });
     await flush();
 
     // バーを作り直すと設定パネルも新しいものに替わるが、開いていたなら
-    // 開き直しておく (1 つのパネルを使い回す設計で、モードを変えた瞬間に
-    // 設定が消えるのは驚きが大きい)
+    // 開き直しておく (モードを変えた瞬間に設定が消えるのは驚きが大きい)
     expect(settingsRoot().hidden).toBe(false);
-    expect(panelElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(false);
 
     changeSettings({ mode: "simple" });
     await flush();
 
     expect(settingsRoot().hidden).toBe(false);
-    expect(panelElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(false);
   });
 
   test("バーを作り直しても、手元の区間で一覧を描き直す", async () => {
@@ -2818,14 +2837,16 @@ describe("右側のパネル", () => {
     document.body.append(document.createElement("div"));
     await flush();
 
-    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
-    expect(panelBody().querySelectorAll("[data-role='telop']").length).toBe(1);
-    expect(panelElement().hidden).toBe(false);
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(listBody().querySelectorAll("[data-role='telop']").length).toBe(1);
+    expect(listElement().hidden).toBe(false);
   });
 
-  test("全画面の間はパネルを隠し、抜けたら戻す", async () => {
+  test("全画面の間は区間・テロップの窓と設定の窓を隠し、抜けたら戻す", async () => {
     await showEdit();
-    expect(panelElement().hidden).toBe(false);
+    clickButton("⚙");
+    expect(listElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(false);
 
     Object.defineProperty(document, "fullscreenElement", {
       configurable: true,
@@ -2833,74 +2854,84 @@ describe("右側のパネル", () => {
     });
     try {
       document.dispatchEvent(new Event("fullscreenchange"));
-      expect(panelElement().hidden).toBe(true);
+      expect(listElement().hidden).toBe(true);
+      expect(settingsWindowElement().hidden).toBe(true);
 
       // 全画面の間に状態が届いても出さない
       emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
-      expect(panelElement().hidden).toBe(true);
+      expect(listElement().hidden).toBe(true);
+      expect(settingsWindowElement().hidden).toBe(true);
     } finally {
       Reflect.deleteProperty(document, "fullscreenElement");
     }
 
     document.dispatchEvent(new Event("fullscreenchange"));
-    expect(panelElement().hidden).toBe(false);
+    expect(listElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(false);
   });
 
-  test("別の動画へ移ると一覧を空にしてパネルを隠す。戻れば出す", async () => {
+  test("別の動画へ移ると一覧を空にして区間・テロップの窓を隠す。戻れば出す", async () => {
     await showEdit([TELOP]);
-    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
 
-    // 固定のパネルでは、動画 B の画面に A の区間が出続けると目立つ
+    // 動画 B の画面に A の区間が出続けると目立つ
     history.pushState({}, "", "/watch?v=video-b");
     document.body.append(document.createElement("div"));
     await flush();
 
-    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(0);
-    expect(panelBody().querySelectorAll("[data-role='telop']").length).toBe(0);
-    expect(panelElement().hidden).toBe(true);
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(0);
+    expect(listBody().querySelectorAll("[data-role='telop']").length).toBe(0);
+    expect(listElement().hidden).toBe(true);
 
     history.pushState({}, "", "/watch?v=video-a");
     document.body.append(document.createElement("div"));
     await flush();
 
-    expect(panelBody().querySelectorAll("[data-role='segment']").length).toBe(1);
-    expect(panelElement().hidden).toBe(false);
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(listElement().hidden).toBe(false);
   });
 
-  test("動画ページ以外ではパネルを出さない", async () => {
+  test("動画ページ以外では区間・テロップの窓も設定の窓も出さない", async () => {
+    await showEdit();
     clickButton("⚙");
-    expect(panelElement().hidden).toBe(false);
+    expect(listElement().hidden).toBe(false);
+    expect(settingsWindowElement().hidden).toBe(false);
 
     history.pushState({}, "", "/");
     document.body.append(document.createElement("div"));
     await flush();
 
-    expect(panelElement().hidden).toBe(true);
+    expect(listElement().hidden).toBe(true);
+    expect(settingsWindowElement().hidden).toBe(true);
   });
 
-  test("テーマを切り替えるとパネルの配色も変わる", async () => {
-    // パネルは body の直下でバーの外にある。バーの配色は継がれない
+  test("テーマを切り替えると 2 つの窓の配色も変わる", async () => {
+    // 窓は body の直下でバーの外にある。バーの配色は継がれない
     document.documentElement.setAttribute("dark", "");
     try {
       await flush();
-      expect(panelElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+      expect(listElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+      expect(settingsWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
     } finally {
       document.documentElement.removeAttribute("dark");
     }
     await flush();
-    expect(panelElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+    expect(listElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+    expect(settingsWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
   });
 });
 
-describe("足した行をパネルの見える範囲に入れる", () => {
+describe("足した行を区間・テロップの窓の見える範囲に入れる", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
 
   /**
    * 本体は画面の 100〜500px。行は並び順に 900px から 100px ずつ下に置く。
    * 末尾の行が選ばれたかを送り先の値で見分けられる
+   * **前提: 区間・テロップの窓は枠に入っていない** (読み込み時の v1 の組で浮いた窓。この stub はほかの要素の幅を 400 で返すので
+   * 差す先が使える扱いになり、枠に入っていると足した行は送らずタブを前に出すだけになる)。前の describe でダブルクリックしない
    */
   function placeRows(role: "segment" | "telop") {
-    const body = panelBody();
+    const body = listBody();
     return vi
       .spyOn(Element.prototype, "getBoundingClientRect")
       .mockImplementation(function (this: Element) {
@@ -2922,7 +2953,7 @@ describe("足した行をパネルの見える範囲に入れる", () => {
     return button;
   }
 
-  test("区間を足したら、畳んでいても開いて末尾の行へ送る", async () => {
+  test("区間を足したら、区間・テロップの窓の中を末尾の行へ送る", async () => {
     const first: ClipRange = { startSec: 83, endSec: 98 };
     const added: ClipRange = { startSec: 300, endSec: 315 };
     changeSettings({ mode: "edit" });
@@ -2930,53 +2961,68 @@ describe("足した行をパネルの見える範囲に入れる", () => {
     await flush();
     const spy = placeRows("segment");
     try {
-      collapseButton().click();
       video.element.currentTime = 300;
       clickButton("＋ 区間を追加");
       await flush();
       // 押した時点では行がまだ無い。送るのは状態機械の答えを描いた後
-      expect(panelBody().scrollTop).toBe(0);
+      expect(listBody().scrollTop).toBe(0);
 
       emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
 
-      expect(panelBody().hidden).toBe(false);
       // 末尾 (2 行目: 1000px) の先頭を本体の上端 (100px) に揃える
-      expect(panelBody().scrollTop).toBe(900);
+      expect(listBody().scrollTop).toBe(900);
 
       // 送るのは足した直後の 1 回だけ。見ている位置を勝手に戻さない
-      panelBody().scrollTop = 0;
+      listBody().scrollTop = 0;
       emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
-      expect(panelBody().scrollTop).toBe(0);
+      expect(listBody().scrollTop).toBe(0);
     } finally {
       spy.mockRestore();
     }
   });
 
-  test("テロップを足したら、畳んでいても開いて末尾の行へ送る", async () => {
+  test("テロップを足したら、区間・テロップの窓の中を末尾の行へ送る", async () => {
     const added: Telop = { startSec: 15, endSec: 18, text: "" };
     changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops: [TELOP], meta: META_A });
     await flush();
     const spy = placeRows("telop");
     try {
-      collapseButton().click();
       video.element.currentTime = 15;
       await flush();
       addTelopButton().click();
       await flush();
-      expect(panelBody().scrollTop).toBe(0);
+      expect(listBody().scrollTop).toBe(0);
 
       emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
 
-      expect(panelBody().hidden).toBe(false);
-      expect(panelBody().scrollTop).toBe(900);
+      expect(listBody().scrollTop).toBe(900);
 
-      panelBody().scrollTop = 0;
+      listBody().scrollTop = 0;
       emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
-      expect(panelBody().scrollTop).toBe(0);
+      expect(listBody().scrollTop).toBe(0);
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test("足した行へ送っても、区間・テロップの窓を前に出さない (前に出した設定の窓が潜らない)", async () => {
+    const first: ClipRange = { startSec: 83, endSec: 98 };
+    const added: ClipRange = { startSec: 300, endSec: 315 };
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [first], telops: [], meta: META_A });
+    await flush();
+    // 設定を見ながら区間を足す場面。⚙ で開いた設定の窓は前に出ている
+    clickButton("⚙");
+
+    video.element.currentTime = 300;
+    clickButton("＋ 区間を追加");
+    await flush();
+    emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
+
+    expect(Number(settingsWindowElement().style.zIndex)).toBeGreaterThan(
+      Number(listElement().style.zIndex),
+    );
   });
 
   test("足していない状態の通知では送らない", async () => {
@@ -2990,7 +3036,7 @@ describe("足した行をパネルの見える範囲に入れる", () => {
         meta: META_A,
       });
       await flush();
-      expect(panelBody().scrollTop).toBe(0);
+      expect(listBody().scrollTop).toBe(0);
     } finally {
       spy.mockRestore();
     }
@@ -3001,36 +3047,42 @@ describe("フロートの窓", () => {
   // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
   beforeEach(async () => {
     dblclick(barGrip());
-    dblclick(panelHeader());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
     await flush();
     layoutWrites = [];
   });
 
-  test("バーの窓とパネルの窓が body の直下に 1 つずつある", () => {
-    expect(barWindowElement().parentElement).toBe(document.body);
-    expect(panelElement().parentElement).toBe(document.body);
-    expect(document.querySelectorAll("#yt-clip-bar-window").length).toBe(1);
-    expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
+  test("3 つの窓 (バー・区間・テロップ・設定) が body の直下に 1 つずつある", () => {
+    for (const id of ["yt-clip-bar-window", "yt-clip-list", "yt-clip-settings"]) {
+      expect(document.querySelectorAll(`#${id}`).length).toBe(1);
+      expect(document.getElementById(id)?.parentElement).toBe(document.body);
+    }
     // バーの中身 (拡大バーと操作の行) は窓の中
     expect(barWindowElement().contains(barElement())).toBe(true);
   });
 
-  test("#below には何も置かない", () => {
+  test("#below にはドック枠だけを差し、最初の配置では隠しておく (窓の中身は置かない)", () => {
     const below = document.getElementById("below");
     if (below === null) throw new Error("#below がありません");
-    expect(below.children.length).toBe(0);
+    expect([...below.children].map((child) => child.id)).toEqual(["yt-clip-dock-below"]);
+    expect((below.firstElementChild as HTMLElement).style.display).toBe("none");
   });
 
   test("覚えた位置を読み込むまで、設定を開いていても窓を出さない", () => {
-    expect(windowsBeforeLayout).toEqual({ barHidden: true, panelHidden: true });
+    expect(windowsBeforeLayout).toEqual({ barHidden: true, listHidden: true, settingsHidden: true });
   });
 
-  test("覚えた位置で出る", () => {
+  test("覚えた位置で出る。古い形 (v1) のパネルの位置は区間・テロップの窓が継ぎ、設定の窓は最初の位置", () => {
     expect(windowsAfterLayout).toEqual({
       barHidden: false,
-      panelHidden: false,
+      // シンプルモードで一覧が空なので、区間・テロップの窓は隠れている (位置は当たっている)
+      listHidden: true,
+      settingsHidden: false,
       bar: { left: "40px", top: "500px", width: "700px", height: "" },
-      panel: { left: "300px", top: "120px", width: "360px", height: "400px" },
+      list: { left: "300px", top: "120px", width: "360px", height: "400px" },
+      // v1 に設定の窓は無い。区間・テロップの窓の最初の位置 (右 16px・上 68px) から下へ 32px
+      settings: { left: `${window.innerWidth - 416}px`, top: "100px", width: "400px", height: "" },
     });
   });
 
@@ -3090,10 +3142,33 @@ describe("フロートの窓", () => {
     }
   });
 
-  test("パネルの窓の最初の位置は右上 (右端から 16px・上 68px・幅 400px)", () => {
-    expect(styleRect(panelElement())).toEqual({
+  test("区間・テロップの窓の最初の位置は右上 (右端から 16px・上 68px・幅 400px)", () => {
+    expect(styleRect(listElement())).toEqual({
       left: `${window.innerWidth - 416}px`,
       top: "68px",
+      width: "400px",
+      height: "",
+    });
+  });
+
+  test("設定の窓の最初の位置は、区間・テロップの窓から下へ 32px だけずらす (left は同じ)", () => {
+    const list = styleRect(listElement());
+    const settings = styleRect(settingsWindowElement());
+    expect(settings.left).toBe(list.left);
+    expect(parseFloat(settings.top)).toBe(parseFloat(list.top) + 32);
+    expect(settings.width).toBe("400px");
+    expect(settings.height).toBe("");
+  });
+
+  test("区間・テロップの窓を動かしても、設定の窓の最初の位置は付いていかない", async () => {
+    await showList();
+    drag(listHeader(), -100, 20);
+
+    dblclick(settingsHeader());
+
+    expect(styleRect(settingsWindowElement())).toEqual({
+      left: `${window.innerWidth - 416}px`,
+      top: "100px",
       width: "400px",
       height: "",
     });
@@ -3117,36 +3192,138 @@ describe("フロートの窓", () => {
     await flush();
     expect(frame.style.left).toBe(`${left + 50}px`);
     expect(frame.style.top).toBe(`${top + 30}px`);
-    expect(layoutWrites).toEqual([{ bar: { left: left + 50, top: top + 30, width } }]);
+    // 組ごと書く (v2)。動かしていない窓の位置は書かない (float に bar だけ)
+    // 最初の配置の枠 (下の枠) の記憶から外れ、右の枠の記憶は残る
+    expect(layoutWrites).toEqual([
+      {
+        version: 2,
+        float: { bar: { left: left + 50, top: top + 30, width } },
+        docks: { side: { tabs: ["list", "settings"], active: "settings" } },
+      },
+    ]);
   });
 
-  test("パネルの窓は見出しをドラッグすると動き、位置を覚える", async () => {
-    clickButton("⚙");
-    const frame = panelElement();
+  test("区間・テロップの窓は見出しをドラッグすると動き、位置を覚える", async () => {
+    await showList();
+    const frame = listElement();
     const left = parseFloat(frame.style.left);
 
-    drag(panelHeader(), -100, 20);
+    drag(listHeader(), -100, 20);
     await flush();
 
     expect(frame.style.left).toBe(`${left - 100}px`);
     expect(frame.style.top).toBe("88px");
-    expect(layoutWrites).toEqual([{ panel: { left: left - 100, top: 88, width: 400 } }]);
+    // 動かしていないバーと設定の窓は書かない
+    expect(layoutWrites).toEqual([
+      {
+        version: 2,
+        float: { list: { left: left - 100, top: 88, width: 400 } },
+        docks: {
+          below: { tabs: ["bar"], active: "bar" },
+          side: { tabs: ["settings"], active: "settings" },
+        },
+      },
+    ]);
   });
 
-  test("つまみ・見出しをダブルクリックすると最初の位置に戻り、覚えた位置を消す", async () => {
+  test("設定の窓は見出しをドラッグすると動き、位置を覚える", async () => {
+    clickButton("⚙");
+    const frame = settingsWindowElement();
+    const left = parseFloat(frame.style.left);
+
+    drag(settingsHeader(), -100, 20);
+    await flush();
+
+    expect(frame.style.left).toBe(`${left - 100}px`);
+    expect(frame.style.top).toBe("120px");
+    expect(layoutWrites).toEqual([
+      {
+        version: 2,
+        float: { settings: { left: left - 100, top: 120, width: 400 } },
+        docks: { below: { tabs: ["bar"], active: "bar" }, side: { tabs: ["list"] } },
+      },
+    ]);
+  });
+
+  /** 区間・テロップの窓を出す (エディットで区間が 1 つある)。出すかは一覧の中身で決まる */
+  async function showList(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  test("画面に詰められた窓の覚えた位置を、ほかの窓を動かしたときに詰めた後の位置で上書きしない", async () => {
+    await showList();
+    // jsdom は寸法を持たない。一覧の窓の見出し (掴む場所) を幅 400・高さ 32 に決め打ちし、詰め方を測れるようにする
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this === listElement()) return boxAt(0, 0, 400, 300);
+        if (this === listHeader()) return boxAt(0, 0, 400, 32);
+        return boxAt(0, 0, 0, 0);
+      });
+    const setWidth = (width: number): void => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+      window.dispatchEvent(new Event("resize"));
+    };
+    try {
+      // 最初の位置 (1024 - 416 = 608, 68) から下へ 100px 動かして覚える
+      drag(listHeader(), 0, 100);
+      await flush();
+      const placed = { left: 608, top: 168, width: 400 };
+      expect((storedLayout as WindowLayout).float.list).toEqual(placed);
+
+      // ブラウザを狭めると、見出しが画面に残るところ (800 - 400) まで詰められる
+      setWidth(800);
+      expect(listElement().style.left).toBe("400px");
+
+      // その間にバーの窓を動かして覚えても、一覧の窓の覚えた位置は置いた場所のまま
+      // (窓の rect() から組を作ると、詰めた後の 400 で書かれて、広げ直しても戻らなくなる)
+      drag(barGrip(), 10, 0);
+      await flush();
+      const stored = storedLayout as WindowLayout;
+      expect(stored.float.list).toEqual(placed);
+      expect(Object.keys(stored.float).sort()).toEqual(["bar", "list"]);
+    } finally {
+      setWidth(1024);
+      spy.mockRestore();
+    }
+  });
+
+  test("ダブルクリックで戻した窓は組から消え、ほかの窓の覚えた位置は残る", async () => {
+    await showList();
+    drag(barGrip(), 30, 20);
+    drag(listHeader(), -100, 20);
+    await flush();
+    expect(Object.keys((storedLayout as WindowLayout).float).sort()).toEqual(["bar", "list"]);
+
+    dblclick(listHeader());
+    await flush();
+
+    const stored = storedLayout as WindowLayout;
+    expect(stored.version).toBe(2);
+    expect(Object.keys(stored.float)).toEqual(["bar"]);
+    expect(stored.docks).toEqual({ side: { tabs: ["list", "settings"], active: "list" } });
+  });
+
+  test("つまみ・見出しをダブルクリックすると最初の配置の枠に戻り (jsdom では枠が使えないので最初の位置に浮く)、覚えた位置を消す", async () => {
     const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
     try {
       dblclick(barGrip());
       drag(barGrip(), 100, 50);
-      drag(panelHeader(), -100, 20);
+      drag(listHeader(), -100, 20);
       await flush();
       expect(storedLayout).toEqual({
-        bar: { left: 124, top: 588, width: 800 },
-        panel: { left: window.innerWidth - 516, top: 88, width: 400 },
+        version: 2,
+        float: {
+          bar: { left: 124, top: 588, width: 800 },
+          list: { left: window.innerWidth - 516, top: 88, width: 400 },
+        },
+        docks: { side: { tabs: ["settings"], active: "settings" } },
       });
 
       dblclick(barGrip());
-      dblclick(panelHeader());
+      dblclick(listHeader());
       await flush();
 
       expect(styleRect(barWindowElement())).toEqual({
@@ -3155,9 +3332,16 @@ describe("フロートの窓", () => {
         width: "800px",
         height: "",
       });
-      expect(panelElement().style.left).toBe(`${window.innerWidth - 416}px`);
-      expect(panelElement().style.top).toBe("68px");
-      expect(storedLayout).toEqual({});
+      expect(listElement().style.left).toBe(`${window.innerWidth - 416}px`);
+      expect(listElement().style.top).toBe("68px");
+      expect(storedLayout).toEqual({
+        version: 2,
+        float: {},
+        docks: {
+          below: { tabs: ["bar"], active: "bar" },
+          side: { tabs: ["list", "settings"], active: "list" },
+        },
+      });
     } finally {
       spy.mockRestore();
     }
@@ -3181,20 +3365,28 @@ describe("フロートの窓", () => {
     expect(frame.style.left).toBe(`${parseFloat(placed.left) + 10}px`);
   });
 
-  test("最後に触った窓が上に来る", () => {
-    pointer(barElement(), "pointerdown", 0, 0);
-    expect(barWindowElement().style.zIndex).toBe("2001");
-    expect(panelElement().style.zIndex).toBe("2000");
+  test("触った順が新しいほど上に来る (3 つの窓)", async () => {
+    await showList();
+    clickButton("⚙");
+    const zIndexes = () =>
+      [barWindowElement(), listElement(), settingsWindowElement()].map((element) =>
+        Number(element.style.zIndex),
+      );
 
-    pointer(panelBody(), "pointerdown", 0, 0);
-    expect(panelElement().style.zIndex).toBe("2001");
-    expect(barWindowElement().style.zIndex).toBe("2000");
+    pointer(barElement(), "pointerdown", 0, 0);
+    pointer(listBody(), "pointerdown", 0, 0);
+    pointer(settingsBody(), "pointerdown", 0, 0);
+    expect(zIndexes()).toEqual([2000, 2001, 2002]);
+
+    // バーを触り直すとバーがいちばん上。直前に触った設定の窓は一覧の窓の上のまま
+    pointer(barElement(), "pointerdown", 0, 0);
+    expect(zIndexes()).toEqual([2002, 2000, 2001]);
   });
 
-  test("全画面の間は 2 つとも隠し、抜けたら戻す", () => {
+  test("全画面の間は 3 つとも隠し、抜けたら戻す", async () => {
+    await showList();
     clickButton("⚙");
-    expect(barWindowElement().hidden).toBe(false);
-    expect(panelElement().hidden).toBe(false);
+    expect(windowsHidden()).toEqual([false, false, false]);
 
     Object.defineProperty(document, "fullscreenElement", {
       configurable: true,
@@ -3202,31 +3394,28 @@ describe("フロートの窓", () => {
     });
     try {
       document.dispatchEvent(new Event("fullscreenchange"));
-      expect(barWindowElement().hidden).toBe(true);
-      expect(panelElement().hidden).toBe(true);
+      expect(windowsHidden()).toEqual([true, true, true]);
     } finally {
       Reflect.deleteProperty(document, "fullscreenElement");
     }
 
     document.dispatchEvent(new Event("fullscreenchange"));
-    expect(barWindowElement().hidden).toBe(false);
-    expect(panelElement().hidden).toBe(false);
+    expect(windowsHidden()).toEqual([false, false, false]);
   });
 
-  test("動画ページ以外では 2 つとも隠す。戻れば出す", async () => {
+  test("動画ページ以外では 3 つとも隠す。戻れば出す", async () => {
+    await showList();
     clickButton("⚙");
 
     history.pushState({}, "", "/");
     document.body.append(document.createElement("div"));
     await flush();
-    expect(barWindowElement().hidden).toBe(true);
-    expect(panelElement().hidden).toBe(true);
+    expect(windowsHidden()).toEqual([true, true, true]);
 
     history.pushState({}, "", "/watch?v=video-a");
     document.body.append(document.createElement("div"));
     await flush();
-    expect(barWindowElement().hidden).toBe(false);
-    expect(panelElement().hidden).toBe(false);
+    expect(windowsHidden()).toEqual([false, false, false]);
   });
 
   // resolution 追加 1 (Task 5 レビューの Minor): applyMode が中身の根を外した後に
@@ -3347,7 +3536,8 @@ describe("動かしていない窓の最初の位置を取り直す", () => {
   // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
   beforeEach(async () => {
     dblclick(barGrip());
-    dblclick(panelHeader());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
     await flush();
   });
 
@@ -3378,12 +3568,14 @@ describe("動かしていない窓の最初の位置を取り直す", () => {
     }
   });
 
-  test("パネルの窓も画面の幅に合わせて取り直す", () => {
+  test("区間・テロップの窓と設定の窓も画面の幅に合わせて取り直す", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
     try {
       window.dispatchEvent(new Event("resize"));
-      // 1440 - 16 - 400
-      expect(panelElement().style.left).toBe("1024px");
+      // 1440 - 16 - 400。設定の窓は left が同じで、下へ 32px
+      expect(listElement().style.left).toBe("1024px");
+      expect(settingsWindowElement().style.left).toBe("1024px");
+      expect(settingsWindowElement().style.top).toBe("100px");
     } finally {
       Object.defineProperty(window, "innerWidth", {
         configurable: true,
@@ -3392,7 +3584,8 @@ describe("動かしていない窓の最初の位置を取り直す", () => {
       });
       window.dispatchEvent(new Event("resize"));
     }
-    expect(panelElement().style.left).toBe("608px");
+    expect(listElement().style.left).toBe("608px");
+    expect(settingsWindowElement().style.left).toBe("608px");
   });
 
   test("プレイヤーの大きさが変わると取り直す (シアターモードの切り替えなど)", () => {
@@ -3477,5 +3670,465 @@ describe("動かしていない窓の最初の位置を取り直す", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("ドック枠とタブ", () => {
+  type Point = { x: number; y: number };
+  /** 差す先の箱 (jsdom はレイアウトを持たない)。帯 (目印 40px / タブの列 28px) はそれぞれの枠の上端に置く */
+  const BELOW = { left: 0, top: 600, width: 800 };
+  const SIDE = { left: 840, top: 60, width: 400 };
+  /**
+   * 下の枠の中のバーの窓の箱。引き出した窓の位置を、fitRect の上限 (YouTube のヘッダーの下 56px) に詰められない所で
+   * 測るため (26eaebd。判断メモ 33)
+   */
+  const DOCKED_BAR = { left: 0, top: 600, width: 800, height: 140 };
+  /** 帯の中の点 (下の枠 / 右の枠)。目印 (40px) にもタブの列 (28px) にも入る高さ */
+  const BELOW_BAND: Point = { x: 100, y: 610 };
+  const SIDE_BAND: Point = { x: 900, y: 70 };
+  /** どの帯からも離れた点 */
+  const AWAY: Point = { x: 300, y: 300 };
+  /** ドラッグを始める点 (帯の外) */
+  const START: Point = { x: 320, y: 320 };
+
+  /** 右の枠の差す先の幅。0 にすると使えない枠になる (1 列表示の代わり) */
+  let sideWidth = SIDE.width;
+  let layoutSpy: { mockRestore(): void } | null = null;
+
+  /** 差す先と、枠の中の帯・タブ・バーの窓の位置を決め打ちする。ほかの要素は 0 */
+  function stubDockLayout() {
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "below") return boxAt(BELOW.left, BELOW.top, BELOW.width, 0);
+        if (this.id === "secondary-inner") return boxAt(SIDE.left, SIDE.top, sideWidth, 0);
+        const box =
+          this.closest("#yt-clip-dock-below") !== null
+            ? BELOW
+            : this.closest("#yt-clip-dock-side") !== null
+              ? SIDE
+              : null;
+        if (box === BELOW && this.id === "yt-clip-bar-window") {
+          return boxAt(DOCKED_BAR.left, DOCKED_BAR.top, DOCKED_BAR.width, DOCKED_BAR.height);
+        }
+        const role = this instanceof HTMLElement ? this.dataset.role : undefined;
+        if (box !== null && role === "dock-marker") return boxAt(box.left, box.top, box.width, 40);
+        if (box !== null && role === "dock-tabs") return boxAt(box.left, box.top, box.width, 28);
+        if (box !== null && role === "dock-tab") return boxAt(box.left + 8, box.top, 100, 28);
+        return boxAt(0, 0, 0, 0);
+      });
+  }
+
+  function slotElement(slot: "below" | "side"): HTMLElement {
+    const element = document.getElementById(`yt-clip-dock-${slot}`);
+    if (element === null) throw new Error(`#yt-clip-dock-${slot} がありません`);
+    return element;
+  }
+
+  function tabElement(slot: "below" | "side", id: WindowId): HTMLElement {
+    const tab = slotElement(slot).querySelector<HTMLElement>(
+      `[data-role='dock-tab'][data-window='${id}']`,
+    );
+    if (tab === null) throw new Error(`${id} のタブがありません`);
+    return tab;
+  }
+
+  /** 出ているタブの文言 (並び順) */
+  function tabLabels(slot: "below" | "side"): string[] {
+    return [...slotElement(slot).querySelectorAll<HTMLElement>("[data-role='dock-tab']")]
+      .filter((tab) => tab.style.display !== "none")
+      .map((tab) => tab.textContent ?? "");
+  }
+
+  function activeLabel(slot: "below" | "side"): string | null {
+    return (
+      slotElement(slot).querySelector<HTMLElement>("[data-role='dock-tab'][data-active='true']")
+        ?.textContent ?? null
+    );
+  }
+
+  /** 落とし先の帯が出ているか (dock.ts がドラッグの間だけ data-drop-target を立てる) */
+  function bandShown(slot: "below" | "side"): boolean {
+    return slotElement(slot).querySelector("[data-drop-target='true']") !== null;
+  }
+
+  /** 最後に保存した組 */
+  function lastWrite(): WindowLayout {
+    const last = layoutWrites[layoutWrites.length - 1];
+    if (last === undefined) throw new Error("まだ保存していません");
+    return last as WindowLayout;
+  }
+
+  /** START で押し、AWAY を通って to で離す (帯へは一度その外から入れる。C2.3) */
+  function dropAt(handle: Element, to: Point): void {
+    pointer(handle, "pointerdown", START.x, START.y);
+    pointer(handle, "pointermove", AWAY.x, AWAY.y);
+    pointer(handle, "pointermove", to.x, to.y);
+    pointer(handle, "pointerup", to.x, to.y);
+  }
+
+  /**
+   * 右の枠のタブを (850, 70) で押し、20px 下で抜いてから to まで運んで離す (C2.4)。抜いた窓は (848, 74) に置かれ
+   * (タブの中の x 2・見出しの高さの半分 16)、to まで同じだけ動く
+   */
+  function pullSideTab(id: WindowId, to: Point): void {
+    const tab = tabElement("side", id);
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 90);
+    pointer(tab, "pointermove", to.x, to.y);
+    pointer(tab, "pointerup", to.x, to.y);
+  }
+
+  /** 下の枠のバーの ⠿ を (100, 700) で押し (窓の中の (100, 100))、10px 右で抜いてそのまま離す。バーは (10, 600) に浮く */
+  function pullBar(): void {
+    pointer(barGrip(), "pointerdown", 100, 700);
+    pointer(barGrip(), "pointermove", 110, 700);
+    pointer(barGrip(), "pointerup", 110, 700);
+  }
+
+  async function showEdit(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  /** 3 つの窓を最初の配置 (下の枠 [bar] / 右の枠 [list, settings]) に戻す (掴む場所のダブルクリック) */
+  function resetAll(): void {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
+  }
+
+  beforeEach(async () => {
+    sideWidth = SIDE.width;
+    layoutSpy = stubDockLayout();
+    // 差す先の幅を測り直させる (幅 0 の枠は使えない)。resize で placeUnmovedWindows → attach が走る
+    window.dispatchEvent(new Event("resize"));
+    await showEdit();
+    resetAll();
+    await flush();
+    layoutWrites = [];
+  });
+
+  afterEach(() => {
+    // 次のテストへ枠の中身を持ち越さない (最初の配置に戻す)
+    resetAll();
+    layoutSpy?.mockRestore();
+    layoutSpy = null;
+    window.dispatchEvent(new Event("resize"));
+  });
+
+  test("最初の配置では、バーは #below の枠、区間・テロップの窓と設定の窓は #secondary-inner の枠に入る。設定は開くまでタブを出さない", () => {
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(settingsWindowElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(listElement().style.position).toBe("static");
+    expect(slotElement("below").parentElement?.id).toBe("below");
+    expect(slotElement("side").parentElement?.id).toBe("secondary-inner");
+    expect(slotElement("below").style.display).toBe("block");
+    expect(slotElement("side").style.display).toBe("block");
+    // バーだけの枠はタブの列を出さない
+    expect(
+      slotElement("below").querySelector<HTMLElement>("[data-role='dock-tabs']")?.style.display,
+    ).toBe("none");
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+  });
+
+  test("タブを 8px 以上ドラッグすると枠から出て指の下に付いて動き、離した位置を覚える", async () => {
+    const tab = tabElement("side", "list");
+
+    // タブの箱は (848, 60) から (stub)。(850, 70) で押す = タブの中の (2, 10)
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 74);
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+
+    pointer(tab, "pointermove", 850, 90);
+    // 窓の左端 = 指 − タブの中で掴んだ x (850 − 2)、上端 = 指 − 見出しの高さの半分 (90 − 16)。幅は最初の位置の 400px
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual({ left: "848px", top: "74px", width: "400px", height: "" });
+    // 掴んだタブは指を離すまで残る (捕捉が付いている)
+    expect(tab.isConnected).toBe(true);
+
+    pointer(tab, "pointermove", 400, 300);
+    pointer(tab, "pointerup", 400, 300);
+    await flush();
+
+    expect(tab.isConnected).toBe(false);
+    expect(styleRect(listElement())).toEqual({ left: "398px", top: "284px", width: "400px", height: "" });
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: 398, top: 284, width: 400 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["settings"], active: "settings" },
+      },
+    });
+  });
+
+  test("浮いた区間・テロップの窓の見出しを右の枠の帯へ落とすと枠の末尾に入って前に出る。float は変えない", async () => {
+    pullSideTab("list", AWAY);
+    await flush();
+    expect(listElement().parentElement).toBe(document.body);
+
+    dropAt(listHeader(), SIDE_BAND);
+    await flush();
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(listElement().style.position).toBe("static");
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: 298, top: 284, width: 400 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["settings", "list"], active: "list" },
+      },
+    });
+  });
+
+  test("ドック中のバーの ⠿ を 8px 以上動かすと枠から出て、⠿ が指の下に残ったまま動く", async () => {
+    // 枠の中のバーの窓の左上は (0, 600) (stub)。⠿ を (100, 700) で掴む = 窓の中の (100, 100)
+    pointer(barGrip(), "pointerdown", 100, 700);
+    pointer(barGrip(), "pointermove", 104, 700);
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+
+    pointer(barGrip(), "pointermove", 110, 700);
+    expect(barWindowElement().parentElement).toBe(document.body);
+    // 窓の左上 = 指 − ⠿ の窓の中の位置。幅はプレイヤーの幅 (stub で 0) を最小の 480px に詰めたもの
+    expect(styleRect(barWindowElement())).toEqual({
+      left: "10px",
+      top: "600px",
+      width: "480px",
+      height: "",
+    });
+
+    pointer(barGrip(), "pointermove", 130, 720);
+    pointer(barGrip(), "pointerup", 130, 720);
+    await flush();
+
+    expect(styleRect(barWindowElement())).toEqual({
+      left: "30px",
+      top: "620px",
+      width: "480px",
+      height: "",
+    });
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { bar: { left: 30, top: 620, width: 480 } },
+      docks: { side: { tabs: ["list", "settings"], active: "settings" } },
+    });
+  });
+
+  test("⠿ で引き出したバーを下の枠の帯へ落とすと戻る。バーだけの枠はタブの列を出さない", async () => {
+    pullBar();
+    await flush();
+    expect(barWindowElement().parentElement).toBe(document.body);
+
+    dropAt(barGrip(), BELOW_BAND);
+    await flush();
+
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(
+      slotElement("below").querySelector<HTMLElement>("[data-role='dock-tabs']")?.style.display,
+    ).toBe("none");
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { bar: { left: 10, top: 600, width: 480 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["list", "settings"], active: "settings" },
+      },
+    });
+  });
+
+  test("バーをドラッグしている間、右の枠には落とし先を出さず、右の帯で離しても入らない", async () => {
+    pullBar();
+    await flush();
+
+    pointer(barGrip(), "pointerdown", START.x, START.y);
+    pointer(barGrip(), "pointermove", AWAY.x, AWAY.y);
+    expect(bandShown("below")).toBe(true);
+    expect(bandShown("side")).toBe(false);
+
+    pointer(barGrip(), "pointermove", SIDE_BAND.x, SIDE_BAND.y);
+    pointer(barGrip(), "pointerup", SIDE_BAND.x, SIDE_BAND.y);
+    await flush();
+
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(bandShown("below")).toBe(false);
+    expect(lastWrite().docks).toEqual({ side: { tabs: ["list", "settings"], active: "settings" } });
+  });
+
+  test("浮いた窓の見出しをダブルクリックすると最初の配置の枠 (区間・テロップ → 設定の並び) に戻って前に出て、float から消える", async () => {
+    pullSideTab("list", AWAY);
+    await flush();
+
+    dblclick(listHeader());
+    await flush();
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: {},
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["list", "settings"], active: "list" },
+      },
+    });
+  });
+
+  test("別の枠に入れた窓のタブをダブルクリックしても、最初の配置の枠に戻る", async () => {
+    // 区間・テロップのタブを下の枠 (バーだけなので目印) へ
+    const tab = tabElement("side", "list");
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 90);
+    pointer(tab, "pointermove", AWAY.x, AWAY.y);
+    pointer(tab, "pointermove", BELOW_BAND.x, BELOW_BAND.y);
+    pointer(tab, "pointerup", BELOW_BAND.x, BELOW_BAND.y);
+    await flush();
+    expect(tabLabels("below")).toEqual(["バー", "区間・テロップ"]);
+
+    dblclick(tabElement("below", "list"));
+    await flush();
+
+    expect(tabLabels("below")).toEqual([]);
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    // 下の枠の前のタブ (区間・テロップ) は抜けたので無い扱い。表示はバーだけ
+    expect(lastWrite().docks).toEqual({
+      below: { tabs: ["bar"] },
+      side: { tabs: ["list", "settings"], active: "list" },
+    });
+  });
+
+  test("右の枠の差す先が幅 0 になると、中の窓は float に位置があっても最初の位置の浮いた窓で出る。戻ると枠に戻る", async () => {
+    // 引き出して置き、戻す (float に位置がある)
+    pullSideTab("list", AWAY);
+    await flush();
+    dropAt(listHeader(), SIDE_BAND);
+    await flush();
+
+    sideWidth = 0;
+    window.dispatchEvent(new Event("resize"));
+
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual({
+      left: `${window.innerWidth - 416}px`,
+      top: "68px",
+      width: "400px",
+      height: "",
+    });
+    expect(slotElement("side").style.display).toBe("none");
+
+    sideWidth = SIDE.width;
+    window.dispatchEvent(new Event("resize"));
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+  });
+
+  test("退避中の窓を動かすと、その時点で浮いた窓になり、枠の記憶からも外れる", async () => {
+    sideWidth = 0;
+    window.dispatchEvent(new Event("resize"));
+    layoutWrites = [];
+
+    drag(listHeader(), 30, 20);
+    await flush();
+
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: window.innerWidth - 386, top: 88, width: 400 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["settings"], active: "settings" },
+      },
+    });
+    sideWidth = SIDE.width;
+    window.dispatchEvent(new Event("resize"));
+    expect(listElement().parentElement).toBe(document.body);
+  });
+
+  test("YouTube が差す先の子を作り直しても (replaceChildren)、mount で枠を中の窓ごと先頭に差し直す", async () => {
+    const slot = slotElement("side");
+    const inner = document.getElementById("secondary-inner");
+    if (inner === null) throw new Error("#secondary-inner がありません");
+
+    const related = document.createElement("div");
+    related.id = "related";
+    inner.replaceChildren(related);
+    expect(slot.isConnected).toBe(false);
+    await flush();
+
+    expect(inner.firstElementChild).toBe(slot);
+    expect(slot.contains(listElement())).toBe(true);
+  });
+
+  test("別の動画へ移ると区間・テロップのタブが消えて右の枠が隠れ、戻ると出る", async () => {
+    history.pushState({}, "", "/watch?v=video-b");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(tabLabels("side")).toEqual([]);
+    expect(slotElement("side").style.display).toBe("none");
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(slotElement("side").style.display).toBe("block");
+  });
+
+  test("全画面の間は枠も隠し、抜けたら戻す", async () => {
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(slotElement("below").style.display).toBe("none");
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(slotElement("below").style.display).toBe("block");
+  });
+
+  test("⚙ で設定を開くと、ドック中の設定のタブが前に出る (閉じるとタブが消える)", async () => {
+    // 最初の配置 (右の枠 [list, settings]) で、区間・テロップのタブを押して前に出しておく
+    const listTab = tabElement("side", "list");
+    pointer(listTab, "pointerdown", 850, 70);
+    pointer(listTab, "pointerup", 850, 70);
+    expect(activeLabel("side")).toBe("区間・テロップ");
+
+    clickButton("⚙");
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
+    expect(activeLabel("side")).toBe("設定");
+
+    clickButton("⚙");
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+
+    clickButton("⚙");
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
+    expect(activeLabel("side")).toBe("設定");
+  });
+
+  test("区間を足すと、ドック中の区間・テロップのタブが前に出る (窓の中は送らない)", async () => {
+    // 最初の配置で ⚙ を開き、設定のタブを前に出しておく
+    clickButton("⚙");
+    await flush();
+    expect(activeLabel("side")).toBe("設定");
+
+    video.element.currentTime = 300;
+    clickButton("＋ 区間を追加");
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [RANGE, { startSec: 300, endSec: 315 }],
+      telops: [],
+      meta: META_A,
+    });
+
+    expect(activeLabel("side")).toBe("区間・テロップ");
+    expect(listBody().scrollTop).toBe(0);
   });
 });
