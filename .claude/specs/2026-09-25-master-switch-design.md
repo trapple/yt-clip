@@ -486,3 +486,6 @@ E2E (`e2e/smoke.spec.ts`。録画しないので `npm run e2e` に入れる) と
   `youtube.ts` の import 時の副作用を `start()` へ移す方法 (モジュールの `let` を初期値に戻す関数を 1 つ持つ) を決める
 - [review:spec/依頼者の代理人/fable] 2 往復目 Approved。残りの Recommendations 4 件 (中止の応答で片付けるための専用の口か state/changed だけに倒すか / describeSwitch の hint とモックの一致 / 対象タブが消えて「中止しています…」が残るときの抜け道を manual-check に / reconcile() を呼ぶ「送り終えた」位置 (notify の then・catch 両方)) は plan の判断メモで扱う
 - [選択] 実装スタイル: D (branch + SDD)。branch は feat/dockable-windows (C2 完了、HEAD bb0bd30) から分岐した feat/master-switch (C2 のドック枠も片付け対象のため C2 の上に積む)
+- [plan] .claude/plans/2026-09-25-master-switch.md (10 タスク、判断メモ 35)。[review:plan/ゼロ context の実装者/fable] 1 往復目 Issues 3 件 (advanceToSegment の
+  非同期の続きが棚卸しから漏れていた / テストの期待件数 / grep パターン) → 修正。Recommendations を取り込み、cancelForSwitch の応答の guard に stateSeq を新設。
+  2 往復目 Approved。残りの Recommendations (stale() が同じ録画の中の状態の進みでも応答を捨てるトレードオフの明記 / 継ぎ目のテストの見方) は実装時に扱う。Gate は付けない
