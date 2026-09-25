@@ -14,24 +14,33 @@ export type { WindowRect } from "@/content/window-layout";
 
 /*
  * 重なり順。**YouTube のヘッダー (#masthead-container、z-index 2020。出所は side-panel.ts の
- * 実測のコメント) より下**、ページ本体より上。2 つの窓が重なったら、最後に触った窓を 1 つ上げる
- * (spec A.1)
+ * 実測のコメント) より下**、ページ本体より上。窓が重なったら、**触った順が新しいほど上**
+ * (Z_BASE + 触った順。窓は 3 つなので最大 2002。窓の分割の spec C1.1)。
+ * 「最後に触った窓だけ 1 つ上げ、残りは同じ値」にしない: 窓が 3 つになると残り 2 つの順が
+ * DOM の順で決まり、直前に触った窓がその前に触った窓の下に潜る
  */
-const Z_BACK = 2000;
-const Z_FRONT = 2001;
+const Z_BASE = 2000;
 /**
  * 高さを決めていない「幅と高さ」の窓 (パネル) の下端と、画面の下端との間。右側パネルの
  * 最大の高さ (画面の下端から 16px) と同じ
  */
 const BOTTOM_GAP_PX = 16;
 
-/** 今ある窓の枠。最後に触った窓を上げるとき、ほかの窓を下げるのに使う */
-const liveWindows = new Set<HTMLElement>();
+/**
+ * 今ある窓の枠を、下から上への順に並べたもの (末尾がいちばん上)。作った窓は**いちばん下**に
+ * 入れる。まだ触っていない窓が、触った窓の上に出ないように
+ */
+let stack: HTMLElement[] = [];
 
-function bringToFront(target: HTMLElement): void {
-  for (const element of liveWindows) {
-    element.style.zIndex = String(element === target ? Z_FRONT : Z_BACK);
-  }
+/**
+ * target をいちばん上にし、すべての窓の z-index を並びどおりに振り直す。**毎回全部を振り直す。**
+ * 上げた窓だけに値を足していくと、触るたびに値が伸びて YouTube のヘッダー (2020) を越える
+ */
+function raise(target: HTMLElement): void {
+  stack = [...stack.filter((element) => element !== target), target];
+  stack.forEach((element, index) => {
+    element.style.zIndex = String(Z_BASE + index);
+  });
 }
 
 /**
@@ -66,6 +75,11 @@ export type FloatingWindow = {
    * place(rect()) で代えない: 詰めた後の位置で置いた場所を上書きし、ブラウザを大きく戻しても戻らない
    */
   refit(): void;
+  /**
+   * この窓をいちばん上に出す (窓のどこかを押したときと同じ)。押していないのに前に出したいとき
+   * (⚙ で設定の窓を開いたとき) に youtube.ts が呼ぶ
+   */
+  bringToFront(): void;
   destroy(): void;
 };
 
@@ -85,7 +99,7 @@ export type FloatingWindowOptions = {
 export function createFloatingWindow(options: FloatingWindowOptions): FloatingWindow {
   const element = document.createElement("div");
   element.id = options.id;
-  element.style.cssText = `${FLOATING_WINDOW_STYLE.root}z-index:${Z_BACK};`;
+  element.style.cssText = `${FLOATING_WINDOW_STYLE.root}z-index:${Z_BASE};`;
 
   let header: HTMLElement | null = null;
   let headerActions: HTMLElement | null = null;
@@ -263,9 +277,9 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     });
   }
 
-  // 窓のどこを押しても、その窓を上にする (最後に触った窓が上。spec A.1)。捕捉の段階で
-  // 拾うのは、中の部品 (拡大バーのハンドルなど) が伝播を扱っても漏らさないため
-  element.addEventListener("pointerdown", () => bringToFront(element), true);
+  // 窓のどこを押しても、その窓を上にする (触った順が新しいほど上。窓の分割の spec C1.1)。捕捉の
+  // 段階で拾うのは、中の部品 (拡大バーのハンドルなど) が伝播を扱っても漏らさないため
+  element.addEventListener("pointerdown", () => raise(element), true);
   resizeGrip.addEventListener("pointerdown", (event: PointerEvent) => {
     beginDrag(resizeGrip, "resize", event);
   });
@@ -277,7 +291,7 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
    */
   const onResize = (): void => apply(requested);
   window.addEventListener("resize", onResize);
-  liveWindows.add(element);
+  stack = [element, ...stack];
 
   apply(requested);
   // 中身が入り、出す判断がされるまでは出さない。空の枠だけを出さない
@@ -315,9 +329,13 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
       apply(requested);
     },
 
+    bringToFront(): void {
+      raise(element);
+    },
+
     destroy(): void {
       window.removeEventListener("resize", onResize);
-      liveWindows.delete(element);
+      stack = stack.filter((candidate) => candidate !== element);
       element.remove();
     },
   };

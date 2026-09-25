@@ -530,6 +530,50 @@ describe("重なり順とダブルクリック", () => {
     expect(a.element.style.zIndex).toBe("2000");
   });
 
+  test("3 つの窓は触った順が新しいほど上 (2000 + 触った順)", () => {
+    const a = makeWindow().frame;
+    const b = makeWindow().frame;
+    const c = makeWindow().frame;
+    const zIndexes = () => [a, b, c].map((frame) => frame.element.style.zIndex);
+
+    pointer(a.body, "pointerdown", 0, 0);
+    pointer(b.body, "pointerdown", 0, 0);
+    pointer(c.body, "pointerdown", 0, 0);
+    expect(zIndexes()).toEqual(["2000", "2001", "2002"]);
+
+    // a を触り直すと a がいちばん上。直前に触った c は、その前に触った b の上のまま
+    // (「最後に触った窓だけ上げる」だと b と c が同じ値になり、DOM の順で c が潜りうる)
+    pointer(a.body, "pointerdown", 0, 0);
+    expect(zIndexes()).toEqual(["2002", "2000", "2001"]);
+  });
+
+  test("bringToFront で、押さずにいちばん上に出す", () => {
+    const a = makeWindow().frame;
+    const b = makeWindow().frame;
+    pointer(a.body, "pointerdown", 0, 0);
+    expect(a.element.style.zIndex).toBe("2001");
+
+    b.bringToFront();
+
+    expect(b.element.style.zIndex).toBe("2001");
+    expect(a.element.style.zIndex).toBe("2000");
+  });
+
+  test("消した窓は重なり順から外す (残った窓の z-index が詰まる)", () => {
+    const a = makeWindow().frame;
+    const b = makeWindow().frame;
+    const c = makeWindow().frame;
+    pointer(a.body, "pointerdown", 0, 0);
+    pointer(b.body, "pointerdown", 0, 0);
+    pointer(c.body, "pointerdown", 0, 0);
+
+    c.destroy();
+    a.bringToFront();
+
+    expect(b.element.style.zIndex).toBe("2000");
+    expect(a.element.style.zIndex).toBe("2001");
+  });
+
   test("見出しのダブルクリックで onResetRequest を呼ぶ。見出しの中のボタンでは呼ばない", () => {
     const { frame, onResetRequest } = makeWindow();
     const button = document.createElement("button");
