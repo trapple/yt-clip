@@ -164,6 +164,36 @@ test("YouTube の再生画面に IN/OUT UI が注入される", async () => {
   await page.close();
 });
 
+// spa-inject: 検索結果・ホームから動画を押しても、YouTube の中の移動は SPA でドキュメントの読み込みが起きない。
+// content script の matches が /watch* だけだと拡張が入らず、読み込み直すまで何も出なかった
+test("検索結果から動画を押して (SPA で) 動画ページへ入ってもバーが出る。動画ページ以外では何も差さない", async () => {
+  test.setTimeout(120_000);
+  // 前提を自分で作る: オン (オフの項目の終わり方に依存しない)
+  await writeEnabled(true);
+  const page = await context.newPage();
+  try {
+    await page.goto("https://www.youtube.com/results?search_query=big+buck+bunny", {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
+    const firstVideo = page.locator('a#video-title[href^="/watch"]').first();
+    await firstVideo.waitFor({ state: "visible", timeout: 30_000 });
+    // 検索結果 (動画ページ以外) では拡張の要素が 0
+    expect(await countOurElements(page)).toBe(0);
+
+    await firstVideo.click();
+    await page.waitForURL(/\/watch\?/, { timeout: 30_000 });
+    await expect(page.locator("#yt-clip-bar")).toBeVisible({ timeout: 15_000 });
+
+    // 戻る (SPA) と、動画ページに差したもの (窓・ドック枠) が残らない
+    await page.goBack({ waitUntil: "commit", timeout: 30_000 });
+    await page.waitForURL(/\/results\?/, { timeout: 30_000 });
+    await expect.poll(() => countOurElements(page), { timeout: 5_000 }).toBe(0);
+  } finally {
+    await page.close();
+  }
+});
+
 test("IN を指定するとページ内で録画を始められる", async () => {
   const page = await context.newPage();
   await page.goto(TEST_VIDEO, { waitUntil: "domcontentloaded", timeout: 60_000 });
