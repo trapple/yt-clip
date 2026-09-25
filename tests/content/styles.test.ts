@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { BAR_STYLE, SIDE_PANEL_STYLE, applyPalette, isDarkTheme } from "@/content/styles";
+import {
+  BAR_STYLE,
+  FLOATING_WINDOW_STYLE,
+  RANGE_STYLE,
+  SIDE_PANEL_STYLE,
+  TELOP_TRACK_STYLE,
+  applyPalette,
+  isDarkTheme,
+} from "@/content/styles";
 
 describe("isDarkTheme", () => {
   beforeEach(() => {
@@ -108,18 +116,77 @@ describe("状態の文言", () => {
 });
 
 describe("右側のパネル", () => {
-  test("地はパネル用の色で塗る", () => {
-    expect(SIDE_PANEL_STYLE.root).toContain("background:var(--ytc-panel)");
-  });
-
   test("本体の中だけでスクロールする", () => {
     expect(SIDE_PANEL_STYLE.body).toContain("overflow-y:auto");
     // flex の子は min-height:0 が無いと中身より縮まず、パネルごと伸びる
     expect(SIDE_PANEL_STYLE.body).toContain("min-height:0");
   });
 
-  test("display は持たない (出し入れは side-panel.ts が決める)", () => {
-    expect(SIDE_PANEL_STYLE.root).not.toContain("display:");
+  test("本体は display を持たない (畳むときの出し入れは side-panel.ts が決める)", () => {
     expect(SIDE_PANEL_STYLE.body).not.toContain("display:");
+  });
+
+  test("枠の見た目 (地・見出し) は持たない (窓の枠が持つ)", () => {
+    expect(Object.keys(SIDE_PANEL_STYLE)).toEqual(["collapseButton", "body"]);
+  });
+});
+
+describe("フロートの窓", () => {
+  test("画面に固定し、地はパネル用の色で塗る (下のページが透けない)", () => {
+    expect(FLOATING_WINDOW_STYLE.root).toContain("position:fixed");
+    expect(FLOATING_WINDOW_STYLE.root).toContain("background:var(--ytc-panel)");
+  });
+
+  test("display は持たない (出し入れは floating-window.ts が決める)", () => {
+    expect(FLOATING_WINDOW_STYLE.root).not.toContain("display:");
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).not.toContain("display:");
+  });
+
+  test("見出しは掴めることが分かるカーソルで、文字を選ばせない", () => {
+    expect(FLOATING_WINDOW_STYLE.header).toContain("cursor:move");
+    expect(FLOATING_WINDOW_STYLE.header).toContain("user-select:none");
+  });
+
+  test("右下のつまみは 16px 四方", () => {
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("width:16px");
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("height:16px");
+  });
+});
+
+describe("バーの窓", () => {
+  test("中身の根は縁も外の余白も持たない (窓の枠が持つ。2 重にしない)", () => {
+    expect(BAR_STYLE.root).not.toContain("border:");
+    expect(BAR_STYLE.root).not.toContain("margin:");
+  });
+
+  test("つまみは掴めることが分かるカーソルで、文字を選ばせない", () => {
+    expect(BAR_STYLE.grip).toContain("cursor:move");
+    expect(BAR_STYLE.grip).toContain("user-select:none");
+    expect(BAR_STYLE.grip).toContain("touch-action:none");
+  });
+});
+
+describe("テロップの帯の段", () => {
+  test("拡大バーのトラックとの間を 4px に詰め、高さは 2 段ぶん (14 + 2 + 14) に固定する", () => {
+    // バーの縦の並びは gap:10px。-6px で 4px になる (spec B.3。予算 34px)
+    expect(BAR_STYLE.root).toContain("gap:10px");
+    expect(TELOP_TRACK_STYLE.root).toContain("margin-top:-6px");
+    expect(TELOP_TRACK_STYLE.root).toContain("height:30px");
+    expect(TELOP_TRACK_STYLE.band).toContain("height:14px");
+    // 「+N」は 2 段目の高さ (14 + 2) に置く
+    expect(TELOP_TRACK_STYLE.overflow).toContain("top:16px");
+  });
+
+  test("根は display を持たない (出し入れは telop-track.ts が決める)", () => {
+    expect(TELOP_TRACK_STYLE.root).not.toContain("display");
+  });
+
+  test("左右の見えない時刻は、拡大バーのラベルと同じ文字の大きさ・数字の幅・間で並ぶ", () => {
+    // 同じでないと、帯の段の左右が拡大バーのトラックの左右とずれる
+    for (const rule of ["gap:10px", "font-size:12px", "font-variant-numeric:tabular-nums"]) {
+      expect(RANGE_STYLE.root).toContain(rule);
+      expect(TELOP_TRACK_STYLE.root).toContain(rule);
+    }
+    expect(TELOP_TRACK_STYLE.ghost).toContain("visibility:hidden");
   });
 });

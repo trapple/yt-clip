@@ -250,6 +250,24 @@ function changeSettings(next: Record<string, unknown>): void {
   storageListener?.({ settings: { newValue: next } }, "sync");
 }
 
+/** chrome.storage.local の windowLayout (覚えた窓の位置)。読み込み時の値は beforeAll で入れる */
+let storedLayout: unknown = undefined;
+/** chrome.storage.local へ書いた windowLayout。書いた順 */
+let layoutWrites: unknown[] = [];
+/**
+ * 読み込み時の windowLayout の読み込みを止めておく。beforeAll が離す。
+ * 止めている間に「窓がまだ出ていない」ことを確かめる
+ */
+let releaseLayout: () => void = () => undefined;
+const layoutGate = new Promise<void>((resolve) => {
+  releaseLayout = resolve;
+});
+/** 読み込み時に覚えていた窓の位置。この位置で出ることを確かめる (jsdom の画面 1024x768 に収まる値) */
+const LAYOUT_AT_LOAD = {
+  bar: { left: 40, top: 500, width: 700 },
+  panel: { left: 300, top: 120, width: 360, height: 400 },
+};
+
 /**
  * 描ける canvas の 2D 文脈のモック。プレビューと合成が呼ぶものだけ持つ。
  *
@@ -290,6 +308,16 @@ let getContextSpy: ReturnType<typeof spyOnGetContext> | null = null;
 
 function useDefaultCanvasContext(): void {
   getContextSpy?.mockImplementation(() => makeCanvasContext());
+}
+
+/** ResizeObserver の stub が見ている要素と、大きさが変わったときに呼ぶもの */
+const resizeObservers: { callback: () => void; targets: Set<Element> }[] = [];
+
+/** target を見ている ResizeObserver に、大きさが変わったことを届ける */
+function resizeElement(target: Element): void {
+  for (const entry of resizeObservers) {
+    if (entry.targets.has(target)) entry.callback();
+  }
 }
 
 function installGlobals(): void {
@@ -341,6 +369,17 @@ function installGlobals(): void {
           Promise.resolve({ settings: storedSettings }),
         set: (): Promise<void> => Promise.resolve(),
       },
+      // 窓の位置 (window-layout.ts)。読み込み時の 1 回は layoutGate が離されるまで返さない
+      local: {
+        get: async (): Promise<Record<string, unknown>> => {
+          await layoutGate;
+          return storedLayout === undefined ? {} : { windowLayout: storedLayout };
+        },
+        set: async (items: Record<string, unknown>): Promise<void> => {
+          storedLayout = items.windowLayout;
+          layoutWrites.push(items.windowLayout);
+        },
+      },
       // 別のタブで設定を変えられたときに拾う経路
       onChanged: {
         addListener: (fn: StorageListener): void => {
@@ -382,13 +421,30 @@ function installGlobals(): void {
     },
   });
 
-  // プレビュー (telop-preview.ts) のため。jsdom は ResizeObserver を持たず、
-  // canvas も描けない (getContext は "Not implemented" を出して null を返す)
+  // jsdom は Pointer Capture を持たない (窓のドラッグ floating-window.ts が呼ぶ)
+  Element.prototype.setPointerCapture = (): void => undefined;
+  Element.prototype.releasePointerCapture = (): void => undefined;
+
+  // プレビュー (telop-preview.ts) と、プレイヤーの大きさの変化で窓を置き直す (youtube.ts) ため。
+  // jsdom は ResizeObserver を持たず、canvas も描けない (getContext は "Not implemented" を
+  // 出して null を返す)。見ている要素を覚えておき、resizeElement で大きさの変化を起こす
   vi.stubGlobal(
     "ResizeObserver",
     class {
-      observe(): void {}
-      disconnect(): void {}
+      private readonly entry: { callback: () => void; targets: Set<Element> };
+      constructor(callback: () => void) {
+        this.entry = { callback, targets: new Set() };
+        resizeObservers.push(this.entry);
+      }
+      observe(target: Element): void {
+        this.entry.targets.add(target);
+      }
+      unobserve(target: Element): void {
+        this.entry.targets.delete(target);
+      }
+      disconnect(): void {
+        this.entry.targets.clear();
+      }
     },
   );
   getContextSpy = spyOnGetContext();
@@ -507,6 +563,89 @@ function settingsRoot(): HTMLElement {
   return root;
 }
 
+/** バーの窓の枠 (外形)。中身の根 #yt-clip-bar はこの中にある */
+function barWindowElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-bar-window");
+  if (element === null) throw new Error("バーの窓が見つかりません");
+  return element;
+}
+
+/** バーの窓を動かすつまみ (⠿)。操作の行の左端にある */
+function barGrip(): HTMLElement {
+  const grip = barElement().querySelector<HTMLElement>("[data-role='grip']");
+  if (grip === null) throw new Error("つまみが見つかりません");
+  return grip;
+}
+
+/** パネルの窓の見出し (掴んで動かす所) */
+function panelHeader(): HTMLElement {
+  const header = panelElement().querySelector<HTMLElement>("[data-role='window-header']");
+  if (header === null) throw new Error("パネルの見出しが見つかりません");
+  return header;
+}
+
+/** 位置と大きさを決め打ちした箱 (rectAt は左 0・幅 400 に固定なので別に持つ) */
+function boxAt(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** jsdom は PointerEvent を持たない。MouseEvent に pointer* の名前を付けて配る */
+function pointer(target: Element, type: string, x: number, y: number): void {
+  target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+}
+
+/** (100, 100) で押し、dx / dy だけ動かして離す */
+function drag(target: Element, dx: number, dy: number): void {
+  pointer(target, "pointerdown", 100, 100);
+  pointer(target, "pointermove", 100 + dx, 100 + dy);
+  pointer(target, "pointerup", 100 + dx, 100 + dy);
+}
+
+function dblclick(target: Element): void {
+  target.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+}
+
+/** 窓の枠に当てた位置と大きさ */
+function styleRect(element: HTMLElement): {
+  left: string;
+  top: string;
+  width: string;
+  height: string;
+} {
+  return {
+    left: element.style.left,
+    top: element.style.top,
+    width: element.style.width,
+    height: element.style.height,
+  };
+}
+
+/** プレイヤーの画面上の位置とバーの窓の高さを決め打ちする。ほかの要素は 0 */
+function placePlayer(
+  player: { left: number; top: number; width: number; height: number },
+  barHeight: number,
+) {
+  return vi
+    .spyOn(Element.prototype, "getBoundingClientRect")
+    .mockImplementation(function (this: Element) {
+      if (this.id === "movie_player") {
+        return boxAt(player.left, player.top, player.width, player.height);
+      }
+      if (this.id === "yt-clip-bar-window") return boxAt(0, 0, 0, barHeight);
+      return boxAt(0, 0, 0, 0);
+    });
+}
+
 /** 実際に作られた MediaRecorder。無ければ録画が始まっていない */
 function startedRecorder(): FakeRecorder {
   const recorder = recorders[0];
@@ -534,12 +673,24 @@ let restoredAtLoad = {
   labels: [] as string[],
 };
 
+/** 覚えた位置を読み込む前の窓 (設定を開いてパネルに中身がある状態) */
+let windowsBeforeLayout = { barHidden: false, panelHidden: false };
+/** 覚えた位置を読み込んだ後の窓 */
+let windowsAfterLayout = {
+  barHidden: true,
+  panelHidden: true,
+  bar: { left: "", top: "", width: "", height: "" },
+  panel: { left: "", top: "", width: "", height: "" },
+};
+
 beforeAll(async () => {
   buildPage();
   installGlobals();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
   swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+  // 前に動かした窓の位置を覚えている場面を再現する
+  storedLayout = LAYOUT_AT_LOAD;
 
   // chrome を用意してから読み込む。import 時に listener と observer を張る
   await import("@/content/youtube");
@@ -555,6 +706,24 @@ beforeAll(async () => {
     pointerEvents: rangeBarElement().style.pointerEvents,
     labels: handleLabels(),
   };
+
+  // 覚えた窓の位置の読み込みは layoutGate で止めてある。設定を開いてパネルに中身が
+  // ある状態にしても、読み込みが済むまではどちらの窓も出ない (最初の位置から跳ぶ絵にしない)
+  clickButton("⚙");
+  windowsBeforeLayout = {
+    barHidden: barWindowElement().hidden,
+    panelHidden: panelElement().hidden,
+  };
+  releaseLayout();
+  await flush();
+  windowsAfterLayout = {
+    barHidden: barWindowElement().hidden,
+    panelHidden: panelElement().hidden,
+    bar: styleRect(barWindowElement()),
+    panel: styleRect(panelElement()),
+  };
+  // 設定を閉じて、以降のテストを閉じた状態から始める
+  clickButton("⚙");
 });
 
 /**
@@ -565,6 +734,10 @@ let saved: string[] = [];
 
 beforeEach(async () => {
   history.pushState({}, "", "/watch?v=video-a");
+  // バーの中身は body 直下の窓の中にあり、buildPage で body を空にしても窓ごと付け直されて
+  // 残る (以前は #below と一緒に消えていた)。前のテストの状態の文言・設定の開閉を持ち越さない
+  // よう、中身の根を外して作り直させる
+  document.getElementById("yt-clip-bar")?.remove();
   buildPage();
   sent = [];
   recorders = [];
@@ -608,9 +781,9 @@ afterAll(async () => {
   // 例外が出力に混ざる。ここで出し切ってから終わらせる
   document.body.innerHTML = "";
   await flush();
-  // 空にした body を mount() が拾ってパネルを付け直す。jsdom は破棄のときに
-  // body.innerHTML = "" をするので、パネルが残っているとその DOM 変化が破棄後に
-  // 配られる。パネルを外すだけだと mount() がまた付け直すので、observer が見て
+  // 空にした body を mount() が拾って 2 つの窓 (バーとパネル) を付け直す。jsdom は破棄の
+  // ときに body.innerHTML = "" をするので、窓が残っているとその DOM 変化が破棄後に
+  // 配られる。窓を外すだけだと mount() がまた付け直すので、observer が見て
   // いない空の body に差し替えて、破棄のときに外すものを無くす
   document.documentElement.replaceChild(
     document.createElement("body"),
@@ -1140,7 +1313,9 @@ describe("最大秒数の設定", () => {
     changeSettings({ maxClipSec: 20 });
     await flush();
 
-    // 再描画を起こしてバーを作り直させる
+    // 再描画を起こしてバーを作り直させる。バーの中身は body 直下の窓の中にあり、
+    // body を作り直しても窓ごと付け直されて残るので、中身の根を外しておく
+    barElement().remove();
     buildPage();
     document.body.append(document.createElement("div"));
     await flush();
@@ -2266,6 +2441,200 @@ describe("テロップの一覧", () => {
   });
 });
 
+describe("拡大バーの下のテロップの帯", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  function track(): HTMLElement {
+    const element = document.querySelector<HTMLElement>(
+      "#yt-clip-bar [data-role='telop-track']",
+    );
+    if (element === null) throw new Error("帯の段がありません");
+    return element;
+  }
+
+  function bands(): HTMLElement[] {
+    return [...track().querySelectorAll<HTMLElement>("[data-role='telop-band']")];
+  }
+
+  function firstBand(): HTMLElement {
+    const band = bands()[0];
+    if (band === undefined) throw new Error("帯がありません");
+    return band;
+  }
+
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  async function showReady(
+    telops: Telop[],
+    segments: ClipRange[] = [RANGE],
+    clipMode: "edit" | "simple" = "edit",
+  ): Promise<void> {
+    changeSettings({ mode: clipMode });
+    emit({ kind: "ready", segments, meta: META_A, telops });
+    await flush();
+    sent = [];
+  }
+
+  /**
+   * 拡大バーの窓は 0〜30 秒 (範囲 10〜20 の 2 倍と 30 秒の広い方)。帯の段の箱を幅 300px
+   * (10px/秒) に、テロップ (11〜14 秒) の帯を 110〜140px に決め打ちする。ほかの要素は 0
+   */
+  function stubLayout() {
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        const role = this instanceof HTMLElement ? this.dataset.role : undefined;
+        if (role === "telop-lanes") return boxAt(0, 0, 300, 30);
+        if (role === "telop-band") return boxAt(110, 0, 30, 14);
+        return boxAt(0, 0, 0, 0);
+      });
+  }
+
+  function updateTelopEvents(): unknown[] {
+    return clipEvents().filter(
+      (event) => (event as { type: string }).type === "UPDATE_TELOP",
+    );
+  }
+
+  test("エディットモードで、拡大バーの窓に入るテロップを拡大バーの直下に帯で出す", async () => {
+    await showReady([TELOP, { startSec: 100, endSec: 103, text: "窓の外" }]);
+
+    expect(track().hidden).toBe(false);
+    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
+    expect(track().previousElementSibling?.id).toBe("yt-clip-range");
+  });
+
+  test("シンプルモードでは出さない", async () => {
+    await showReady([TELOP], [RANGE], "simple");
+
+    expect(track().hidden).toBe(true);
+  });
+
+  test("テロップが 1 つも無ければ段ごと出さない (バーを高くしない)", async () => {
+    await showReady([]);
+
+    expect(track().hidden).toBe(true);
+  });
+
+  test("区間を選び直すと、選んだ区間の拡大バーの窓で帯を描き直す", async () => {
+    await showReady(
+      [TELOP, { startSec: 205, endSec: 208, text: "二つ目" }],
+      [RANGE, { startSec: 200, endSec: 215 }],
+    );
+    // 状態の通知では選択は動かない (selectedIndex はテストをまたいで残り、index 0 = RANGE のまま)。
+    // 行を押して区間 2 (200〜215、窓 192.5〜222.5) を選ぶ
+    segmentRows()[1]?.click();
+    expect(bands().map((band) => band.textContent)).toEqual(["二つ目"]);
+
+    segmentRows()[0]?.click();
+
+    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
+  });
+
+  test("帯の中をドラッグすると、指を離したときに UPDATE_TELOP を 1 回だけ送る", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 135, 5);
+      pointer(band, "pointermove", 145, 5);
+      // 動かしている間は送らない (区間の拡大バーと同じ。往復を増やさない)
+      expect(updateTelopEvents()).toEqual([]);
+      pointer(band, "pointerup", 145, 5);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // 20px = 2 秒。長さ (3 秒) と文言は保つ
+    expect(updateTelopEvents()).toEqual([
+      {
+        type: "UPDATE_TELOP",
+        index: 0,
+        telop: { startSec: 13, endSec: 16, text: "こんにちは" },
+      },
+    ]);
+  });
+
+  test("帯のドラッグが拒否されたとき、帯を状態機械側の時刻へ戻す", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    const before = firstBand().style.left;
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 145, 5);
+      // 指を離す直前に、別タブで録画が始まって service worker 側の状態だけが進んだ場面を作る。
+      // emit は使わない (content script にも通知してしまい、このレースを起こせない)
+      swState = { kind: "recording", segments: [RANGE], telops: [TELOP], meta: META_A };
+      pointer(band, "pointerup", 145, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    // 状態機械は録画中で UPDATE_TELOP を受け付けない。応答の状態 (recording・元の時刻) は
+    // 変わらないので、拒まれたことが応答でしか分からない (state/changed は飛んでこない)
+    expect(swState.kind).toBe("recording");
+    expect(statusText()).toContain("受け付けられませんでした");
+    // 送った時刻 (13〜16 秒) ではなく、状態機械が持つ元の時刻 (11〜14 秒) へ戻る
+    expect(firstBand().style.left).toBe(before);
+  });
+
+  test("帯を押して動かさずに離すと、そのテロップの頭から再生する", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointerup", 126, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    expect(updateTelopEvents()).toEqual([]);
+    expect(video.element.currentTime).toBe(11);
+    expect(statusText()).toBe("テロップ 1 の頭から再生中…");
+  });
+
+  test("preview では帯を薄く出し、動かしも再生もしない", async () => {
+    // 区間の拡大バーと同じ条件 (canEditTelops)。テロップだけ触れる非対称を作らない
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [RANGE],
+      meta: META_A,
+      telops: [TELOP],
+    });
+    await flush();
+    sent = [];
+
+    expect(track().hidden).toBe(false);
+    expect(track().style.opacity).toBe("0.4");
+
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 145, 5);
+      pointer(band, "pointerup", 145, 5);
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointerup", 125, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).not.toBe("テロップ 1 の頭から再生中…");
+  });
+});
+
 describe("右側のパネル", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
 
@@ -2286,7 +2655,7 @@ describe("右側のパネル", () => {
     expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
   });
 
-  test("一覧と設定はパネルに入り、バーには拡大バーと操作の行だけが残る", async () => {
+  test("一覧と設定はパネルに入り、バーには拡大バー・テロップの帯の段・操作の行だけが残る", async () => {
     await showEdit([TELOP]);
 
     const body = panelBody();
@@ -2301,9 +2670,10 @@ describe("右側のパネル", () => {
     expect(bar.querySelector("[data-role='segment']")).toBeNull();
     expect(bar.querySelector("[data-role='add-telop']")).toBeNull();
     expect(bar.querySelector("#yt-clip-setting-mode")).toBeNull();
-    // 並びは今のまま: 拡大バー → 操作の行
-    expect(bar.children.length).toBe(2);
+    // 並び: 拡大バー → テロップの帯の段 (フロートの窓の spec B.3) → 操作の行
+    expect(bar.children.length).toBe(3);
     expect(bar.firstElementChild?.id).toBe("yt-clip-range");
+    expect(bar.children[1]?.getAttribute("data-role")).toBe("telop-track");
     expect(
       bar.lastElementChild?.contains(document.getElementById("yt-clip-bar-status")),
     ).toBe(true);
@@ -2621,6 +2991,489 @@ describe("足した行をパネルの見える範囲に入れる", () => {
       });
       await flush();
       expect(panelBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("フロートの窓", () => {
+  // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(panelHeader());
+    await flush();
+    layoutWrites = [];
+  });
+
+  test("バーの窓とパネルの窓が body の直下に 1 つずつある", () => {
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(panelElement().parentElement).toBe(document.body);
+    expect(document.querySelectorAll("#yt-clip-bar-window").length).toBe(1);
+    expect(document.querySelectorAll("#yt-clip-panel").length).toBe(1);
+    // バーの中身 (拡大バーと操作の行) は窓の中
+    expect(barWindowElement().contains(barElement())).toBe(true);
+  });
+
+  test("#below には何も置かない", () => {
+    const below = document.getElementById("below");
+    if (below === null) throw new Error("#below がありません");
+    expect(below.children.length).toBe(0);
+  });
+
+  test("覚えた位置を読み込むまで、設定を開いていても窓を出さない", () => {
+    expect(windowsBeforeLayout).toEqual({ barHidden: true, panelHidden: true });
+  });
+
+  test("覚えた位置で出る", () => {
+    expect(windowsAfterLayout).toEqual({
+      barHidden: false,
+      panelHidden: false,
+      bar: { left: "40px", top: "500px", width: "700px", height: "" },
+      panel: { left: "300px", top: "120px", width: "360px", height: "400px" },
+    });
+  });
+
+  test("バーの窓の最初の位置はプレイヤーの直下 (左端を揃え、幅はプレイヤーの幅、8px 空ける)", () => {
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
+    try {
+      dblclick(barGrip());
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("バーの窓の高さは、プレイヤーの幅を当ててから測る (最小の幅で折り返した高さで詰めない)", () => {
+    // 最小の幅 (480px) では操作の行が 2 段に折り返して背が高くなる。プレイヤーの幅を
+    // 当てたときだけ 1 段 (106px) になる stub。折り返した高さで測ると画面の下端に詰めて
+    // プレイヤーに重なる (768 - 16 - 300 = 452 < 538)
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, 80, 800, 450);
+        if (this.id === "yt-clip-bar-window") {
+          const height = (this as HTMLElement).style.width === "800px" ? 106 : 300;
+          return boxAt(0, 0, 0, height);
+        }
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      // beforeEach の戻しはプレイヤーの幅 0 で測るので、窓は最小の幅 480px のまま
+      expect(barWindowElement().style.width).toBe("480px");
+      dblclick(barGrip());
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("画面に収まらなければ、バーの窓を画面の下端から 16px に詰める", () => {
+    // jsdom の画面は 1024x768。下端 700 のプレイヤーの下には 106px のバーが入らない
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 620 }, 106);
+    try {
+      dblclick(barGrip());
+      // 768 - 16 - 106
+      expect(barWindowElement().style.top).toBe("646px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("パネルの窓の最初の位置は右上 (右端から 16px・上 68px・幅 400px)", () => {
+    expect(styleRect(panelElement())).toEqual({
+      left: `${window.innerWidth - 416}px`,
+      top: "68px",
+      width: "400px",
+      height: "",
+    });
+  });
+
+  test("つまみをドラッグすると動き、指を離したときに 1 回だけ覚える", async () => {
+    const frame = barWindowElement();
+    const left = parseFloat(frame.style.left);
+    const top = parseFloat(frame.style.top);
+    const width = parseFloat(frame.style.width);
+    const grip = barGrip();
+
+    pointer(grip, "pointerdown", 100, 100);
+    pointer(grip, "pointermove", 130, 120);
+    pointer(grip, "pointermove", 150, 130);
+    await flush();
+    // 動かしている間は覚えない
+    expect(layoutWrites).toEqual([]);
+
+    pointer(grip, "pointerup", 150, 130);
+    await flush();
+    expect(frame.style.left).toBe(`${left + 50}px`);
+    expect(frame.style.top).toBe(`${top + 30}px`);
+    expect(layoutWrites).toEqual([{ bar: { left: left + 50, top: top + 30, width } }]);
+  });
+
+  test("パネルの窓は見出しをドラッグすると動き、位置を覚える", async () => {
+    clickButton("⚙");
+    const frame = panelElement();
+    const left = parseFloat(frame.style.left);
+
+    drag(panelHeader(), -100, 20);
+    await flush();
+
+    expect(frame.style.left).toBe(`${left - 100}px`);
+    expect(frame.style.top).toBe("88px");
+    expect(layoutWrites).toEqual([{ panel: { left: left - 100, top: 88, width: 400 } }]);
+  });
+
+  test("つまみ・見出しをダブルクリックすると最初の位置に戻り、覚えた位置を消す", async () => {
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
+    try {
+      dblclick(barGrip());
+      drag(barGrip(), 100, 50);
+      drag(panelHeader(), -100, 20);
+      await flush();
+      expect(storedLayout).toEqual({
+        bar: { left: 124, top: 588, width: 800 },
+        panel: { left: window.innerWidth - 516, top: 88, width: 400 },
+      });
+
+      dblclick(barGrip());
+      dblclick(panelHeader());
+      await flush();
+
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+      expect(panelElement().style.left).toBe(`${window.innerWidth - 416}px`);
+      expect(panelElement().style.top).toBe("68px");
+      expect(storedLayout).toEqual({});
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("モードを変えても窓を作り直さず、位置も変わらない。作り直したつまみでも動かせる", async () => {
+    const frame = barWindowElement();
+    drag(barGrip(), 30, 20);
+    await flush();
+    const placed = styleRect(frame);
+    const oldGrip = barGrip();
+
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    expect(barWindowElement()).toBe(frame);
+    expect(styleRect(frame)).toEqual(placed);
+    // 中身は作り直した (＋ 区間を追加 が増えた)。つまみも新しい要素になる
+    expect(barGrip()).not.toBe(oldGrip);
+    drag(barGrip(), 10, 0);
+    expect(frame.style.left).toBe(`${parseFloat(placed.left) + 10}px`);
+  });
+
+  test("最後に触った窓が上に来る", () => {
+    pointer(barElement(), "pointerdown", 0, 0);
+    expect(barWindowElement().style.zIndex).toBe("2001");
+    expect(panelElement().style.zIndex).toBe("2000");
+
+    pointer(panelBody(), "pointerdown", 0, 0);
+    expect(panelElement().style.zIndex).toBe("2001");
+    expect(barWindowElement().style.zIndex).toBe("2000");
+  });
+
+  test("全画面の間は 2 つとも隠し、抜けたら戻す", () => {
+    clickButton("⚙");
+    expect(barWindowElement().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(barWindowElement().hidden).toBe(true);
+      expect(panelElement().hidden).toBe(true);
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(barWindowElement().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  test("動画ページ以外では 2 つとも隠す。戻れば出す", async () => {
+    clickButton("⚙");
+
+    history.pushState({}, "", "/");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(barWindowElement().hidden).toBe(true);
+    expect(panelElement().hidden).toBe(true);
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(barWindowElement().hidden).toBe(false);
+    expect(panelElement().hidden).toBe(false);
+  });
+
+  // resolution 追加 1 (Task 5 レビューの Minor): applyMode が中身の根を外した後に
+  // mount が #below の無さで途中で抜けると、バーの窓が中身の無いまま出続けてしまう。
+  // mount はこの経路でも refreshWindows() を呼んでからでないと抜けてはいけない
+  test("#below が無い状態で中身の根が外れると、mount はバーの窓を隠してから抜ける", async () => {
+    expect(barWindowElement().hidden).toBe(false);
+
+    document.getElementById("yt-clip-bar")?.remove();
+    document.getElementById("below")?.remove();
+    // DOM の変化を起こして MutationObserver 経由で mount() を走らせる
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(barWindowElement().hidden).toBe(true);
+  });
+
+  test("隠れていた窓を出すときは、最初の位置を取り直す", () => {
+    let playerBottom = 530;
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, playerBottom - 450, 800, 450);
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      dblclick(barGrip());
+      expect(barWindowElement().style.top).toBe("538px");
+
+      Object.defineProperty(document, "fullscreenElement", {
+        configurable: true,
+        get: () => video.element,
+      });
+      try {
+        document.dispatchEvent(new Event("fullscreenchange"));
+        expect(barWindowElement().hidden).toBe(true);
+        // 全画面の間にプレイヤーの位置が変わった
+        playerBottom = 400;
+      } finally {
+        Reflect.deleteProperty(document, "fullscreenElement");
+      }
+      document.dispatchEvent(new Event("fullscreenchange"));
+
+      expect(barWindowElement().hidden).toBe(false);
+      expect(barWindowElement().style.top).toBe("408px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("動かした窓は、出し直しても置いた場所のまま", async () => {
+    let playerBottom = 530;
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, playerBottom - 450, 800, 450);
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      dblclick(barGrip());
+      drag(barGrip(), 30, -100);
+      await flush();
+      const placed = styleRect(barWindowElement());
+      expect(placed.top).toBe("438px");
+
+      Object.defineProperty(document, "fullscreenElement", {
+        configurable: true,
+        get: () => video.element,
+      });
+      try {
+        document.dispatchEvent(new Event("fullscreenchange"));
+        playerBottom = 400;
+      } finally {
+        Reflect.deleteProperty(document, "fullscreenElement");
+      }
+      document.dispatchEvent(new Event("fullscreenchange"));
+
+      expect(styleRect(barWindowElement())).toEqual(placed);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("テーマを切り替えるとバーの窓の配色も変わる", async () => {
+    // バーの窓は body の直下でページの外にある。配色は自分で持つ
+    document.documentElement.setAttribute("dark", "");
+    try {
+      await flush();
+      expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+    } finally {
+      document.documentElement.removeAttribute("dark");
+    }
+    await flush();
+    expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+  });
+});
+
+describe("動かしていない窓の最初の位置を取り直す", () => {
+  /** プレイヤーの画面上の位置を、テストの途中で変えられるように決め打ちする */
+  function stubPlayer(initial: { left: number; top: number; width: number; height: number }) {
+    const box = { ...initial };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(box.left, box.top, box.width, box.height);
+        if (this.id === "yt-clip-bar-window") return boxAt(0, 0, 0, 106);
+        return boxAt(0, 0, 0, 0);
+      });
+    return { box, spy };
+  }
+
+  function player(): HTMLElement {
+    const element = document.getElementById("movie_player");
+    if (element === null) throw new Error("プレイヤーが見つかりません");
+    return element;
+  }
+
+  // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(panelHeader());
+    await flush();
+  });
+
+  test("ブラウザの大きさが変わると取り直す", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+
+      box.left = 0;
+      box.width = 900;
+      box.height = 500;
+      window.dispatchEvent(new Event("resize"));
+      // 80 + 500 + 8
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "0px",
+        top: "588px",
+        width: "900px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("パネルの窓も画面の幅に合わせて取り直す", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      // 1440 - 16 - 400
+      expect(panelElement().style.left).toBe("1024px");
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: 1024,
+      });
+      window.dispatchEvent(new Event("resize"));
+    }
+    expect(panelElement().style.left).toBe("608px");
+  });
+
+  test("プレイヤーの大きさが変わると取り直す (シアターモードの切り替えなど)", () => {
+    // beforeEach の buildPage で作り直したプレイヤーを見ている (mount のたびに見直す)
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      box.height = 500;
+      resizeElement(player());
+      expect(barWindowElement().style.top).toBe("588px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("ページのスクロールでは取り直さない (窓は同じ画面位置に浮いたまま)", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // ページを 200px 送った: プレイヤーは画面の上へ動く
+      box.top = -120;
+      window.dispatchEvent(new Event("scroll"));
+      document.dispatchEvent(new Event("scroll"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // 状態が届いても取り直さない (出ている間は置き直さない)
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(barWindowElement().style.top).toBe("538px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // resolution 追加 2 (Task 5 レビューの Minor): スクロールと並べて、状態が届くだけでは
+  // 取り直さないことを別のきっかけ (プレイヤーの位置の変化) でも確かめる
+  test("窓を出している間は、状態を emit しても最初の位置を取り直さない", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // プレイヤーの画面上の位置が変わっても、resize / ResizeObserver 以外のきっかけ
+      // (状態の通知) では取り直さない
+      box.top = 200;
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(barWindowElement().style.top).toBe("538px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("スクロールした後に取り直すときは、プレイヤーの画面上の位置をそのまま使う", () => {
+    // ページを 200px 送った状態 (プレイヤーの上端が画面の上へ 120px 出ている)
+    const { spy } = stubPlayer({ left: 24, top: -120, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      // -120 + 450 + 8。ページの座標に直さない (窓は画面に固定)
+      expect(barWindowElement().style.top).toBe("338px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("動かした窓は、ブラウザやプレイヤーの大きさが変わっても置いた場所のまま", async () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      drag(barGrip(), 30, -100);
+      await flush();
+      const placed = styleRect(barWindowElement());
+      expect(placed.top).toBe("438px");
+
+      box.height = 500;
+      window.dispatchEvent(new Event("resize"));
+      resizeElement(player());
+
+      expect(styleRect(barWindowElement())).toEqual(placed);
     } finally {
       spy.mockRestore();
     }

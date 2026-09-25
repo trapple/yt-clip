@@ -73,8 +73,18 @@ const FONT = 'Roboto,"Noto Sans JP","Helvetica Neue",Arial,sans-serif';
 const BUTTON_BASE = `appearance:none;border-radius:18px;height:36px;padding:0 16px;font-family:${FONT};font-size:14px;font-weight:500;cursor:pointer;white-space:nowrap;`;
 
 export const BAR_STYLE = {
-  root: `display:flex;flex-direction:column;gap:10px;padding:12px;margin:8px 0;border:1px solid var(--ytc-border);border-radius:12px;color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
+  /**
+   * バーの中身の根 (#yt-clip-bar)。**縁・角・外の余白は持たない。** バーの窓
+   * (floating-window.ts) の枠が持つ。ここにも縁を付けると枠が 2 重になる
+   */
+  root: `display:flex;flex-direction:column;gap:10px;padding:12px;color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
   row: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
+  /**
+   * 窓を動かすつまみ (⠿)。操作の行の左端に置く (spec A.1: バーの窓は見出しの行を作らない)。
+   * 行の高さはボタン (36px) に揃える。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  grip: "cursor:move;user-select:none;touch-action:none;color:var(--ytc-text-sub);font-size:18px;line-height:36px;padding:0 2px;",
   /**
    * 状態の文言。**1 行に収めて、はみ出しは … にする。** 長い文言 (「テロップが N 件
    * 残っています…」など) で行が 2 段に折り返すと、バーが伸びて動画と操作が 1 画面に
@@ -121,6 +131,33 @@ export const RANGE_STYLE = {
   disabled: "opacity:0.4;pointer-events:none;",
 } as const;
 
+/**
+ * 拡大バーの下のテロップの帯の段 (`telop-track.ts`。フロートの窓の spec B)。
+ *
+ * **根は display を持たない。** 出し入れは telop-track.ts が `style.display` で行う (ここに display を
+ * 書くと、`hidden` を立てても inline の display が勝って出たままになる)。高さは 2 段ぶん
+ * (14 + 2 + 14 = 30px) に固定し、重なりの有無でバーの高さを揺らさない。`margin-top:-6px` で、バーの
+ * 縦の並びの gap (10px) を拡大バーのトラックとの間 4px に詰める (spec B.3。予算 34px)。
+ *
+ * `gap`・文字の大きさ・数字の幅は拡大バー (`RANGE_STYLE.root`) に揃える。左右に置く見えない時刻
+ * (`ghost`) の幅が拡大バーのラベルの幅と同じになり、帯の段がトラックの左右に揃う
+ */
+export const TELOP_TRACK_STYLE = {
+  root: "gap:10px;height:30px;margin-top:-6px;font-size:12px;font-variant-numeric:tabular-nums;",
+  ghost: "visibility:hidden;white-space:nowrap;",
+  lanes: "position:relative;flex:1;min-width:0;",
+  /** 右の見えない時刻の箱。「+N」をこの中の 2 段目の高さに置く (帯と重ねない。spec B.3) */
+  endCell: "position:relative;",
+  /**
+   * 帯 1 本。位置 (left / width / top) は telop-track.ts が決める。文字を選べると、掴んだつもりで
+   * 選択が始まる。`touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  band: "position:absolute;height:14px;box-sizing:border-box;min-width:4px;padding:0 4px;border:1px solid var(--ytc-accent);border-radius:3px;background:var(--ytc-surface);color:var(--ytc-text);font-size:10px;line-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;touch-action:none;user-select:none;",
+  /** 2 段に入らない分の数。押しても何もしないので、掴めそうなカーソルを出さない */
+  overflow:
+    "position:absolute;left:0;top:16px;height:14px;line-height:14px;font-size:11px;color:var(--ytc-text-sub);white-space:nowrap;cursor:default;",
+} as const;
+
 /** 区間の一覧。行は押せるので、押せることが分かる見た目にする */
 export const SEGMENT_STYLE = {
   root: "display:flex;flex-direction:column;gap:4px;",
@@ -151,22 +188,46 @@ export const TELOP_STYLE = {
 } as const;
 
 /**
- * 右側のパネル (`side-panel.ts`)。位置・幅・重なり順は YouTube の実機の値に合わせる
- * ので、出所と一緒に `side-panel.ts` が持つ。
+ * 右側のパネル (`side-panel.ts`) の中身。**枠の見た目 (地・影・見出し) は
+ * `FLOATING_WINDOW_STYLE` が持つ** (パネルはフロートの窓の上に作る)。位置・幅は
+ * YouTube の実機の値に合わせるので、出所と一緒に `side-panel.ts` が持つ。
  *
- * **`root` と `body` は display を持たない。** 出し入れは `side-panel.ts` が
+ * **`body` は display を持たない。** 畳むときの出し入れは `side-panel.ts` が
  * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の
  * display が勝って出たままになる
  */
 export const SIDE_PANEL_STYLE = {
-  /** 下のおすすめ動画が透けると読めないので、不透明な地と影を付ける */
-  root: `flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
-  header: "display:flex;align-items:center;gap:8px;padding:8px 12px;",
-  title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
   collapseButton: SEGMENT_STYLE.iconButton,
   /**
    * 中身の箱。**超えた分はここだけでスクロールする。** `min-height:0` が無いと
    * flex の子は中身より縮まず、パネルごと画面の下へ伸びる
    */
   body: "flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
+} as const;
+
+/**
+ * フロートの窓の枠 (`floating-window.ts`)。バーの窓とパネルの窓で同じものを使う。
+ *
+ * **`root` と `resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
+ * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の display が
+ * 勝って出たままになる。位置・大きさ・重なり順も `floating-window.ts` が決める
+ */
+export const FLOATING_WINDOW_STYLE = {
+  /** 下のページが透けると読めないので、不透明な地と影を付ける */
+  root: `position:fixed;flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
+  /**
+   * 見出し。空いたところを掴んで動かす。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  header:
+    "display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:move;user-select:none;touch-action:none;",
+  title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
+  /** 見出しの右側の部品の箱。ボタンの上では窓を動かさないので、掴めそうなカーソルを出さない */
+  headerActions: "display:flex;align-items:center;gap:4px;cursor:default;",
+  /**
+   * 右下の角のつまみ (16px 四方。spec A.1)。カーソルは窓の向き (幅だけ / 幅と高さ) で
+   * `floating-window.ts` が足す
+   */
+  resizeGrip:
+    "position:absolute;right:0;bottom:0;width:16px;height:16px;touch-action:none;background:linear-gradient(135deg,transparent 50%,var(--ytc-border) 50%);",
 } as const;

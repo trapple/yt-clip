@@ -43,6 +43,11 @@ export type RangeBar = {
   setEnabled(enabled: boolean): void;
   /** 現在の再生位置を示す。窓の外や位置が分からないときは null */
   setPlayhead(sec: number | null): void;
+  /**
+   * 今映している時間の窓。**まだ update していなければ null** (初期値の 0〜0 は軸にならない)。
+   * 拡大バーの下のテロップの帯が、同じ時間の軸で帯を置くために読む (フロートの窓の spec B.3)
+   */
+  window(): TimeWindow | null;
   destroy(): void;
 };
 
@@ -52,6 +57,9 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   // 初期状態は無効。見た目 (薄さ) と実際の操作可否を最初から一致させる
   element.style.cssText = `${RANGE_STYLE.root}${RANGE_STYLE.disabled}`;
 
+  // 窓の左端・右端の時刻。**素の span のまま、見た目は RANGE_STYLE.root から継ぐ。** telop-track.ts が
+  // 同じ時刻を同じ幅の見えない span で左右に置き、帯の段をトラックの左右に揃えている。ここに style を
+  // 足すなら、TELOP_TRACK_STYLE.ghost にも同じものを足す (足さないと帯とトラックの左右がずれる)
   const startLabel = document.createElement("span");
   const endLabel = document.createElement("span");
 
@@ -96,6 +104,8 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   /** 現在の範囲と窓。update で更新される */
   let range: ClipRange = { startSec: 0, endSec: 0 };
   let window_: TimeWindow = { startSec: 0, endSec: 0 };
+  /** update が 1 度でも呼ばれたか。呼ばれる前の窓 (0〜0) は外へ渡さない */
+  let updated = false;
   /**
    * 範囲が確定するまで操作させない (spec §5.3)。
    * 初期値の範囲と窓はどちらも幅 0 で、この状態でハンドルを掴めてしまうと
@@ -231,7 +241,13 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
     update(nextRange: ClipRange, videoDurationSec: number): void {
       range = nextRange;
       window_ = computeWindow(nextRange, videoDurationSec);
+      updated = true;
       paint();
+    },
+
+    window(): TimeWindow | null {
+      // 写しを返す。受け取った側が書き換えても、この拡大バーの窓は変わらない
+      return updated ? { ...window_ } : null;
     },
 
     setPlayhead(sec: number | null): void {

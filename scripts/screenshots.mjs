@@ -77,15 +77,23 @@ try {
   await bar.getByRole("button", { name: "IN" }).click();
   await page.locator("#yt-clip-bar-status").waitFor({ timeout: WAIT_TIMEOUT_MS });
 
-  /** バーが画面の下寄りに来るよう送る。プレイヤーと操作の両方を 1 枚に収める */
+  /**
+   * バーの窓が画面の下寄り (上端が画面の高さの ratio) に来るよう送る。プレイヤーと操作の両方を
+   * 1 枚に収める。
+   *
+   * **バーの窓はページのスクロールに付いてこない** (画面に浮いたまま。フロートの窓の spec A.2)。
+   * 送った後に resize を配り、動かしていないバーの窓に最初の位置 (その時点のプレイヤーの
+   * 下端 + 8px。youtube.ts / window-layout.ts の BAR_GAP_PX) を取り直させる
+   */
   const framePlayerAndBar = async (ratio) => {
     await page.evaluate((r) => {
-      const element = document.getElementById("yt-clip-bar");
-      if (element === null) throw new Error("バーが見つかりません");
-      const top = element.getBoundingClientRect().top + window.scrollY;
-      window.scrollTo({ top: top - window.innerHeight * r, behavior: "instant" });
+      const player = document.getElementById("movie_player");
+      if (player === null) throw new Error("プレイヤーが見つかりません");
+      const barTop = player.getBoundingClientRect().bottom + 8 + window.scrollY;
+      window.scrollTo({ top: barTop - window.innerHeight * r, behavior: "instant" });
+      window.dispatchEvent(new Event("resize"));
     }, ratio);
-    // スクロール後の再描画を待つ
+    // スクロールと置き直しの後の再描画を待つ
     await page.waitForTimeout(500);
   };
 
