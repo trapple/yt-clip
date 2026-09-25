@@ -60,7 +60,7 @@ export type DockManager = {
   undock(id: WindowId): void;
   /**
    * 最初の配置へ戻す (ダブルクリック。C2.6): options.initial で入る枠へ、最初の配置の並びの位置に入れて前に出し、onChange。
-   * 既にその枠にあれば並びは変えず前に出すだけ。最初の配置で枠に入らない窓なら undock。戻す先の枠が使えなければ、記憶に
+   * 既にその枠にあっても、並びが違えば最初の配置の並びの位置へ移す。最初の配置で枠に入らない窓なら undock。戻す先の枠が使えなければ、記憶に
    * 入れたまま退避 (onEvacuate)
    */
   restore(id: WindowId): void;
@@ -436,17 +436,17 @@ export function createDockManager(options: DockManagerOptions): DockManager {
       return index === -1 ? order.length : index;
     };
     const from = findSlot(id);
-    if (from !== home) {
-      if (from !== null) {
-        from.tabs = from.tabs.filter((tab) => tab !== id);
-        if (from.active === id) from.active = undefined;
-      }
-      // 最初の配置の並びの位置へ入れる (末尾に付けると、戻すたびに並びが操作の履歴で変わる)
-      const tabs = [...home.tabs];
-      const at = tabs.findIndex((tab) => rank(tab) > rank(id));
-      tabs.splice(at === -1 ? tabs.length : at, 0, id);
-      home.tabs = tabs;
+    if (from !== null && from !== home) {
+      from.tabs = from.tabs.filter((tab) => tab !== id);
+      if (from.active === id) from.active = undefined;
     }
+    // 最初の配置の並びの位置へ入れる。**既にその枠にあっても一度抜いて入れ直す** (spec C2.6「最初の配置の枠の、最初の
+    // 並び順の位置へ戻す」。落とし直しで末尾に付いた窓を、ダブルクリックで元の並びへ戻せるように)。末尾に付けないのは、
+    // 戻すたびに並びが操作の履歴で変わるため。最初の配置に無い窓は後ろ扱いなので、混ざっていても前に割り込まない
+    const tabs = home.tabs.filter((tab) => tab !== id);
+    const at = tabs.findIndex((tab) => rank(tab) > rank(id));
+    tabs.splice(at === -1 ? tabs.length : at, 0, id);
+    home.tabs = tabs;
     home.active = id;
     if (from !== null && from !== home) render(from);
     render(home);

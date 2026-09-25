@@ -329,7 +329,21 @@ describe("入れる・出す・前に出す", () => {
     expect(manager.state().below).toEqual({ tabs: ["bar"], active: "bar" });
   });
 
-  test("restore で、既に最初の配置の枠にある窓は並びを変えずに前に出すだけ (保存も求める)", () => {
+  test("既に最初の配置の枠にあるが並びが違う窓を restore すると、最初の並び順の位置へ移り、前に出る", () => {
+    const { manager, onChange } = setup();
+    // 落とし直しで末尾に付いた並び (設定 → 区間・テロップ)
+    manager.dock("settings", "side");
+    manager.dock("list", "side");
+    onChange.mockClear();
+
+    manager.restore("list");
+
+    expect(manager.state()).toEqual({ side: { tabs: ["list", "settings"], active: "list" } });
+    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  test("restore で、既に最初の配置の枠の最初の並びにある窓は、並びを保ったまま前に出す (保存も求める)", () => {
     const { manager, onChange } = setup();
     manager.dock("list", "side");
     manager.dock("settings", "side");
