@@ -750,3 +750,19 @@ describe("タブからの引き出し中の DOM (Task 4・5 のレビューか�
     expect(grip.isConnected).toBe(true);
   });
 });
+
+describe("destroy (マスタースイッチのオフ)", () => {
+  test("ドラッグの最中 (目印を出している) でも、2 つの枠の根ごと目印・タブの列・入っている窓を外す", () => {
+    const { manager, windows } = setup();
+    manager.dock("list", "side");
+    // 設定の窓のドラッグを始める。空の下の枠に 40px の目印が出る
+    manager.drag("settings", "start", AWAY);
+    expect(markerOf("below").style.display).not.toBe("none");
+
+    manager.destroy();
+
+    expect(document.querySelectorAll('[id^="yt-clip-dock-"], [data-role^="dock-"]').length).toBe(0);
+    // ドック中の窓は枠の根と一緒に外れる (youtube.ts の stop は枠を窓より先に destroy する)
+    expect(windows.list.element.isConnected).toBe(false);
+  });
+});

@@ -138,7 +138,10 @@ beforeAll(async () => {
         set: async (): Promise<void> => undefined,
       },
       local: {
-        get: async (): Promise<Record<string, unknown>> => {
+        get: async (key?: string): Promise<Record<string, unknown>> => {
+          // オン / オフ (無い = オン) は門を通さない。止めると start() も止まり、「読み込むまでは枠も窓も出さない」を
+          // 確かめる前に窓そのものが無い
+          if (key === "enabled") return {};
           await layoutGate;
           return { windowLayout: LAYOUT_AT_LOAD };
         },
@@ -146,13 +149,14 @@ beforeAll(async () => {
           layoutWrites.push(items.windowLayout);
         },
       },
-      onChanged: { addListener: (): void => undefined },
+      onChanged: { addListener: (): void => undefined, removeListener: (): void => undefined },
     },
     runtime: {
       onMessage: {
         addListener: (fn: typeof onMessage): void => {
           onMessage = fn;
         },
+        removeListener: (): void => undefined,
       },
       sendMessage: async (): Promise<{ state: ClipState }> => ({ state: READY }),
     },

@@ -89,6 +89,16 @@ async function flush(): Promise<void> {
   }
 }
 
+/**
+ * マイクロタスクだけを流す (setTimeout は進めない)。保存されたオン / オフの読みは返り、service worker 役の応答
+ * (setTimeout の後) はまだ返らない
+ */
+async function settleMicrotasks(): Promise<void> {
+  for (let round = 0; round < 20; round += 1) {
+    await Promise.resolve();
+  }
+}
+
 function installVideo(): FakeVideo {
   const element = document.createElement("video");
   element.className = "html5-main-video";
@@ -251,12 +261,25 @@ type StorageListener = (
 
 /** chrome.storage.sync が返す設定。テストごとに差し替える */
 let storedSettings: Record<string, unknown> = {};
-let storageListener: StorageListener | null = null;
+/**
+ * chrome.storage.onChanged に張られた listener。オンの間は 2 本 (設定の sync を見る youtube.ts と、スイッチを見る
+ * switch-driver)、オフの間はスイッチの 1 本だけ
+ */
+let storageListeners: StorageListener[] = [];
 
 /** 別のタブで設定が変わったことを届ける */
 function changeSettings(next: Record<string, unknown>): void {
   storedSettings = next;
-  storageListener?.({ settings: { newValue: next } }, "sync");
+  for (const listener of [...storageListeners]) listener({ settings: { newValue: next } }, "sync");
+}
+
+/** chrome.storage.local の enabled (マスタースイッチ)。undefined = キーが無い = オン */
+let storedEnabled: unknown = undefined;
+
+/** popup でオン / オフを切り替えたことを届ける (chrome.storage.local の enabled の onChanged) */
+function setEnabled(value: boolean): void {
+  storedEnabled = value;
+  for (const listener of [...storageListeners]) listener({ enabled: { newValue: value } }, "local");
 }
 
 /** chrome.storage.local の windowLayout (覚えた窓の位置)。読み込み時の値は beforeAll で入れる */
@@ -381,9 +404,14 @@ function installGlobals(): void {
           Promise.resolve({ settings: storedSettings }),
         set: (): Promise<void> => Promise.resolve(),
       },
-      // 窓の位置 (window-layout.ts)。読み込み時の 1 回は layoutGate が離されるまで返さない
+      // 窓の位置 (window-layout.ts) とオン / オフ (master-switch.ts)。窓の位置の読み込み時の 1 回は layoutGate が
+      // 離されるまで返さない。**オン / オフは門を通さない**: 止めると start() も止まり、「覚えた位置を読み込む前は
+      // 窓を出さない」を確かめる前に窓そのものが無い
       local: {
-        get: async (): Promise<Record<string, unknown>> => {
+        get: async (key?: string): Promise<Record<string, unknown>> => {
+          if (key === "enabled") {
+            return storedEnabled === undefined ? {} : { enabled: storedEnabled };
+          }
           await layoutGate;
           return storedLayout === undefined ? {} : { windowLayout: storedLayout };
         },
@@ -392,10 +420,13 @@ function installGlobals(): void {
           layoutWrites.push(items.windowLayout);
         },
       },
-      // 別のタブで設定を変えられたときに拾う経路
+      // 別のタブで設定を変えられたときと、オン / オフを切り替えたときに拾う経路
       onChanged: {
         addListener: (fn: StorageListener): void => {
-          storageListener = fn;
+          storageListeners.push(fn);
+        },
+        removeListener: (fn: StorageListener): void => {
+          storageListeners = storageListeners.filter((listener) => listener !== fn);
         },
       },
     },
@@ -403,6 +434,10 @@ function installGlobals(): void {
       onMessage: {
         addListener: (fn: TabListener): void => {
           onMessage = fn;
+        },
+        // オフにすると外す (stop)。外した後は deliver が届けない
+        removeListener: (fn: TabListener): void => {
+          if (onMessage === fn) onMessage = null;
         },
       },
       sendMessage: async (message: Message): Promise<{ state: ClipState }> => {
@@ -505,6 +540,11 @@ function statusText(): string {
 
 function overlay(): HTMLElement | null {
   return document.getElementById("yt-clip-overlay");
+}
+
+/** 拡張が足した要素の数 (マスタースイッチの spec §1 の測り方。窓・ドック枠・帯・プレビューの canvas を覆う) */
+function ourElements(): number {
+  return document.querySelectorAll('[id^="yt-clip-"], [data-role^="dock-"]').length;
 }
 
 /** 拡大バー本体。操作を受け付けるかどうかは pointer-events で決まる */
@@ -724,8 +764,10 @@ beforeAll(async () => {
   // 前に動かした窓の位置を覚えている場面を再現する
   storedLayout = LAYOUT_AT_LOAD;
 
-  // chrome を用意してから読み込む。import 時に listener と observer を張る
+  // chrome を用意してから読み込む。import 時にはページに触らず、保存されたオン / オフ (無い = オン) を読んだ後に
+  // start() が listener と observer を張る。読みはマイクロタスクで返るので流して待つ (応答はまだ返らない)
   await import("@/content/youtube");
+  await settleMicrotasks();
   // **応答が返る前**の状態を捕まえる。実機でも service worker は遷移した
   // ときにしか通知しないので、マウント直後は何も受け取っていない
   pointerEventsAtLoad = rangeBarElement().style.pointerEvents;
@@ -4130,5 +4172,186 @@ describe("ドック枠とタブ", () => {
 
     expect(activeLabel("side")).toBe("区間・テロップ");
     expect(listBody().scrollTop).toBe(0);
+  });
+});
+
+describe("オン / オフ (マスタースイッチ)", () => {
+  /** テロップ付きの ready。エディットモードならプレビューの canvas が video の親に付く */
+  const READY_WITH_TELOP: ClipState = {
+    kind: "ready",
+    segments: [RANGE],
+    telops: [{ startSec: 11, endSec: 13, text: "テロップ" }],
+    meta: META_A,
+  };
+
+  // 前の describe (「ドック枠とタブ」) の枠の中身を持ち越さない (判断メモ 34)。jsdom では差す先の幅が 0 なので枠は
+  // 使えず、3 つとも浮いた窓 (退避) で出る。「フロートの窓」と同じ作法
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
+    await flush();
+  });
+
+  afterEach(async () => {
+    // モジュールは 1 回だけ読み込んで使い回しているので、次のテストのためにオンへ戻す
+    if (storedEnabled === false) {
+      setEnabled(true);
+      await flush();
+    }
+  });
+
+  test("オフにすると窓・ドック枠・シークバーの帯・プレビューの canvas が消え、YouTube の要素の中に何も残らない", async () => {
+    changeSettings({ mode: "edit" });
+    emit(READY_WITH_TELOP);
+    await flush();
+    // 前提: 帯と canvas と枠が出ている
+    expect(overlay()).not.toBeNull();
+    expect(document.getElementById("yt-clip-telop-preview")).not.toBeNull();
+    expect(document.getElementById("yt-clip-dock-below")).not.toBeNull();
+
+    setEnabled(false);
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(document.querySelector(".ytp-progress-bar")?.childElementCount).toBe(0);
+    expect(video.element.parentElement?.querySelector("canvas") ?? null).toBeNull();
+    expect(document.getElementById("below")?.childElementCount).toBe(0);
+    expect(document.getElementById("secondary-inner")?.childElementCount).toBe(0);
+  });
+
+  test("オフにすると observer・document と window の listener・再生位置の rAF・onMessage と設定の onChanged を外す (スイッチの見張りは残す)", async () => {
+    const mutationDisconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
+    const resizeDisconnect = vi.spyOn(ResizeObserver.prototype, "disconnect");
+    const documentRemove = vi.spyOn(document, "removeEventListener");
+    const windowRemove = vi.spyOn(window, "removeEventListener");
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame");
+    try {
+      expect(onMessage).not.toBeNull();
+      expect(storageListeners).toHaveLength(2);
+
+      setEnabled(false);
+      await flush();
+
+      // body の子孫の監視とテーマ (<html dark>) の監視
+      expect(mutationDisconnect.mock.calls.length).toBeGreaterThanOrEqual(2);
+      // プレイヤーの大きさの監視 (とプレビューの canvas の追従)
+      expect(resizeDisconnect).toHaveBeenCalled();
+      expect(documentRemove).toHaveBeenCalledWith("fullscreenchange", expect.any(Function));
+      expect(windowRemove).toHaveBeenCalledWith("resize", expect.any(Function));
+      // 再生位置を拡大バーへ流すループ
+      expect(cancelFrame).toHaveBeenCalled();
+      expect(onMessage).toBeNull();
+      // 残るのはスイッチの見張り (switch-driver) の 1 本だけ
+      expect(storageListeners).toHaveLength(1);
+    } finally {
+      mutationDisconnect.mockRestore();
+      resizeDisconnect.mockRestore();
+      documentRemove.mockRestore();
+      windowRemove.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+
+  test("外し損ねた onMessage に、オフの間に state/changed が届いても何も描かない", async () => {
+    const listener = onMessage;
+    setEnabled(false);
+    await flush();
+
+    listener?.(
+      { type: "state/changed", state: { kind: "ready", segments: [RANGE], telops: [], meta: META_A } },
+      {},
+      () => undefined,
+    );
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(overlay()).toBeNull();
+  });
+
+  test("オフの間に設定が変わっても (sync の onChanged) 何もしない", async () => {
+    setEnabled(false);
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  test("オンに戻すと、読み込み直さずに窓が出て content/loaded を送り、応答の状態で範囲と帯が戻る", async () => {
+    setEnabled(false);
+    await flush();
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+    sent = [];
+
+    setEnabled(true);
+    await flush();
+
+    expect(sent).toContainEqual({ type: "content/loaded" });
+    expect(statusText()).toBe("0:10 〜 0:20 (10秒)");
+    expect(overlay()).not.toBeNull();
+    expect(barWindowElement().hidden).toBe(false);
+    expect(onMessage).not.toBeNull();
+    expect(storageListeners).toHaveLength(2);
+  });
+
+  test("オフ → オンで覚えた配置を読み直し、動かした窓は同じ位置に出る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    drag(listHeader(), -100, 20);
+    await flush();
+    const moved = styleRect(listElement());
+
+    setEnabled(false);
+    await flush();
+    setEnabled(true);
+    await flush();
+
+    // 区間があるので区間・テロップの窓が出る (content/loaded の応答の ready で)
+    expect(listElement().hidden).toBe(false);
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual(moved);
+  });
+
+  test("オンにした直後にオフにすると、遅れて届いた応答と覚えた配置の読みで窓も帯も出さない", async () => {
+    setEnabled(false);
+    await flush();
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+
+    setEnabled(true);
+    // content/loaded の応答 (setTimeout の後) と覚えた配置の読みが返る前に切る
+    setEnabled(false);
+    await flush();
+
+    expect(ourElements()).toBe(0);
+  });
+
+  test("範囲の再生を押した直後にオフにすると、再生も範囲の監視 (rVFC) も始めない", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    const play = vi.spyOn(video.element, "play");
+    try {
+      clickButton("▶ 範囲を見る");
+      // seek の完了 (setTimeout の後) を待たずに切る
+      setEnabled(false);
+      await flush();
+
+      expect(play).not.toHaveBeenCalled();
+      expect(video.pendingFrames()).toBe(0);
+    } finally {
+      play.mockRestore();
+    }
+  });
+
+  test("start() を二度呼ぶ・走っていないのに stop() を呼ぶのは配線の誤りなので throw", async () => {
+    const content = await import("@/content/youtube");
+    expect(() => content.start()).toThrow("二度");
+
+    setEnabled(false);
+    await flush();
+    expect(() => content.stop()).toThrow("走っていない");
   });
 });
