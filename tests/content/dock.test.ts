@@ -428,6 +428,21 @@ describe("差し直しと退避", () => {
     expect(onEvacuate).toHaveBeenCalledWith("list");
   });
 
+  // spa-inject: 動画ページ以外では youtube.ts が差す先を null で渡す。YouTube は隠れた動画ページ (#below) を残すので、
+  // 差したままにするとホームに枠が残る。差す先が戻れば先頭に差し直す
+  test("差す先が無い枠は、ページから外す (差す先が戻れば差し直す)", () => {
+    const { manager, below, side } = setup();
+    const root = manager.elements.side;
+    expect(root.parentElement).toBe(side);
+
+    manager.attach({ below, side: null });
+    expect(root.isConnected).toBe(false);
+    expect(manager.elements.below.parentElement).toBe(below);
+
+    manager.attach({ below, side });
+    expect(side.firstElementChild).toBe(root);
+  });
+
   test("load は onChange を呼ばずに枠の中身を入れ、sync で置く", () => {
     const { manager, windows, onChange } = setup();
 

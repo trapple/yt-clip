@@ -1025,7 +1025,9 @@ function clearOverlay(): void {
 
 /** 帯を今の範囲に合わせ直す。範囲が無い・別の動画を見ているなら消す */
 function refreshOverlay(): void {
-  if (currentSegments.length === 0 || rangeVideoId !== currentVideoId()) {
+  // 動画ページ以外では差さない (範囲を作った動画が分からない写しでも。spa-inject)
+  const videoId = currentVideoId();
+  if (currentSegments.length === 0 || videoId === null || rangeVideoId !== videoId) {
     clearOverlay();
     return;
   }
@@ -1055,7 +1057,9 @@ function refreshTelopPreview(): void {
     if (!(error instanceof ElementNotFoundError)) throw error;
     video = null;
   }
-  const visible = mode === "edit" && rangeVideoId === currentVideoId();
+  // 動画ページ以外では canvas を差さない (spa-inject)
+  const videoId = currentVideoId();
+  const visible = mode === "edit" && videoId !== null && rangeVideoId === videoId;
   telopPreview.update(video, visible ? currentTelops : [], telopStyle);
 }
 
@@ -1216,8 +1220,13 @@ function barGripCenter(): DragPoint {
   return { x: box.left - frame.left + box.width / 2, y: box.top - frame.top + box.height / 2 };
 }
 
-/** ドック枠を差す先 (C2.1)。右の枠は #secondary-inner、無ければ #secondary */
+/**
+ * ドック枠を差す先 (C2.1)。右の枠は #secondary-inner、無ければ #secondary。
+ * **動画ページ以外では差す先が無いものとして渡す** (dock.ts の attach が枠をページから外す)。YouTube は動画ページから
+ * ホームへ移っても隠れた #below / #secondary-inner を残すので、要素の有無ではなく URL で決める (C2.7 の spa-inject の追記)
+ */
 function dockAnchors(): Record<DockSlotId, Element | null> {
+  if (currentVideoId() === null) return { below: null, side: null };
   let side: Element | null = null;
   for (const selector of YT_SELECTORS.dockSide) {
     side = document.querySelector(selector);
@@ -1294,8 +1303,12 @@ function refreshWindows(): void {
   // 動画の上に残りうるので、全画面では出さない
   const fullscreen = document.fullscreenElement != null;
   const onVideoPage = currentVideoId() !== null;
+  if (!onVideoPage) {
+    leaveVideoPage();
+    return;
+  }
   // 覚えた位置を読む前に出すと、最初の位置に出てから覚えた位置へ跳ぶ絵になる (spec A.2)
-  const canShow = layoutReady && !fullscreen && onVideoPage;
+  const canShow = layoutReady && !fullscreen;
 
   const barWasHidden = barWindow.element.hidden;
   const listWasHidden = listWindow.element.hidden;
@@ -1312,6 +1325,36 @@ function refreshWindows(): void {
   if (barWasHidden && !barWindow.element.hidden) placeInitial("bar");
   if (listWasHidden && !listWindow.element.hidden) placeInitial("list");
   if (settingsWasHidden && !settingsWindow.element.hidden) placeInitial("settings");
+}
+
+/**
+ * 動画ページ以外へ移った (または動画ページ以外で読み込まれた)。**ページに何も差さない** (C2.7 の spa-inject の追記):
+ * 3 つの窓を隠してページから外し、ドック枠も外す (dockAnchors が null を渡す)。窓・枠の中身・覚えた位置・記憶はメモリに
+ * 残り、動画ページへ戻ると mount (と onPageMutated の付け直し) が差し直す。**sync は呼ばない**: 使えない枠の窓を
+ * body へ退避させてしまう。再生位置のループも止める (ホームで毎フレーム回さない。戻れば mount が張り直す)。
+ * シークバーの帯とプレビューの canvas は、それぞれの refresh が動画ページ以外では外す
+ */
+function leaveVideoPage(): void {
+  barWindow.setVisible(false);
+  listWindow.setVisible(false);
+  settingsWindow.setVisible(false);
+  dockManager.attach(dockAnchors());
+  for (const id of WINDOW_IDS) windowOf(id).element.remove();
+  stopPlayheadWatch();
+}
+
+/**
+ * 浮いた窓を body の直下に付け直す。**使える枠に入っている窓は枠の中のまま** (枠ごと差し直すのは attach)。
+ * #below の中だと YouTube の再描画で外れ、body の子を差し替えられると窓だけが外れる。動画ページ以外から戻ったとき
+ * (leaveVideoPage が外した) もここで戻す
+ */
+function attachWindowsToBody(): void {
+  for (const id of WINDOW_IDS) {
+    const slot = dockManager.slotOf(id);
+    if (slot !== null && dockManager.isUsable(slot)) continue;
+    const frame = windowOf(id).element;
+    if (frame.parentElement !== document.body) document.body.append(frame);
+  }
 }
 
 /**
@@ -2093,19 +2136,23 @@ function watchPlayerSize(): void {
 }
 
 function mount(): void {
+  // 動画ページ以外ではページに何も差さない (C2.7 の spa-inject の追記)。バーも組み立てない (タイトルもプレイヤーも無い)
+  if (currentVideoId() === null) {
+    refreshWindows();
+    return;
+  }
   // ドック枠を差す先に付け直す (C2.7)。YouTube が子を作り直すと枠ごと外れる。使えるかが変わったら
   // (1 列表示になった・戻った・差す先が消えた) 窓を出し直す (退避 / 枠へ戻す)。**バーの有無より先に見る**
   if (dockManager.attach(dockAnchors())) refreshWindows();
-  // 浮いた窓は body の直下に置く (#below の中だと YouTube の再描画で外れる)。**バーの有無より先に見る。**
-  // body の子を差し替えられると窓だけが外れる。**使える枠に入っている窓は枠の中のまま** (枠ごと差し直すのは attach)
-  for (const id of WINDOW_IDS) {
-    const slot = dockManager.slotOf(id);
-    if (slot !== null && dockManager.isUsable(slot)) continue;
-    const frame = windowOf(id).element;
-    if (frame.parentElement !== document.body) document.body.append(frame);
-  }
+  // 浮いた窓を body の直下に置く。**バーの有無より先に見る**
+  attachWindowsToBody();
   // **バーの有無より先に見る。** バーを作り直さなくても、プレイヤーの要素だけが替わることがある
   watchPlayerSize();
+  // 再生位置の監視も同じ。動画ページ以外へ移ると leaveVideoPage が止めるので、戻ったとき (バーは残っている) に張り直す
+  if (!playheadWatched) {
+    playheadWatched = true;
+    watchPlayhead();
+  }
   if (document.getElementById(BAR_ID) !== null) return;
 
   // #below に置くのはドック枠だけ (C2.1。15 行上の dockManager.attach が先頭に差している)。
@@ -2131,13 +2178,6 @@ function mount(): void {
 
   // 窓の中身だけを入れ替える。窓は作り直さないので、位置も大きさも変わらない (spec A.3)
   barWindow.body.replaceChildren(bar);
-
-  // 監視は 1 度だけ張る。mount は DOM 変化のたびに呼ばれるので、
-  // ここで毎回張ると同じ更新が何本も走る
-  if (!playheadWatched) {
-    playheadWatched = true;
-    watchPlayhead();
-  }
 
   // 作り直したバーは空で無効の状態。確定済みの範囲があれば載せ直す
   rangeBar?.setEnabled(canAdjustRange());
@@ -2407,6 +2447,11 @@ function onSettingsChanged(
 
 /** 直前に見ていた URL。SPA 遷移の検出に使う。start() が読み直す */
 let lastHref = location.href;
+/**
+ * 直前に見ていた URL が動画ページか。DOM の変化のたびに URL を解かないための写し (lastHref と一緒に書く)。
+ * ホームや検索結果では body の変化が多いので、URL が変わっていなければ先頭で抜ける
+ */
+let lastHrefIsVideoPage = false;
 
 /**
  * テーマの切り替えに追従する。YouTube は <html dark> を付け外しするだけで
@@ -2431,6 +2476,10 @@ let themeObserver!: MutationObserver;
 function onPageMutated(): void {
   if (location.href !== lastHref) {
     lastHref = location.href;
+    lastHrefIsVideoPage = currentVideoId() !== null;
+    // 動画ページへ戻ったら、外していた窓を先に body へ戻す。下の refreshLists が窓を出した直後に最初の位置を
+    // 取り直す (placeInitial) ので、文書に無い窓 (寸法 0) を測らせない
+    if (lastHrefIsVideoPage) attachWindowsToBody();
     // 別の動画へ移ったら、範囲も帯もこの画面のものではなくなる。帯を残すと
     // 旧動画の位置に青い帯が出たままになり、ハンドルを動かせてしまうと
     // 見えていない動画の範囲を書き換えることになる
@@ -2438,8 +2487,11 @@ function onPageMutated(): void {
     refreshOverlay();
     refreshTelopPreview();
     // 一覧も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
-    // 動画ページ以外へ移ったら、3 つの窓ごと隠れる (refreshWindows)
+    // 動画ページ以外へ移ったら、3 つの窓もドック枠もページから外れる (refreshWindows → leaveVideoPage)
     refreshLists();
+  } else if (!lastHrefIsVideoPage) {
+    // 動画ページ以外で URL が変わっていない。外すものは移ったときに外してある (ホームの DOM の変化で毎回何もしない)
+    return;
   }
   mount();
 }
@@ -2502,6 +2554,7 @@ export function start(): void {
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
   chrome.storage.onChanged.addListener(onSettingsChanged);
   lastHref = location.href;
+  lastHrefIsVideoPage = currentVideoId() !== null;
   themeObserver = new MutationObserver(onThemeChanged);
   themeObserver.observe(document.documentElement, {
     attributes: true,

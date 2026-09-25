@@ -57,7 +57,8 @@ export type DockManager = {
   elements: Record<DockSlotId, HTMLElement>;
   /**
    * 枠を差す先に付け直す (mount・resize のたび)。差す先の中に無ければ先頭に差す。差す先が無い・幅 0 の枠は
-   * 使えない (isUsable が false。中の窓は次の sync で退避)。**使えるかが変わったら true** (呼び出し側が窓を出し直す)
+   * 使えない (isUsable が false。中の窓は次の sync で退避)。**差す先が無い枠はページから外す** (動画ページ以外で
+   * 枠を残さない)。**使えるかが変わったら true** (呼び出し側が窓を出し直す)
    */
   attach(anchors: Record<DockSlotId, Element | null>): boolean;
   isUsable(slot: DockSlotId): boolean;
@@ -546,6 +547,9 @@ export function createDockManager(options: DockManagerOptions): DockManager {
         // YouTube が差す先の子を作り直すと、枠は中の窓ごとメモリに残って外れる。先頭に差し直す (C2.7)。
         // 差す先の中にあれば動かさない (YouTube が後から先頭に何かを足しても、取り合わない)
         if (anchor !== null && !anchor.contains(slot.root)) anchor.prepend(slot.root);
+        // 差す先が無ければページから外す (spa-inject)。動画ページ以外では youtube.ts が null を渡す: YouTube は隠れた
+        // 動画ページ (#below) を残すので、差したままだとホームに枠が残る。中の窓と記憶はメモリに残り、戻れば上で差し直す
+        if (anchor === null) slot.root.remove();
         // 差す先が無い (動画ページ以外・SPA の途中・1 列表示で消えた) か幅 0 なら使えない (C2.1)
         const usable = anchor !== null && anchor.getBoundingClientRect().width > 0;
         if (usable !== slot.usable) {

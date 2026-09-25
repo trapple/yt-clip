@@ -2964,7 +2964,7 @@ describe("区間・テロップの窓と設定の窓", () => {
     expect(listElement().hidden).toBe(false);
   });
 
-  test("動画ページ以外では区間・テロップの窓も設定の窓も出さない", async () => {
+  test("動画ページ以外では区間・テロップの窓も設定の窓も出さない (ページから外す)", async () => {
     await showEdit();
     clickButton("⚙");
     expect(listElement().hidden).toBe(false);
@@ -2974,8 +2974,10 @@ describe("区間・テロップの窓と設定の窓", () => {
     document.body.append(document.createElement("div"));
     await flush();
 
-    expect(listElement().hidden).toBe(true);
-    expect(settingsWindowElement().hidden).toBe(true);
+    // 隠すだけでなく、ページに何も残さない (spa-inject。dockable-windows の spec C2.7)
+    expect(document.getElementById("yt-clip-list")).toBeNull();
+    expect(document.getElementById("yt-clip-settings")).toBeNull();
+    expect(ourElements()).toBe(0);
   });
 
   test("テーマを切り替えると 2 つの窓の配色も変わる", async () => {
@@ -3489,14 +3491,14 @@ describe("フロートの窓", () => {
     expect(windowsHidden()).toEqual([false, false, false]);
   });
 
-  test("動画ページ以外では 3 つとも隠す。戻れば出す", async () => {
+  test("動画ページ以外では 3 つともページから外す。戻れば出す", async () => {
     await showList();
     clickButton("⚙");
 
     history.pushState({}, "", "/");
     document.body.append(document.createElement("div"));
     await flush();
-    expect(windowsHidden()).toEqual([true, true, true]);
+    expect(ourElements()).toBe(0);
 
     history.pushState({}, "", "/watch?v=video-a");
     document.body.append(document.createElement("div"));
