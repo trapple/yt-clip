@@ -1,8 +1,9 @@
 /**
- * フロートの窓 (バーの窓・パネルの窓) の位置と大きさ
- * (`.claude/specs/2026-09-24-floating-windows-design.md` A.2 / A.3)。
+ * フロートの窓 (バーの窓・区間・テロップの窓・設定の窓) の位置と大きさ
+ * (`.claude/specs/2026-09-24-floating-windows-design.md` A.2 / A.3、
+ * `.claude/specs/2026-09-25-dockable-windows-design.md` C1.3)。
  *
- * 覚えた位置の保存・読み込み・検証と、画面に詰める計算を持つ。計算は純粋関数にして、
+ * 覚えた配置の保存・読み込み・検証と、画面に詰める計算を持つ。計算は純粋関数にして、
  * DOM を持たないテストで確かめる。
  *
  * **`chrome.storage.local` に置く (sync にしない)。** 画面の大きさと窓の置き場所の好みは
@@ -11,16 +12,38 @@
 
 export const WINDOW_LAYOUT_KEY = "windowLayout";
 
-export type WindowId = "bar" | "panel";
-const WINDOW_IDS: readonly WindowId[] = ["bar", "panel"];
+/** 窓の名前 (窓の分割の spec C1.1)。覚えた配置の鍵にも使う */
+export type WindowId = "bar" | "list" | "settings";
+const WINDOW_IDS: readonly WindowId[] = ["bar", "list", "settings"];
+/** ドック枠の名前 (C2)。C1 では型だけを置き、枠の中身は常に空 */
+export type DockSlotId = "below" | "side";
+const DOCK_SLOT_IDS: readonly DockSlotId[] = ["below", "side"];
+/** 枠に入っている窓 (タブの並び。前から) と、前に出しているタブ (C2) */
+export type DockState = { tabs: WindowId[]; active?: WindowId };
 
 /** 画面 (viewport) の座標で、窓の左上と大きさ。height が無い窓は高さを中身に任せる */
 export type WindowRect = { left: number; top: number; width: number; height?: number };
-export type WindowLayout = Partial<Record<WindowId, WindowRect>>;
+/** 覚えている配置の形の版。古い形 (v1: `{ bar?, panel? }`) は version を持たない */
+export const WINDOW_LAYOUT_VERSION = 2;
+/**
+ * 覚える配置 (C1.3)。**C2 の枠の情報も入る形にしておく** (C1 と C2 で読み替えを 2 回書かない)
+ */
+export type WindowLayout = {
+  version: 2;
+  /** フロートで置いた位置と大きさ。無い窓は最初の位置 (A.2 / C1.3) */
+  float: Partial<Record<WindowId, WindowRect>>;
+  /** 枠ごとの、入っている窓 (タブの並び。前から) と前に出しているタブ。C1 では常に空 */
+  docks: Partial<Record<DockSlotId, DockState>>;
+};
 export type Viewport = { width: number; height: number };
-/** 掴む場所 (パネルは見出し、バーはつまみ) の箱。窓の左上からの位置 */
+/** 掴む場所 (区間・テロップの窓と設定の窓は見出し、バーはつまみ) の箱。窓の左上からの位置 */
 export type GripBox = { left: number; top: number; width: number; height: number };
 export type SizeLimits = { minWidth: number; minHeight?: number };
+
+/** 何も覚えていないときの配置 (3 つとも最初の位置)。呼ぶたびに新しい組を返す (書き換えても共有しない) */
+export function emptyWindowLayout(): WindowLayout {
+  return { version: WINDOW_LAYOUT_VERSION, float: {}, docks: {} };
+}
 
 /*
  * YouTube のヘッダーの寸法。**実機の値に合わせている。**
@@ -69,34 +92,79 @@ function parseRect(value: unknown): WindowRect | null {
   return toRect(source.left, source.top, source.width, source.height);
 }
 
+/** 組 (配列でない object) か。配列も typeof は "object" なので分ける */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /**
- * 覚えた位置を読む。**型は保証されない** (古い版が書いたもの・手で書き換えたもの)。
- * 窓ごとに型と範囲を確かめ、合わない窓は捨てて最初の位置に戻す。握りつぶさず理由は残す
- * (設定の mergeSettings と同じ作法)
+ * 覚えた位置を窓ごとに読む。keys は「保存されている鍵 → 窓の名前」。型と範囲が合わない窓は
+ * 捨てて warn する (ほかの窓は使う)。知らない鍵は黙って無視する (後の版で窓が増えても古い版が騒がない)
  */
-export function mergeWindowLayout(stored: unknown): WindowLayout {
-  if (stored === undefined) return {};
-  if (stored === null || typeof stored !== "object") {
-    console.warn(
-      `[yt-clip] 保存された windowLayout が使えないため最初の位置を使います: ${String(stored)}`,
-    );
-    return {};
-  }
-  const source = stored as Record<string, unknown>;
-  const layout: WindowLayout = {};
-  for (const id of WINDOW_IDS) {
-    const value = source[id];
+function readRects(
+  source: Record<string, unknown>,
+  keys: readonly (readonly [string, WindowId])[],
+  path: string,
+): Partial<Record<WindowId, WindowRect>> {
+  const rects: Partial<Record<WindowId, WindowRect>> = {};
+  for (const [key, id] of keys) {
+    const value = source[key];
     if (value === undefined) continue;
     const rect = parseRect(value);
     if (rect === null) {
       console.warn(
-        `[yt-clip] 保存された windowLayout.${id} が使えないため最初の位置を使います: ${JSON.stringify(value)}`,
+        `[yt-clip] 保存された windowLayout.${path}${key} が使えないため最初の位置を使います: ${JSON.stringify(value)}`,
       );
       continue;
     }
-    layout[id] = rect;
+    rects[id] = rect;
   }
-  return layout;
+  return rects;
+}
+
+/** 古い形 (v1) の鍵 → 窓。パネルの位置は区間・テロップの窓が継ぐ。設定の窓は v1 に無い (C1.3) */
+const V1_KEYS = [
+  ["bar", "bar"],
+  ["panel", "list"],
+] as const;
+const V2_KEYS = WINDOW_IDS.map((id) => [id, id] as const);
+
+/**
+ * 覚えた配置を読む (C1.3)。**型は保証されない** (古い版が書いたもの・手で書き換えたもの)。
+ *
+ * - `version` のキーが無ければ古い形 (v1: `{ bar?, panel? }`)。`bar` → `float.bar`、`panel` → `float.list`
+ *   に読み替える。**読み替えた組は書き戻さない** (読み込みは書かない。次に動かしたときに v2 で書く)
+ * - `version` が 2 なら v2。`float` と `docks` が組でなければ、組ごと捨てて warn する
+ * - それ以外の `version` (後の版が書いた 3 など) は形が分からないので、推測で読まずに warn して最初の配置
+ *
+ * 窓ごとに型と範囲を確かめ、合わない窓は捨てて最初の位置に戻す。握りつぶさず理由は残す
+ * (設定の mergeSettings と同じ作法)。**`docks` の中身はまだ読まない** (枠に入れる経路がまだ無い。
+ * タブの並びの検証はドック枠を入れるときに足す)
+ */
+export function mergeWindowLayout(stored: unknown): WindowLayout {
+  if (stored === undefined) return emptyWindowLayout();
+  if (!isRecord(stored)) {
+    console.warn(
+      `[yt-clip] 保存された windowLayout が使えないため最初の位置を使います: ${JSON.stringify(stored)}`,
+    );
+    return emptyWindowLayout();
+  }
+  if (!("version" in stored)) {
+    return { ...emptyWindowLayout(), float: readRects(stored, V1_KEYS, "") };
+  }
+  if (stored.version !== WINDOW_LAYOUT_VERSION) {
+    console.warn(
+      `[yt-clip] 保存された windowLayout の版 (${JSON.stringify(stored.version)}) を読めないため最初の位置を使います`,
+    );
+    return emptyWindowLayout();
+  }
+  if (!isRecord(stored.float) || !isRecord(stored.docks)) {
+    console.warn(
+      `[yt-clip] 保存された windowLayout の float / docks が使えないため最初の位置を使います: ${JSON.stringify(stored)}`,
+    );
+    return emptyWindowLayout();
+  }
+  return { ...emptyWindowLayout(), float: readRects(stored.float, V2_KEYS, "float.") };
 }
 
 /**
@@ -159,8 +227,9 @@ export function initialBarRect(
 }
 
 /**
- * 保存を 1 本の列にする。**2 つの窓をすぐ続けて動かすと、読んで書き戻す処理が重なり、
- * 先の書き込みが後の書き込みで消える** (どちらも古い値を読んでから書くため)
+ * 保存を 1 本の列にする。**書き込みの順を保つ** (先に呼んだ保存が後に呼んだ保存より後に届き、
+ * 新しい配置を古い配置で上書きしないように)。組ごと書くようになって「読んで書き戻す処理が重なり、
+ * 先の書き込みが後の書き込みで消える」ことは無くなったが、書き込みが呼んだ順に済む保証は無いので残す
  */
 let queue: Promise<unknown> = Promise.resolve();
 
@@ -171,18 +240,29 @@ function serialize<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** 保存されている組をそのまま読む (書き戻す用)。検証しないのは、使えない窓も消さずに残すため */
-async function readStored(): Promise<Record<string, unknown>> {
-  const stored = (await chrome.storage.local.get(WINDOW_LAYOUT_KEY))[WINDOW_LAYOUT_KEY];
-  return stored !== null && typeof stored === "object"
-    ? { ...(stored as Record<string, unknown>) }
-    : {};
+/** 保存する形に写す。高さが無い窓は高さのキーごと持たない (保存に undefined を書かない) */
+function toStored(layout: WindowLayout): WindowLayout {
+  const float: Partial<Record<WindowId, WindowRect>> = {};
+  for (const id of WINDOW_IDS) {
+    const rect = layout.float[id];
+    if (rect !== undefined) float[id] = toRect(rect.left, rect.top, rect.width, rect.height);
+  }
+  const docks: Partial<Record<DockSlotId, DockState>> = {};
+  for (const slot of DOCK_SLOT_IDS) {
+    const dock = layout.docks[slot];
+    if (dock === undefined) continue;
+    docks[slot] =
+      dock.active === undefined
+        ? { tabs: [...dock.tabs] }
+        : { tabs: [...dock.tabs], active: dock.active };
+  }
+  return { version: WINDOW_LAYOUT_VERSION, float, docks };
 }
 
 /**
- * 覚えた位置を読む。
+ * 覚えた配置を読む。
  *
- * ※ 局所例外 (Fail Fast): **読めなくても reject しない。** warn を残して空を返し、2 つの窓は
+ * ※ 局所例外 (Fail Fast): **読めなくても reject しない。** warn を残して空の組を返し、窓は
  * 最初の位置で出る (spec A.2「読み込みが失敗 (reject) したら console.warn を残して最初の位置で
  * 出す」)。投げると、呼び出し側が窓を出さないままにする経路を作りうる
  */
@@ -192,24 +272,20 @@ export async function loadWindowLayout(): Promise<WindowLayout> {
     return mergeWindowLayout(stored[WINDOW_LAYOUT_KEY]);
   } catch (error) {
     console.warn(`[yt-clip] 窓の位置を読めないため最初の位置を使います: ${String(error)}`);
-    return {};
+    return emptyWindowLayout();
   }
 }
 
-/** 1 つの窓の位置と大きさを覚える。もう片方の窓は残す */
-export function saveWindowRect(id: WindowId, rect: WindowRect): Promise<void> {
+/**
+ * 窓の配置を組ごと覚える (C1.3)。**前に覚えていた組は読まない** (読んで書き戻さない)。組は
+ * youtube.ts が持つ写しから毎回作る: ドック枠を入れると、1 つの窓の操作で 2 つの枠のタブの並びが
+ * 変わりうり (引き出して別の枠へ)、窓ごとの部分更新では整合が取れない。
+ * **呼んだ時点の組を写してから列に並べる** (並んでいる間に呼び出し側が写しを書き換えても、
+ * この呼び出しの組を書く。後の組は後の呼び出しが書く)
+ */
+export function saveWindowLayout(layout: WindowLayout): Promise<void> {
+  const value = toStored(layout);
   return serialize(async () => {
-    const current = await readStored();
-    current[id] = toRect(rect.left, rect.top, rect.width, rect.height);
-    await chrome.storage.local.set({ [WINDOW_LAYOUT_KEY]: current });
-  });
-}
-
-/** 1 つの窓の覚えた位置を消す (掴む場所のダブルクリックで最初の位置に戻したとき) */
-export function clearWindowRect(id: WindowId): Promise<void> {
-  return serialize(async () => {
-    const current = await readStored();
-    delete current[id];
-    await chrome.storage.local.set({ [WINDOW_LAYOUT_KEY]: current });
+    await chrome.storage.local.set({ [WINDOW_LAYOUT_KEY]: value });
   });
 }

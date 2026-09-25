@@ -21,6 +21,7 @@ import {
 } from "vitest";
 import { reduce } from "@/background/state";
 import type { Message } from "@/shared/messages";
+import type { WindowLayout } from "@/content/window-layout";
 import {
   FAILURE_MESSAGES,
   type ClipRange,
@@ -262,7 +263,10 @@ let releaseLayout: () => void = () => undefined;
 const layoutGate = new Promise<void>((resolve) => {
   releaseLayout = resolve;
 });
-/** 読み込み時に覚えていた窓の位置。この位置で出ることを確かめる (jsdom の画面 1024x768 に収まる値) */
+/**
+ * 読み込み時に覚えていた窓の位置。この位置で出ることを確かめる (jsdom の画面 1024x768 に収まる値)。
+ * **古い形 (v1: version が無い) で置く。** panel は区間・テロップの窓が継ぐ (窓の分割の spec C1.3)
+ */
 const LAYOUT_AT_LOAD = {
   bar: { left: 40, top: 500, width: 700 },
   panel: { left: 300, top: 120, width: 360, height: 400 },
@@ -3117,7 +3121,10 @@ describe("フロートの窓", () => {
     await flush();
     expect(frame.style.left).toBe(`${left + 50}px`);
     expect(frame.style.top).toBe(`${top + 30}px`);
-    expect(layoutWrites).toEqual([{ bar: { left: left + 50, top: top + 30, width } }]);
+    // 組ごと書く (v2)。動かしていない窓の位置は書かない (float に bar だけ)
+    expect(layoutWrites).toEqual([
+      { version: 2, float: { bar: { left: left + 50, top: top + 30, width } }, docks: {} },
+    ]);
   });
 
   test("パネルの窓は見出しをドラッグすると動き、位置を覚える", async () => {
@@ -3130,7 +3137,71 @@ describe("フロートの窓", () => {
 
     expect(frame.style.left).toBe(`${left - 100}px`);
     expect(frame.style.top).toBe("88px");
-    expect(layoutWrites).toEqual([{ panel: { left: left - 100, top: 88, width: 400 } }]);
+    // パネルの位置は区間・テロップの窓 (list) として覚える。動かしていないバーは書かない
+    expect(layoutWrites).toEqual([
+      { version: 2, float: { list: { left: left - 100, top: 88, width: 400 } }, docks: {} },
+    ]);
+  });
+
+  /** 区間・テロップの窓を出す (エディットで区間が 1 つある)。出すかは一覧の中身で決まる */
+  async function showList(): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  test("画面に詰められた窓の覚えた位置を、ほかの窓を動かしたときに詰めた後の位置で上書きしない", async () => {
+    await showList();
+    // jsdom は寸法を持たない。一覧の窓の見出し (掴む場所) を幅 400・高さ 32 に決め打ちし、詰め方を測れるようにする
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this === panelElement()) return boxAt(0, 0, 400, 300);
+        if (this === panelHeader()) return boxAt(0, 0, 400, 32);
+        return boxAt(0, 0, 0, 0);
+      });
+    const setWidth = (width: number): void => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+      window.dispatchEvent(new Event("resize"));
+    };
+    try {
+      // 最初の位置 (1024 - 416 = 608, 68) から下へ 100px 動かして覚える
+      drag(panelHeader(), 0, 100);
+      await flush();
+      const placed = { left: 608, top: 168, width: 400 };
+      expect((storedLayout as WindowLayout).float.list).toEqual(placed);
+
+      // ブラウザを狭めると、見出しが画面に残るところ (800 - 400) まで詰められる
+      setWidth(800);
+      expect(panelElement().style.left).toBe("400px");
+
+      // その間にバーの窓を動かして覚えても、一覧の窓の覚えた位置は置いた場所のまま
+      // (窓の rect() から組を作ると、詰めた後の 400 で書かれて、広げ直しても戻らなくなる)
+      drag(barGrip(), 10, 0);
+      await flush();
+      const stored = storedLayout as WindowLayout;
+      expect(stored.float.list).toEqual(placed);
+      expect(Object.keys(stored.float).sort()).toEqual(["bar", "list"]);
+    } finally {
+      setWidth(1024);
+      spy.mockRestore();
+    }
+  });
+
+  test("ダブルクリックで戻した窓は組から消え、ほかの窓の覚えた位置は残る", async () => {
+    await showList();
+    drag(barGrip(), 30, 20);
+    drag(panelHeader(), -100, 20);
+    await flush();
+    expect(Object.keys((storedLayout as WindowLayout).float).sort()).toEqual(["bar", "list"]);
+
+    dblclick(panelHeader());
+    await flush();
+
+    const stored = storedLayout as WindowLayout;
+    expect(stored.version).toBe(2);
+    expect(Object.keys(stored.float)).toEqual(["bar"]);
+    expect(stored.docks).toEqual({});
   });
 
   test("つまみ・見出しをダブルクリックすると最初の位置に戻り、覚えた位置を消す", async () => {
@@ -3141,8 +3212,12 @@ describe("フロートの窓", () => {
       drag(panelHeader(), -100, 20);
       await flush();
       expect(storedLayout).toEqual({
-        bar: { left: 124, top: 588, width: 800 },
-        panel: { left: window.innerWidth - 516, top: 88, width: 400 },
+        version: 2,
+        float: {
+          bar: { left: 124, top: 588, width: 800 },
+          list: { left: window.innerWidth - 516, top: 88, width: 400 },
+        },
+        docks: {},
       });
 
       dblclick(barGrip());
@@ -3157,7 +3232,7 @@ describe("フロートの窓", () => {
       });
       expect(panelElement().style.left).toBe(`${window.innerWidth - 416}px`);
       expect(panelElement().style.top).toBe("68px");
-      expect(storedLayout).toEqual({});
+      expect(storedLayout).toEqual({ version: 2, float: {}, docks: {} });
     } finally {
       spy.mockRestore();
     }

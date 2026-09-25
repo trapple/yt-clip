@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   WINDOW_LAYOUT_KEY,
-  clearWindowRect,
+  emptyWindowLayout,
   fitRect,
   initialBarRect,
   loadWindowLayout,
   mergeWindowLayout,
-  saveWindowRect,
+  saveWindowLayout,
+  type WindowLayout,
 } from "@/content/window-layout";
 
 /** 受け入れ条件の画面 (1440x900 のノート PC の viewport = 1440x795) */
@@ -23,36 +24,81 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** 何も覚えていないときの組 (3 つとも最初の位置) */
+const EMPTY: WindowLayout = { version: 2, float: {}, docks: {} };
+
 describe("mergeWindowLayout", () => {
-  test("何も覚えていなければ空。warn しない", () => {
+  test("何も覚えていなければ空の組。warn しない", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout(undefined)).toEqual({});
+    expect(mergeWindowLayout(undefined)).toEqual(EMPTY);
+    expect(emptyWindowLayout()).toEqual(EMPTY);
     expect(warn).not.toHaveBeenCalled();
   });
 
-  test("2 つの窓の位置と大きさを読む。高さは無くてよい", () => {
+  test("v2 の組を読む。高さは無くてよい", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const stored = {
-      bar: { left: 24, top: 636, width: 988 },
-      panel: { left: 1024, top: 68, width: 400, height: 500 },
+      version: 2,
+      float: {
+        bar: { left: 24, top: 636, width: 988 },
+        list: { left: 1024, top: 68, width: 400, height: 500 },
+        settings: { left: 1024, top: 100, width: 400 },
+      },
+      docks: {},
     };
     expect(mergeWindowLayout(stored)).toEqual(stored);
     expect(warn).not.toHaveBeenCalled();
   });
 
-  test("型の違う窓は捨てて warn する。もう片方は使う", () => {
+  test("古い形 (v1: version が無い) は bar → float.bar、panel → float.list に読み替える。設定の窓は無い扱い", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const bar = { left: 24, top: 636, width: 988 };
+    const panel = { left: 1024, top: 68, width: 400, height: 500 };
+    expect(mergeWindowLayout({ bar, panel })).toEqual({
+      version: 2,
+      float: { bar, list: panel },
+      docks: {},
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("v1 の空の組 (前に全部の窓を戻した) は空の組。warn しない", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(mergeWindowLayout({})).toEqual(EMPTY);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("型の違う窓は捨てて warn する。ほかの窓は使う (v2)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const list = { left: 1024, top: 68, width: 400 };
+    expect(
+      mergeWindowLayout({
+        version: 2,
+        float: { bar: { left: "24", top: 636, width: 988 }, list },
+        docks: {},
+      }),
+    ).toEqual({ version: 2, float: { list }, docks: {} });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("windowLayout.float.bar");
+  });
+
+  test("型の違う窓は捨てて warn する。ほかの窓は使う (v1)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const panel = { left: 1024, top: 68, width: 400 };
-    expect(
-      mergeWindowLayout({ bar: { left: "24", top: 636, width: 988 }, panel }),
-    ).toEqual({ panel });
+    expect(mergeWindowLayout({ bar: { left: "24", top: 636, width: 988 }, panel })).toEqual({
+      version: 2,
+      float: { list: panel },
+      docks: {},
+    });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain("windowLayout.bar");
   });
 
   test("欠けた窓は捨てて warn する", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout({ bar: { left: 24, top: 636 } })).toEqual({});
+    expect(
+      mergeWindowLayout({ version: 2, float: { bar: { left: 24, top: 636 } }, docks: {} }),
+    ).toEqual(EMPTY);
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
@@ -67,21 +113,49 @@ describe("mergeWindowLayout", () => {
       { left: 0, top: 0, width: 400, height: 0 },
     ];
     for (const rect of bad) {
-      expect(mergeWindowLayout({ panel: rect })).toEqual({});
+      expect(mergeWindowLayout({ version: 2, float: { list: rect }, docks: {} })).toEqual(EMPTY);
     }
     expect(warn).toHaveBeenCalledTimes(bad.length);
   });
 
-  test("窓の組でないもの (数値・null) は空にして warn する", () => {
+  test("組でないもの (数値・null・配列) は空の組にして warn する", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout(42)).toEqual({});
-    expect(mergeWindowLayout(null)).toEqual({});
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(mergeWindowLayout(42)).toEqual(EMPTY);
+    expect(mergeWindowLayout(null)).toEqual(EMPTY);
+    expect(mergeWindowLayout([])).toEqual(EMPTY);
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+
+  test("読めない版 (3・1・数でない版) は空の組にして warn する (後の版が書いた形を推測で読まない)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const bar = { left: 24, top: 636, width: 988 };
+    expect(mergeWindowLayout({ version: 3, float: { bar }, docks: {} })).toEqual(EMPTY);
+    expect(mergeWindowLayout({ version: 1, bar })).toEqual(EMPTY);
+    expect(mergeWindowLayout({ version: "2", float: { bar }, docks: {} })).toEqual(EMPTY);
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("版");
+  });
+
+  test("v2 で float か docks が組でなければ、組ごと空にして warn する", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(mergeWindowLayout({ version: 2, float: null, docks: {} })).toEqual(EMPTY);
+    expect(mergeWindowLayout({ version: 2, float: {}, docks: 5 })).toEqual(EMPTY);
+    expect(mergeWindowLayout({ version: 2, float: {} })).toEqual(EMPTY);
+    expect(warn).toHaveBeenCalledTimes(3);
   });
 
   test("知らない窓の名前は黙って無視する (後の版で窓が増えても古い版が騒がない)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout({ other: { left: 0 } })).toEqual({});
+    expect(mergeWindowLayout({ version: 2, float: { other: { left: 0 } }, docks: {} })).toEqual(EMPTY);
+    expect(mergeWindowLayout({ other: { left: 0 } })).toEqual(EMPTY);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("ドック枠の中身はまだ読まない (空で返す。枠を入れる経路がまだ無い)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(
+      mergeWindowLayout({ version: 2, float: {}, docks: { below: { tabs: ["bar"] } } }),
+    ).toEqual(EMPTY);
     expect(warn).not.toHaveBeenCalled();
   });
 });
@@ -210,19 +284,22 @@ describe("initialBarRect", () => {
   });
 });
 
-describe("覚えた位置の保存と読み込み", () => {
+describe("覚えた配置の保存と読み込み", () => {
   const BAR = { left: 24, top: 636, width: 988 };
-  const PANEL = { left: 1024, top: 68, width: 400, height: 500 };
+  const LIST = { left: 1024, top: 68, width: 400, height: 500 };
   let store: Record<string, unknown>;
+  let writes: number;
 
   beforeEach(() => {
     store = {};
+    writes = 0;
     vi.stubGlobal("chrome", {
       storage: {
         local: {
           get: async (key: string): Promise<Record<string, unknown>> =>
             key in store ? { [key]: store[key] } : {},
           set: async (items: Record<string, unknown>): Promise<void> => {
+            writes += 1;
             Object.assign(store, items);
           },
         },
@@ -230,40 +307,75 @@ describe("覚えた位置の保存と読み込み", () => {
     });
   });
 
-  test("覚えた位置を読む", async () => {
-    store[WINDOW_LAYOUT_KEY] = { bar: BAR };
-    expect(await loadWindowLayout()).toEqual({ bar: BAR });
+  test("覚えた配置を読む", async () => {
+    store[WINDOW_LAYOUT_KEY] = { version: 2, float: { bar: BAR }, docks: {} };
+    expect(await loadWindowLayout()).toEqual({ version: 2, float: { bar: BAR }, docks: {} });
   });
 
-  test("読めなければ warn して空を返す (最初の位置で出す)", async () => {
+  test("古い形 (v1) を読んでも書き戻さない (次に動かしたときに v2 で書く)", async () => {
+    store[WINDOW_LAYOUT_KEY] = { bar: BAR, panel: LIST };
+    expect(await loadWindowLayout()).toEqual({
+      version: 2,
+      float: { bar: BAR, list: LIST },
+      docks: {},
+    });
+    expect(writes).toBe(0);
+    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ bar: BAR, panel: LIST });
+  });
+
+  test("読めなければ warn して空の組を返す (最初の位置で出す)", async () => {
     vi.stubGlobal("chrome", {
       storage: { local: { get: () => Promise.reject(new Error("壊れた")) } },
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(await loadWindowLayout()).toEqual({});
+    expect(await loadWindowLayout()).toEqual(EMPTY);
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  test("1 つの窓を覚えても、もう片方の窓は残す", async () => {
-    store[WINDOW_LAYOUT_KEY] = { panel: PANEL };
-    await saveWindowRect("bar", BAR);
-    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ bar: BAR, panel: PANEL });
+  test("組ごと書く。前に覚えていた組は読まずに置き換える", async () => {
+    store[WINDOW_LAYOUT_KEY] = { bar: BAR, panel: LIST };
+    await saveWindowLayout({ version: 2, float: { settings: LIST }, docks: {} });
+    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ version: 2, float: { settings: LIST }, docks: {} });
   });
 
-  test("2 つの窓を続けて覚えても、両方残る (読んで書き戻す処理を重ねない)", async () => {
-    await Promise.all([saveWindowRect("bar", BAR), saveWindowRect("panel", PANEL)]);
-    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ bar: BAR, panel: PANEL });
+  test("続けて保存すると、後に呼んだ組が残る (書き込みの順を保つ)", async () => {
+    // 先の書き込みだけを遅らせる。列に並べないと、後の組が先に書かれて先の組に上書きされる
+    const delays = [20, 0];
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          get: async (): Promise<Record<string, unknown>> => ({}),
+          set: async (items: Record<string, unknown>): Promise<void> => {
+            await new Promise((resolve) => setTimeout(resolve, delays.shift() ?? 0));
+            Object.assign(store, items);
+          },
+        },
+      },
+    });
+    await Promise.all([
+      saveWindowLayout({ version: 2, float: { bar: BAR }, docks: {} }),
+      saveWindowLayout({ version: 2, float: { list: LIST }, docks: {} }),
+    ]);
+    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ version: 2, float: { list: LIST }, docks: {} });
   });
 
   test("高さの無い窓は高さを書かない", async () => {
-    await saveWindowRect("bar", { left: 1, top: 2, width: 480, height: undefined });
-    const saved = (store[WINDOW_LAYOUT_KEY] as Record<string, object>).bar;
+    await saveWindowLayout({
+      version: 2,
+      float: { bar: { left: 1, top: 2, width: 480, height: undefined } },
+      docks: {},
+    });
+    const saved = (store[WINDOW_LAYOUT_KEY] as WindowLayout).float.bar;
     expect(Object.keys(saved ?? {})).toEqual(["left", "top", "width"]);
   });
 
-  test("消すのは 1 つの窓だけ", async () => {
-    store[WINDOW_LAYOUT_KEY] = { bar: BAR, panel: PANEL };
-    await clearWindowRect("bar");
-    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ panel: PANEL });
+  test("呼んだ後に渡した組を書き換えても、書く値は呼んだ時点のまま", async () => {
+    const layout: WindowLayout = { version: 2, float: { bar: { ...BAR } }, docks: {} };
+    const saving = saveWindowLayout(layout);
+    layout.float.list = LIST;
+    const bar = layout.float.bar;
+    if (bar !== undefined) bar.left = 0;
+    await saving;
+    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ version: 2, float: { bar: BAR }, docks: {} });
   });
 });

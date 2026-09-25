@@ -49,11 +49,11 @@ import {
   type Compositor,
 } from "@/content/telop-compositor";
 import {
-  clearWindowRect,
   initialBarRect,
   loadWindowLayout,
-  saveWindowRect,
+  saveWindowLayout,
   type WindowId,
+  type WindowLayout,
 } from "@/content/window-layout";
 import { encodeBase64 } from "@/shared/base64";
 import type { Message, MessageResponse } from "@/shared/messages";
@@ -134,10 +134,21 @@ const telopPreview = createTelopPreview();
  */
 let layoutReady = false;
 /**
- * ユーザーが動かした (か、覚えた位置で出した) 窓。**動かした窓は最初の位置を取り直さない**
- * (spec A.2: 置いた場所から動かさない)。掴む場所のダブルクリックで戻すと外れる
+ * フロートで置いた窓の位置と大きさの写し (覚えた配置の `float`。窓の分割の spec C1.3)。
+ *
+ * **書き換えるのは 3 箇所だけ**: 読み込み (`loadInitialLayout`) / ユーザーが動かした・大きさを変えた
+ * (`rememberWindowRect`) / 掴む場所のダブルクリックで戻した (`resetWindow`)。**窓の `rect()` からは作らない。**
+ * rect() は画面に詰めた後の位置で、別の窓を動かしただけで、動かしていない窓 (覚えた位置が無いはず) や
+ * 詰められた窓 (ブラウザを大きく戻すと置いた場所へ戻るはず) の覚えた位置を書き換えてしまう
+ * (floating-window.ts の requested と current の区別を壊す)。
+ *
+ * **ここに無い窓が「動かしていない窓」。** resize とプレイヤーの大きさの変化で最初の位置を取り直す
+ * (spec A.2)。ここにある窓は置いた場所から動かさない。
+ *
+ * 保存はこの写しから組ごと書く (読み直さない)。そのため**別のタブで後から動かした窓の位置は、このタブで次に
+ * 保存すると消える** (最後に動かしたタブの配置が残る。README の制約に書いてある)
  */
-const movedWindows = new Set<WindowId>();
+const floatLayout: Partial<Record<WindowId, WindowRect>> = {};
 /**
  * 右側のパネル (パネルの窓)。区間の一覧・テロップの一覧・設定を入れる。
  *
@@ -145,9 +156,10 @@ const movedWindows = new Set<WindowId>();
  * 窓の位置も持つので、バーを作り直すたびに作り直さない。中身の入れ替えは `buildBar`、body への
  * 付け直しは `mount`、出すかの判定は `refreshWindows` が行う
  */
+// パネルの位置は、窓を分けた後に区間・テロップの窓が継ぐ鍵 (list) で覚える
 const sidePanel = createSidePanel({
-  onUserMove: (rect) => rememberWindowRect("panel", rect),
-  onResetRequest: () => resetWindow("panel"),
+  onUserMove: (rect) => rememberWindowRect("list", rect),
+  onResetRequest: () => resetWindow("list"),
 });
 // パネルは body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
 applyPalette(sidePanel.element, isDarkTheme());
@@ -950,8 +962,8 @@ function listedItems(): { segments: ClipRange[]; telops: Telop[] } {
   return { segments: currentSegments, telops: currentTelops };
 }
 
-/** 窓の枠。id で引く (覚えた位置の鍵と同じ名前) */
-function windowOf(id: WindowId): FloatingWindow {
+/** 窓の枠。id で引く (覚えた配置の鍵と同じ名前) */
+function windowOf(id: "bar" | "list"): FloatingWindow {
   return id === "bar" ? barWindow : sidePanel.frame;
 }
 
@@ -963,9 +975,9 @@ function windowOf(id: WindowId): FloatingWindow {
  * 位置の直下に置く (窓は画面に固定なので、ページの座標に直さない)。バーの高さは出ている窓で
  * 測る (隠れている窓は 0 になる。そのため出した直後に取り直す: refreshWindows)
  */
-function initialWindowRect(id: WindowId): WindowRect | null {
+function initialWindowRect(id: "bar" | "list"): WindowRect | null {
   const viewport = { width: window.innerWidth, height: window.innerHeight };
-  if (id === "panel") return initialPanelRect(viewport);
+  if (id === "list") return initialPanelRect(viewport);
   const player = document.querySelector(YT_SELECTORS.player);
   if (player === null) return null;
   const box = player.getBoundingClientRect();
@@ -981,30 +993,44 @@ function initialWindowRect(id: WindowId): WindowRect | null {
   );
 }
 
-/** 動かしていない窓を最初の位置に置く。覚えた位置の読み込みが済む前は何もしない (まだ出さない) */
-function placeInitial(id: WindowId): void {
-  if (!layoutReady || movedWindows.has(id)) return;
+/**
+ * 動かしていない窓 (覚えた `float` に無い窓) を最初の位置に置く。覚えた配置の読み込みが済む前は
+ * 何もしない (まだ出さない)
+ */
+function placeInitial(id: "bar" | "list"): void {
+  if (!layoutReady || floatLayout[id] !== undefined) return;
   const rect = initialWindowRect(id);
   if (rect !== null) windowOf(id).place(rect);
 }
 
-/** ユーザーが窓を動かした・大きさを変えた (指を離した時点で 1 回)。次に開いたときも同じ位置に出す */
-function rememberWindowRect(id: WindowId, rect: WindowRect): void {
-  movedWindows.add(id);
-  void saveWindowRect(id, rect).catch((error: unknown) => {
-    // 覚えられないだけで、今の画面の窓は置いた場所にある。次に開くと最初の位置に戻る
+/**
+ * 覚える配置の組を、写し (`floatLayout`) から作る。**窓の `rect()` からは作らない**
+ * (floatLayout の doc)。ドック枠はまだ無いので `docks` は空
+ */
+function currentWindowLayout(): WindowLayout {
+  return { version: 2, float: { ...floatLayout }, docks: {} };
+}
+
+/** 覚える配置を組ごと保存する */
+function persistWindowLayout(): void {
+  void saveWindowLayout(currentWindowLayout()).catch((error: unknown) => {
+    // 覚えられないだけで、今の画面の窓は置いた場所にある。次に開くと前に覚えた配置で出る
     console.warn(`窓の位置を保存できませんでした: ${String(error)}`);
   });
 }
 
+/** ユーザーが窓を動かした・大きさを変えた (指を離した時点で 1 回)。次に開いたときも同じ位置に出す */
+function rememberWindowRect(id: WindowId, rect: WindowRect): void {
+  floatLayout[id] = { ...rect };
+  persistWindowLayout();
+}
+
 /** 掴む場所のダブルクリック。最初の位置に戻し、覚えた位置も消す (spec A.2) */
-function resetWindow(id: WindowId): void {
-  movedWindows.delete(id);
+function resetWindow(id: "bar" | "list"): void {
+  // 先に写しから消す。placeInitial は写しにある窓 (動かした窓) を置き直さない
+  delete floatLayout[id];
   placeInitial(id);
-  void clearWindowRect(id).catch((error: unknown) => {
-    // 消せないと、次に開いたときに戻す前の位置で出る。今の画面の窓は戻っている
-    console.warn(`窓の位置を消せませんでした: ${String(error)}`);
-  });
+  persistWindowLayout();
 }
 
 /**
@@ -1034,7 +1060,7 @@ function refreshWindows(): void {
   // **出した直後にだけ**取り直す。出ている間に状態が届くたびに取り直すと、ページを
   // スクロールした後に IN を押しただけで、バーがプレイヤーを追って跳ぶ (spec A.2)
   if (barWasHidden && !barWindow.element.hidden) placeInitial("bar");
-  if (panelWasHidden && !sidePanel.element.hidden) placeInitial("panel");
+  if (panelWasHidden && !sidePanel.element.hidden) placeInitial("list");
 }
 
 /**
@@ -1743,7 +1769,7 @@ function watchPlayhead(): void {
  */
 function placeUnmovedWindows(): void {
   placeInitial("bar");
-  placeInitial("panel");
+  placeInitial("list");
 }
 
 /** 大きさを見ているプレイヤー。**SPA 遷移や再描画で要素が替わる**ので、mount のたびに確かめる */
@@ -1944,10 +1970,11 @@ function loadInitialSettings(): void {
 function loadInitialLayout(): void {
   void loadWindowLayout()
     .then((layout) => {
-      for (const id of ["bar", "panel"] as const) {
-        const rect = layout[id];
+      for (const id of ["bar", "list"] as const) {
+        const rect = layout.float[id];
         if (rect === undefined) continue;
-        movedWindows.add(id);
+        // 写しを書き換える 3 箇所の 1 つ (floatLayout の doc)
+        floatLayout[id] = rect;
         windowOf(id).place(rect);
       }
     })
