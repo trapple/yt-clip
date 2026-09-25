@@ -348,6 +348,24 @@ function isCurrentRun(id: number): boolean {
 }
 
 /**
+ * このタブで録画の準備・録画・書き出しが走っているか (マスタースイッチの spec §4.1)。**立っている間はオフでも stop を
+ * 待つ** (driver の canStop)。
+ *
+ * **状態機械の busy ではない**: busy は応答で受け取った写しで、録画していない別の YouTube タブでも真になる。そのタブには
+ * state/changed が届かない (router は録画対象のタブにしか同報しない) ので、busy でオフを待たせると永久に片付かない。
+ *
+ * 立てる / 下ろすのは state/changed を受けたとき (届いた = このタブが録画対象。busy の間は立つ)。ほかに下ろすのは、
+ * オフの中止 (cancelForSwitch) の応答が busy でないときと、録画の結末 (notifyOutcome) を送り終えたとき。応答
+ * (send・content/loaded) では変えない (録画していないタブにも返る)。handle だけでは prepareRecording の seek 中を拾えない
+ */
+let capturing = false;
+/**
+ * 受けた state/changed の数。オフのための中止の応答が、送った後に届いた新しい状態より古いかを見分ける (cancelForSwitch。
+ * 判断メモ 33)
+ */
+let stateSeq = 0;
+
+/**
  * 状態機械へイベントを送る。
  *
  * `accepted` を渡すと、応答に載ってくる「適用後の状態」で結果を確かめる。
@@ -390,13 +408,34 @@ function send(
  * 無効化で送れなかったとき、黙って捨てると service worker は `encoding` のまま、
  * popup は `actions: []` で操作不能になる。ユーザーに見せたうえで、小さい
  * `FAIL` を送って状態を抜けさせる。
+ *
+ * **送り終えたら resolve する** (届いても、届かずに FAIL を送り出した後でも。reject しない)。録画の結末を送り終えた
+ * 時点を notifyOutcome が知るため
  */
-function notify(message: Message): void {
-  void chrome.runtime.sendMessage(message).catch((error: unknown) => {
-    setStatus(`拡張への送信に失敗しました: ${String(error)}`);
-    // 成果物を渡せていない以上、録画が中断されたのと結果は同じ
-    send({ type: "FAIL", reason: "recording-aborted" });
-  });
+function notify(message: Message): Promise<void> {
+  return chrome.runtime.sendMessage(message).then(
+    () => undefined,
+    (error: unknown) => {
+      setStatus(`拡張への送信に失敗しました: ${String(error)}`);
+      // 成果物を渡せていない以上、録画が中断されたのと結果は同じ
+      send({ type: "FAIL", reason: "recording-aborted" });
+    },
+  );
+}
+
+/**
+ * 録画の結末 (recorder/done・recorder/failed) を送る。**送り終えたら、このタブの録画は終わり** (spec §4.1)。オフを
+ * 待っていたなら、ここで片付けてよい。state/changed (preview / failed) は待たない: service worker が応答を返さないときに
+ * 永久に待たないため。届かなかったときは notify が FAIL を送り出した後に片付ける (FAIL の応答は待たない。判断メモ 4)
+ */
+function notifyOutcome(message: Message): void {
+  void notify(message).then(endCapture);
+}
+
+/** このタブの録画が終わった。オフを待っていたなら、ここで stop() が走る */
+function endCapture(): void {
+  capturing = false;
+  driver.reconcile();
 }
 
 function setStatus(text: string): void {
@@ -1506,6 +1545,8 @@ async function prepareRecording(
   startSec: number,
   expectedVideoId: string,
 ): Promise<void> {
+  // seek を待つ間にオフにして中止が通ったら、SEEK_DONE を送らない (オフの間は何も送らない。spec §1)
+  const id = runId;
   try {
     // 前の準備の残りで合成しない。以下のどの経路で抜けても、録画に使う
     // テロップは下で決め直したものか null になる
@@ -1578,10 +1619,12 @@ async function prepareRecording(
 
     video.pause();
     await seekTo(video, startSec);
+    if (!isCurrentRun(id)) return;
 
     send({ type: "SEEK_DONE" });
     setStatus(`${qualityNote}録画の準備をしています…`);
   } catch (error) {
+    if (!isCurrentRun(id)) return;
     if (error instanceof DrmProtectedError) {
       send({ type: "FAIL", reason: "drm-protected" });
       setStatus(error.message);
@@ -1603,6 +1646,8 @@ async function prepareRecording(
 
 /** service worker からの指示で録画を始める */
 async function beginRecording(): Promise<void> {
+  // 録画の準備 (startRecording) を待つ間にオフにしたかを見る (isCurrentRun)
+  const id = runId;
   // 録画が始まらなかったときに合成を残さないよう、try の外で持つ
   let videoOverride: Compositor | undefined;
   try {
@@ -1640,14 +1685,20 @@ async function beginRecording(): Promise<void> {
       videoOverride,
       onUnexpectedStop: (error) => {
         handle = null;
-        notify({ type: "recorder/failed", reason: error.message });
+        notifyOutcome({ type: "recorder/failed", reason: error.message });
       },
     });
-    notify({ type: "recorder/started" });
+    // 録画の準備を待っている間に片付いた (オフにして中止が通った)。始まった録画はここで捨てる。残すと、オフのページで
+    // MediaRecorder と captureStream が回り続ける (spec §1)。合成は録画の解放に繋がっているので一緒に止まる
+    if (!isCurrentRun(id)) {
+      abortRecording();
+      return;
+    }
+    void notify({ type: "recorder/started" });
   } catch (error) {
     // release は二度呼んでも安全 (startRecording の中で解放済みのことがある)
     videoOverride?.release();
-    notify({ type: "recorder/failed", reason: String(error) });
+    notifyOutcome({ type: "recorder/failed", reason: String(error) });
   }
 }
 
@@ -1659,11 +1710,15 @@ async function beginRecording(): Promise<void> {
  * MP4 の結合が要る
  */
 async function runRecording(segments: ClipRange[]): Promise<void> {
+  const id = runId;
   try {
     const video = getVideo();
     await startPlayback(video);
+    // 再生を待つ間にオフにして中止が通ったら、OUT の監視 (rVFC) をオフのページに張らない
+    if (!isCurrentRun(id)) return;
     watchSegmentEnd(video, segments, 0);
   } catch (error) {
+    if (!isCurrentRun(id)) return;
     send({ type: "FAIL", reason: "playback-failed" });
     setStatus(`再生を開始できませんでした: ${String(error)}`);
   }
@@ -1721,13 +1776,19 @@ async function advanceToSegment(
   }
 
   const recorder = handle;
+  // 継ぎ目の seek と再生を待つ間にオフにして中止が通ったら、続きを走らせない (isCurrentRun)
+  const id = runId;
   try {
     recorder.pause();
     video.pause();
     setStatus(`${index + 1} / ${segments.length} 区間目へ移動中…`);
 
     await seekTo(video, segment.startSec);
+    // オフのページで再生を始めない・waitForFreshFrame の rVFC を張らない (spec §1)。下の handle の確かめは
+    // waitForFreshFrame の後なので、それより前で断つ
+    if (!isCurrentRun(id)) return;
     await startPlayback(video);
+    if (!isCurrentRun(id)) return;
     await waitForFreshFrame(video);
 
     // **待っている間に録画が捨てられていないか確かめる。** 中止や失敗で
@@ -1748,6 +1809,8 @@ async function advanceToSegment(
     recorder.resume();
     watchSegmentEnd(video, segments, index);
   } catch (error) {
+    // オフにした後の seek の失敗 (時間切れ) を service worker へ送らない (オフの間は 0 件。spec §1)
+    if (!isCurrentRun(id)) return;
     send({ type: "FAIL", reason: "seek-failed" });
     setStatus(`${FAILURE_MESSAGES["seek-failed"]}: ${String(error)}`);
   }
@@ -1756,7 +1819,7 @@ async function advanceToSegment(
 /** 録画を止めて結果を送る。拡張の IndexedDB は content script から触れない */
 async function finishRecording(): Promise<void> {
   if (handle === null) {
-    notify({ type: "recorder/failed", reason: "録画が開始されていません" });
+    notifyOutcome({ type: "recorder/failed", reason: "録画が開始されていません" });
     return;
   }
 
@@ -1785,13 +1848,13 @@ async function finishRecording(): Promise<void> {
       }
     }
 
-    notify({
+    notifyOutcome({
       type: "recorder/done",
       base64: encodeBase64(bytes),
       mimeType: blob.type,
     });
   } catch (error) {
-    notify({ type: "recorder/failed", reason: String(error) });
+    notifyOutcome({ type: "recorder/failed", reason: String(error) });
   }
 }
 
@@ -2105,7 +2168,17 @@ function onRuntimeMessage(
   if (message.type !== "state/changed") return;
   sendResponse();
 
-  const state = message.state;
+  // state/changed は録画対象のタブにしか届かない (router は captureTabId にだけ同報する)。busy の間は、このタブで
+  // 録画の準備・録画・書き出しが走っている (capturing の doc。判断メモ 13)
+  stateSeq += 1;
+  capturing = BUSY_KINDS.has(message.state.kind);
+  handleStateChanged(message.state);
+  // 状態を処理し終えた。オフを待っていたなら、ここで片付けてよくなったかもしれない (spec §4.1)
+  driver.reconcile();
+}
+
+/** 状態の通知を画面と録画に反映する (onRuntimeMessage の state/changed) */
+function handleStateChanged(state: ClipState): void {
   applyStateToDisplay(state);
 
   // ready を離れたら範囲再生の監視は用済み。残すと、旧 OUT 位置を通過した
@@ -2135,6 +2208,48 @@ function onRuntimeMessage(
   if (state.kind === "recording") {
     void runRecording(state.segments);
   }
+}
+
+/**
+ * オフにしたが、このタブで録画が走っているので stop を待たされた (driver が待ちに入るたびに 1 回呼ぶ。spec §4.1)。
+ *
+ * - seeking / recording: 中止 (CANCEL_RECORDING) を送る。バーの「■ 中止」と同じ経路で、区間とテロップは残り ready に戻る
+ * - encoding: 何もしない。**書き出しが終わるまで待つ**: ここで録画を捨てると recorder/done が送られず、service worker が
+ *   encoding で固まる。書き出しの結末を送り終えたら notifyOutcome が reconcile する
+ */
+function onStopDeferred(): void {
+  if (lastKind !== "seeking" && lastKind !== "recording") return;
+  cancelForSwitch();
+}
+
+/**
+ * オフのための中止を送る。**応答の状態が busy でなければ、state/changed を待たずに片付ける** (判断メモ 1): router の同報は
+ * 送りっぱなしで、届かなかったときに永久に待たないため。state/changed (ready) が先に届けば、そちらで片付く。
+ * 中止が拒まれた (既に encoding へ進んでいた) ときは応答が busy のままなので、書き出しの結末を待つ。
+ * 送れなかった (拡張が読み込み直されて受け手が居ない) ときは、待っても結末は届かないので片付ける
+ */
+function cancelForSwitch(): void {
+  const id = runId;
+  const seq = stateSeq;
+  /**
+   * この応答が古くなったか (判断メモ 33)。オフ → オンで作り直した後か、送った後に届いた state/changed が録画中を
+   * 知らせた (オフを待つ間にオンへ戻して新しい録画が始まった) なら、新しい状態が正なので応答で旗を下ろさない
+   */
+  const stale = (): boolean => !isCurrentRun(id) || (stateSeq !== seq && capturing);
+  void chrome.runtime
+    .sendMessage({
+      type: "clip/event",
+      event: { type: "CANCEL_RECORDING" },
+    } satisfies Message)
+    .then((response: MessageResponse | undefined) => {
+      if (stale()) return;
+      if (response !== undefined && !BUSY_KINDS.has(response.state.kind)) endCapture();
+    })
+    .catch((error: unknown) => {
+      if (stale()) return;
+      setStatus(`操作を送信できませんでした: ${String(error)}`);
+      endCapture();
+    });
 }
 
 /**
@@ -2341,6 +2456,8 @@ function resetModuleState(): void {
   cancelPreview = null;
   handle = null;
   observedPlayer = null;
+  capturing = false;
+  stateSeq = 0;
 }
 
 /**
@@ -2421,7 +2538,16 @@ export function stop(): void {
   resetModuleState();
 }
 
-// オン / オフに合わせて start() / stop() を呼ぶ (マスタースイッチの spec §2.1)。**import 時にするのはこれだけ**:
-// chrome.storage.local を 1 回読み、onChanged を 1 本張る (どちらもページからは見えない)。オンなら読んだ後に start() が
-// 走り、オフなら何も呼ばない。戻り値は Task 8 で録画中のオフを扱うときに使う (判断メモ 16)
-createSwitchDriver({ start, stop });
+/**
+ * オン / オフに合わせて start() / stop() を呼ぶ (マスタースイッチの spec §2.1)。**import 時にするのはこれだけ**:
+ * chrome.storage.local を 1 回読み、onChanged を 1 本張る (どちらもページからは見えない)。オンなら読んだ後に start() が
+ * 走り、オフなら何も呼ばない。
+ * **このタブで録画が走っている間は stop を待つ** (canStop。spec §4.1)。待たされたら中止を送るか書き出しを待ち
+ * (onStopDeferred)、終わったところ (状態の通知の末尾・中止の応答・録画の結末の送り終わり) で reconcile する
+ */
+const driver = createSwitchDriver({
+  start,
+  stop,
+  canStop: () => !capturing,
+  onStopDeferred,
+});

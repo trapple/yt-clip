@@ -4355,3 +4355,172 @@ describe("オン / オフ (マスタースイッチ)", () => {
     expect(() => content.stop()).toThrow("走っていない");
   });
 });
+
+describe("録画中・書き出し中のオフ (マスタースイッチの spec §4.1)", () => {
+  // 前の describe の枠の中身を持ち越さない (判断メモ 34)
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
+    await flush();
+  });
+
+  afterEach(async () => {
+    // 次のテストのためにオンへ戻す (モジュールは 1 回だけ読み込んで使い回している)
+    if (storedEnabled === false) {
+      setEnabled(true);
+      await flush();
+    }
+  });
+
+  /** このタブで録画を始め、recording まで進める (実機の順序: seeking → recorder/start → recording) */
+  async function startRecordingInThisTab(): Promise<void> {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  test("録画中 (recording) にオフにすると CANCEL_RECORDING を送り、その応答 (ready) で片付く。録画も OUT の監視も止まる", async () => {
+    await startRecordingInThisTab();
+    const recorder = startedRecorder();
+    sent = [];
+
+    setEnabled(false);
+    // 応答が返るまでは片付けない (ページのバーは今までどおり)
+    expect(ourElements()).toBeGreaterThan(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([{ type: "CANCEL_RECORDING" }]);
+    expect(swState.kind).toBe("ready");
+    expect(ourElements()).toBe(0);
+    expect(recorder.state).toBe("inactive");
+    expect(video.pendingFrames()).toBe(0);
+  });
+
+  test("録画の準備中 (seeking) にオフにしても CANCEL_RECORDING を送って片付く", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    setEnabled(false);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+  });
+
+  test("複数区間の継ぎ目でオフにすると、片付けた後に seek が済んでも再生も rVFC も始めず、FAIL も送らない", async () => {
+    const TWO: ClipRange[] = [
+      { startSec: 83, endSec: 98 },
+      { startSec: 242, endSec: 250 },
+    ];
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    const recorder = startedRecorder();
+    const play = vi.spyOn(video.element, "play");
+    try {
+      sent = [];
+      // **オフを先に押す** (判断メモ 31): 中止の応答 (setTimeout) を先に積み、その後に 1 区間目の終わりを踏ませて継ぎ目の
+      // seek (seeked も setTimeout) を始める。応答 → stop → seek の完了、の順になる
+      setEnabled(false);
+      video.advanceFrame(98);
+      await flush();
+
+      expect(ourElements()).toBe(0);
+      expect(play).not.toHaveBeenCalled();
+      expect(video.pendingFrames()).toBe(0);
+      expect(clipEvents()).toEqual([{ type: "CANCEL_RECORDING" }]);
+      expect(recorder.state).toBe("inactive");
+    } finally {
+      play.mockRestore();
+    }
+  });
+
+  test("書き出し中 (encoding) にオフにすると中止は送らずに待ち、recorder/done を送り終えてから片付く", async () => {
+    await startRecordingInThisTab();
+    video.advanceFrame(20.1);
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    sent = [];
+
+    setEnabled(false);
+    await flush();
+    // 中止を送らない (encoding で止めると service worker が encoding で固まる)。窓もまだある
+    expect(clipEvents()).toEqual([]);
+    expect(barWindowElement().isConnected).toBe(true);
+
+    command("recorder/stop");
+    await flush();
+    await flush();
+
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+    expect(ourElements()).toBe(0);
+  });
+
+  test("プレビュー (preview) でオフにするとその場で片付き、RESET_MARKS も FAIL も送らない (クリップは状態機械に残る)", async () => {
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      segments: [RANGE],
+      telops: [],
+      meta: META_A,
+      mimeType: "video/mp4",
+    });
+    await flush();
+    sent = [];
+
+    setEnabled(false);
+    expect(ourElements()).toBe(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(swState.kind).toBe("preview");
+  });
+
+  test("録画していないタブ (応答で busy を受け取っただけ) はその場で片付き、CANCEL_RECORDING を送らない。オフ + busy でもオンに戻せる", async () => {
+    setEnabled(false);
+    await flush();
+    // 別のタブで録画中。このタブには state/changed は届かず、content/loaded の応答でだけ busy を知る
+    swState = { kind: "recording", segments: [RANGE], telops: [], meta: META_A };
+    sent = [];
+
+    setEnabled(true);
+    await flush();
+    // オフ + busy でもオンに戻せる (start が content/loaded を送る)
+    expect(sent).toContainEqual({ type: "content/loaded" });
+    expect(ourElements()).toBeGreaterThan(0);
+    sent = [];
+
+    setEnabled(false);
+    expect(ourElements()).toBe(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(swState.kind).toBe("recording");
+  });
+
+  test("書き出しを待っている間にオンへ戻したら stop しない (書き出しの結果はそのまま送る)", async () => {
+    await startRecordingInThisTab();
+    video.advanceFrame(20.1);
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+
+    setEnabled(false);
+    await flush();
+    setEnabled(true);
+    await flush();
+    command("recorder/stop");
+    await flush();
+    await flush();
+
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+    expect(barWindowElement().isConnected).toBe(true);
+    expect(onMessage).not.toBeNull();
+  });
+});
