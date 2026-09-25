@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   BAR_STYLE,
   FLOATING_WINDOW_STYLE,
+  PANEL_WINDOW_STYLE,
   RANGE_STYLE,
   SIDE_PANEL_STYLE,
   TELOP_TRACK_STYLE,
@@ -128,6 +129,23 @@ describe("右側のパネル", () => {
 
   test("枠の見た目 (地・見出し) は持たない (窓の枠が持つ)", () => {
     expect(Object.keys(SIDE_PANEL_STYLE)).toEqual(["collapseButton", "body"]);
+  });
+});
+
+describe("見出しのある窓の中身の箱", () => {
+  test("本体の中だけでスクロールする", () => {
+    expect(PANEL_WINDOW_STYLE.body).toContain("overflow-y:auto");
+    // flex の子は min-height:0 が無いと中身より縮まず、窓ごと伸びる
+    expect(PANEL_WINDOW_STYLE.body).toContain("min-height:0");
+  });
+
+  test("本体は flex で縦に並べる (折り畳みが無いので、出し入れする者がいない)", () => {
+    expect(PANEL_WINDOW_STYLE.body).toContain("display:flex");
+    expect(PANEL_WINDOW_STYLE.body).toContain("flex-direction:column");
+  });
+
+  test("枠の見た目 (地・見出し) と折り畳みのボタンは持たない", () => {
+    expect(Object.keys(PANEL_WINDOW_STYLE)).toEqual(["body"]);
   });
 });
 

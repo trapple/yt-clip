@@ -206,6 +206,23 @@ export const SIDE_PANEL_STYLE = {
 } as const;
 
 /**
+ * 見出しのある「幅と高さ」の窓 (`panel-window.ts`。区間・テロップの窓と設定の窓) の中身の箱。
+ * **枠の見た目 (地・影・見出し) は `FLOATING_WINDOW_STYLE` が持つ。** 位置・幅は YouTube の実機の値に
+ * 合わせるので、出所と一緒に `panel-window.ts` が持つ。
+ *
+ * **`body` は display を持つ (flex)。** 右側のパネルの本体が display を持たなかったのは、折り畳みで
+ * 本体を出し入れしていたため。折り畳みをやめた (窓の分割の spec C1.2) ので、本体を出し入れする者はいない
+ * (窓ごとの出し入れは `floating-window.ts` が窓の根の style.display で行う)
+ */
+export const PANEL_WINDOW_STYLE = {
+  /**
+   * 中身の箱。**超えた分はここだけでスクロールする。** `min-height:0` が無いと
+   * flex の子は中身より縮まず、窓ごと画面の下へ伸びる
+   */
+  body: "display:flex;flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
+} as const;
+
+/**
  * フロートの窓の枠 (`floating-window.ts`)。バーの窓とパネルの窓で同じものを使う。
  *
  * **`root` と `resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
