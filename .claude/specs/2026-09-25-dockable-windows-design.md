@@ -531,3 +531,6 @@
   コメントに書く
 - [review:spec/依頼者の代理人/fable] 3 往復目 Approved。残りの Recommendations (C2.3 の ⠿ と帯の位置の表現、C2.10 のバーを落とす座標の取り方、plan の切れ目) は plan で扱う
 - [選択] 実装スタイル: D (branch + SDD)。branch は feat/floating-windows から分岐した feat/dockable-windows (A・B の上に乗るため)。plan は C1 (窓の分割、v2 の保存と float の写しまで) と C2 (dock.ts と窓の枠の変更から) に分ける
+- [plan C1] .claude/plans/2026-09-25-dockable-windows-c1.md (7 タスク、判断メモ 19 項目)。[review:plan/ゼロ context の実装者/fable] 1 往復目
+  Issues 2 件 (確認 grep の期待が実ファイルと合わず逆向きの編集を誘う 2 箇所) → 修正。Recommendations (判断メモ 16 と Task 6 の整合、残るコメント、
+  行番号、別タブの移動が次の保存で消えることを README の制約に) を取り込み。2 往復目 Approved。Gate は付けない
