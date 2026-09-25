@@ -15,7 +15,7 @@ import type { ClipRange } from "@/shared/types";
  * 黙って補正すると、録画に実時間を払い切った後で「思っていたのと違う範囲が
  * 録れた」と気付くことになる。
  */
-function assertValidRange(range: ClipRange): void {
+export function assertValidRange(range: ClipRange): void {
   const { startSec, endSec } = range;
   if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) {
     throw new RangeError(
@@ -70,28 +70,4 @@ export function totalSec(segments: ClipRange[]): number {
  */
 export function isOverLimit(segments: ClipRange[], maxClipSec: number): boolean {
   return Math.round(totalSec(segments)) > maxClipSec;
-}
-
-/**
- * 出力タイムラインの `outputSec` 秒が、元動画の何秒に当たるか。範囲外なら null。
- *
- * **この機能では使わない。それでも今のうちに置く。** 出力タイムラインという
- * 座標系を後から導入すると、テロップの時刻が元動画の秒で書かれた状態が先に
- * 出来上がってしまい、移行が要る (spec §0.1)。
- */
-export function toSourceTime(
-  segments: ClipRange[],
-  outputSec: number,
-): number | null {
-  if (outputSec < 0) return null;
-
-  let elapsed = 0;
-  for (const segment of segments) {
-    const length = segment.endSec - segment.startSec;
-    if (outputSec < elapsed + length) {
-      return segment.startSec + (outputSec - elapsed);
-    }
-    elapsed += length;
-  }
-  return null;
 }

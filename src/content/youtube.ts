@@ -1,5 +1,6 @@
 import { pickMimeType } from "@/content/codec";
 import {
+  ElementNotFoundError,
   getChannel,
   getVideo,
   getVideoMeta,
@@ -31,16 +32,28 @@ import {
   type RecorderHandle,
 } from "@/content/recorder";
 import { createSegmentList, type SegmentList } from "@/content/segment-list";
+import { createTelopList, type TelopList } from "@/content/telop-list";
+import { createTelopPreview } from "@/content/telop-preview";
 import { YT_SELECTORS } from "@/content/selectors";
+import {
+  TelopRenderError,
+  assertTelopRenderable,
+  startCompositor,
+  type Compositor,
+} from "@/content/telop-compositor";
 import { encodeBase64 } from "@/shared/base64";
 import type { Message, MessageResponse } from "@/shared/messages";
 import {
   loadSettings,
   mergeSettings,
   SETTINGS_KEY,
+  DEFAULT_SETTINGS,
   type ClipMode,
+  type Settings,
   type SettingsContext,
 } from "@/shared/settings";
+import { MAX_TELOP_TEXT_LENGTH, hasRenderableTelops } from "@/shared/telop";
+import { telopStyleOf, type TelopStyle } from "@/shared/telop-style";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 import { isOverLimit, totalSec } from "@/shared/timeline";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
@@ -50,6 +63,7 @@ import {
   type ClipEvent,
   type ClipRange,
   type ClipState,
+  type Telop,
 } from "@/shared/types";
 
 const BAR_ID = "yt-clip-bar";
@@ -71,6 +85,18 @@ const MIN_RECOMMENDED_HEIGHT = 720;
  */
 let currentSegments: ClipRange[] = [];
 /**
+ * いま画面に出ているテロップ。**状態機械が正で、これはその写し。**
+ * 別の動画を見ているタブでは空 (区間と同じ規則)
+ */
+let currentTelops: Telop[] = [];
+/** テロップの見た目。設定から組み立てる */
+let telopStyle: TelopStyle = telopStyleOf(DEFAULT_SETTINGS);
+/**
+ * 録画するテロップと見た目。**録画開始時に固定する。** 録画中に ⚙ で見た目を
+ * 変えても、途中で見た目が変わるクリップを作らない。null なら今の経路で録る
+ */
+let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
+/**
  * 拡大バーがいま編集している区間の位置。区間が無ければ -1。
  *
  * **ここが選択の唯一の持ち主。** 一覧にも持たせると同期が要る。
@@ -80,6 +106,9 @@ let selectedIndex = -1;
 /** 切り抜きの作り方。設定から読む */
 let mode: ClipMode = "simple";
 let segmentList: SegmentList | null = null;
+let telopList: TelopList | null = null;
+/** プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため) */
+const telopPreview = createTelopPreview();
 /**
  * 状態機械から最後に届いた種類。
  *
@@ -425,6 +454,82 @@ function onAddSegment(): void {
   send({ type: "ADD_SEGMENT", range, meta });
 }
 
+/** テロップを出す既定の長さ (秒) */
+const DEFAULT_TELOP_SEC = 3;
+
+/**
+ * テロップを編集してよいか。区間の拡大バーと同じ条件 (`ready` / `posted` で、
+ * 範囲を作った動画を見ている)。**区間は触れないのにテロップだけ触れる非対称を作らない**
+ */
+function canEditTelops(): boolean {
+  return canAdjustRange();
+}
+
+/** ＋ テロップ。今の位置から 3 秒、文言なし。動画の長さを超えるなら終わりを詰める */
+function onAddTelop(): void {
+  if (!canEditTelops()) {
+    setStatus("いまはテロップを変更できません");
+    return;
+  }
+  const video = getVideo();
+  // メタデータを読む前は duration が NaN。そのまま足すと状態機械が throw する
+  if (!Number.isFinite(video.duration)) {
+    setStatus("動画の長さが分からないため、テロップを足せません");
+    return;
+  }
+  const startSec = video.currentTime;
+  const endSec = Math.min(startSec + DEFAULT_TELOP_SEC, video.duration);
+  if (endSec <= startSec) {
+    setStatus("動画の終わりにはテロップを足せません");
+    return;
+  }
+  send({ type: "ADD_TELOP", telop: { startSec, endSec, text: "" } });
+}
+
+/**
+ * テロップの開始か終了を今の位置に合わせる。
+ *
+ * **開始が終了以上になる操作は送らない。** 状態機械は不正な時刻で throw する。
+ * 黙って無反応にせず理由を出す
+ */
+function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
+  const telop = currentTelops[index];
+  if (telop === undefined || !canEditTelops()) return;
+  const sec = getVideo().currentTime;
+  const next =
+    edge === "start" ? { ...telop, startSec: sec } : { ...telop, endSec: sec };
+  if (next.endSec <= next.startSec) {
+    setStatus("開始は終了より前にしてください");
+    return;
+  }
+  send({ type: "UPDATE_TELOP", index, telop: next });
+}
+
+/** 文言の確定。改行はそのまま持つ */
+function onTelopText(index: number, text: string): void {
+  const telop = currentTelops[index];
+  if (telop === undefined || !canEditTelops()) return;
+  if (telop.text === text) return;
+  // 状態機械は上限を超えた文言を UI のバグとして拒む。送る前に止めて理由を出す。
+  // 入力欄は消さない (削って直してもらう)
+  if (text.length > MAX_TELOP_TEXT_LENGTH) {
+    setStatus(
+      `テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`,
+    );
+    return;
+  }
+  send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
+}
+
+/** そのテロップの頭から再生する。範囲再生の監視は解く (押した場所からの再生が止まる) */
+async function playTelop(index: number): Promise<void> {
+  const telop = currentTelops[index];
+  if (telop === undefined || busy) return;
+  cancelPreviewWatch();
+  if ((await seekAndPlay(telop.startSec)) === null) return;
+  setStatus(`テロップ ${index + 1} の頭から再生中…`);
+}
+
 /**
  * エディットモードの IN。選択中の区間の**頭だけ**を今の位置に動かす。
  *
@@ -655,6 +760,28 @@ function refreshOverlay(): void {
 }
 
 /**
+ * プレビューを今のテロップと見た目に合わせる。
+ *
+ * エディットモードで、範囲を作った動画を見ているときだけ出す。別の動画の
+ * テロップを重ねない (帯と同じ規則)
+ */
+function refreshTelopPreview(): void {
+  let video: HTMLVideoElement | null = null;
+  try {
+    video = getVideo();
+  } catch (error) {
+    // 動画要素がまだ無いか差し替えの最中は ElementNotFoundError で表れる。
+    // それ以外の例外は想定していない不具合なので握り潰さずに投げ直す。
+    // 次の状態通知 (applyStateToDisplay)、href が変わったとき (observer の分岐)、
+    // バーを付け直したとき (mount) のいずれかで追いつく
+    if (!(error instanceof ElementNotFoundError)) throw error;
+    video = null;
+  }
+  const visible = mode === "edit" && rangeVideoId === currentVideoId();
+  telopPreview.update(video, visible ? currentTelops : [], telopStyle);
+}
+
+/**
  * 状態機械が持つ範囲を画面へ反映する。**食い違ったときは状態機械が正。**
  * 表示だけを扱い、録画そのものには触れない。
  */
@@ -729,6 +856,22 @@ function applyStateToDisplay(state: ClipState): void {
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
   currentSegments = liveSegments;
+  const previousTelopCount = currentTelops.length;
+  currentTelops =
+    liveSegments.length === 0 || !("telops" in state) ? [] : state.telops;
+  // 最後の区間の削除は UI で止めているが、手元の写しが古くて止め損ねた場合に
+  // 黙って消さない
+  // **別の動画の状態では言わない。** 削除の応答待ちの間に別の動画へ移ると、取り込まない
+  // ので手元は空になるが、状態機械にはまだ残っている。idle は meta を持たないが、
+  // そのときは本当に消えている
+  if (
+    removedIndexOnNextState !== null &&
+    previousTelopCount > 0 &&
+    currentTelops.length === 0 &&
+    (stateMeta === null || stateMeta.videoId === currentVideoId())
+  ) {
+    setStatus("テロップも消えました");
+  }
   // **並べ替えないので index は動かない。** 足した直後だけ末尾へ移し、
   // それ以外は今の位置を保つ。削除で数が減ったときだけ範囲内へ詰める
   if (liveSegments.length === 0) {
@@ -763,6 +906,7 @@ function applyStateToDisplay(state: ClipState): void {
 
   rangeBar?.setEnabled(canAdjustRange());
   refreshOverlay();
+  refreshTelopPreview();
   renderActions(state.kind);
 
   // 失敗はバーにも出す。録画中にタブをリロードした場合、このバーが
@@ -782,6 +926,11 @@ function applyStateToDisplay(state: ClipState): void {
     mode === "edit" ? currentSegments : [],
     selectedIndex,
     maxClipSec,
+  );
+  telopList?.setEnabled(canEditTelops());
+  telopList?.update(
+    mode === "edit" ? currentTelops : [],
+    mode === "edit" ? currentSegments : [],
   );
 
   lastKind = state.kind;
@@ -831,6 +980,19 @@ async function playRange(): Promise<void> {
 }
 
 /**
+ * テロップ付きの録画を失敗で落とす。文言は状態機械から返ってくるものと同じ
+ * (既定) か、それに詳細を足したもの。違う言い回しを出すと、直後に届く
+ * state/changed で表示が言い換わって見える
+ */
+function failTelopRecording(
+  reason: "telop-tab-hidden" | "telop-render-failed",
+  message: string = FAILURE_MESSAGES[reason],
+): void {
+  send({ type: "FAIL", reason });
+  setStatus(message);
+}
+
+/**
  * 録画の前半。IN へ seek するが再生はしない。
  * service worker が録画開始を指示し、それを受けた録画が実際に始まるまで
  * 動画を進めないため。
@@ -840,6 +1002,9 @@ async function prepareRecording(
   expectedVideoId: string,
 ): Promise<void> {
   try {
+    // 前の準備の残りで合成しない。以下のどの経路で抜けても、録画に使う
+    // テロップは下で決め直したものか null になる
+    recordingTelops = null;
     // 範囲を作った動画と今の動画が違えば、範囲もタイトルも URL も別の動画の
     // もの。そのまま録ると B の映像に A のタイトルと URL が付いて投稿される。
     // IN 単独で ready になれるため、OUT を押さずに録画へ進む経路がある
@@ -854,6 +1019,22 @@ async function prepareRecording(
     // 保護された動画は captureStream が黒画面を返すだけで失敗しない。
     // 実時間を払い切ってから無駄と分かることのないよう、ここで弾く
     assertRecordable(getVideo());
+
+    // **テロップの有無で録画の経路を決め、描けるかをここで確かめる。**
+    // `beginRecording` で気付くと、router が理由を問わず recording-aborted に
+    // 落とすので専用の文言が出ない。見た目もここで固定する (録画中に変えても効かない)
+    if (hasRenderableTelops(currentTelops, currentSegments)) {
+      // 隠れたまま始めると、最初のフレームから映像が止まる。**描けるかより先に
+      // 見る。** 隠れた窓では動画がデコードされず videoWidth が 0 になり
+      // (テロップ spec §9.1)、先に「動画の大きさがまだ分かりません」が出て
+      // 本当の理由が伝わらない
+      if (document.hidden) {
+        failTelopRecording("telop-tab-hidden");
+        return;
+      }
+      assertTelopRenderable(getVideo());
+      recordingTelops = { telops: currentTelops, style: telopStyle };
+    }
 
     // **繋ぎ目の検査もここで済ませる。** 区間の間で初めて気付くと、既に
     // 実時間を払った後になる。同期 throw が advanceToSegment の catch に
@@ -901,6 +1082,10 @@ async function prepareRecording(
       setStatus(error.message);
       return;
     }
+    if (error instanceof TelopRenderError) {
+      failTelopRecording("telop-render-failed", error.message);
+      return;
+    }
     if (error instanceof FrameCallbackUnsupportedError) {
       send({ type: "FAIL", reason: "internal-error" });
       setStatus(error.message);
@@ -913,10 +1098,41 @@ async function prepareRecording(
 
 /** service worker からの指示で録画を始める */
 async function beginRecording(): Promise<void> {
+  // 録画が始まらなかったときに合成を残さないよう、try の外で持つ
+  let videoOverride: Compositor | undefined;
   try {
     const video = getVideo();
     const { mimeType } = pickMimeType();
+    const telops = recordingTelops;
+    // 使い切ったら空にする。seeking を通らずに recorder/start が来たとき
+    // (実機の順序の食い違いやテスト) に、前の録画のテロップで合成しない
+    recordingTelops = null;
+    // prepareRecording の検査は seek の await より前の 1 回だけ。その後の
+    // SEEK_DONE → service worker → recorder/start の往復の間にタブが隠れると、
+    // startCompositor はここから先の visibilitychange しか見ないので、隠れた
+    // まま録り始めると音声だけ進むクリップになる。始める直前にもう一度見る
+    if (telops !== null && document.hidden) {
+      failTelopRecording("telop-tab-hidden");
+      return;
+    }
+    // 合成は録画の解放 (buildRecordingStream の release) に繋がるので、
+    // 録画が自動で止まった経路でも描画ループが残らない
+    videoOverride =
+      telops === null
+        ? undefined
+        : startCompositor(video, telops.telops, telops.style, undefined, {
+            // 区間の間の広告検査と同じく FAIL で落とす。状態が recording を離れると
+            // state/changed の処理が abortRecording を呼び、合成も解放される
+            onHidden: () => failTelopRecording("telop-tab-hidden"),
+            // 描画が止まった録画を成功として出さない (静止した映像と進む音声になる)
+            onError: (error) =>
+              failTelopRecording(
+                "telop-render-failed",
+                new TelopRenderError(error.message).message,
+              ),
+          });
     handle = await startRecording(video, mimeType, {
+      videoOverride,
       onUnexpectedStop: (error) => {
         handle = null;
         notify({ type: "recorder/failed", reason: error.message });
@@ -924,6 +1140,8 @@ async function beginRecording(): Promise<void> {
     });
     notify({ type: "recorder/started" });
   } catch (error) {
+    // release は二度呼んでも安全 (startRecording の中で解放済みのことがある)
+    videoOverride?.release();
     notify({ type: "recorder/failed", reason: String(error) });
   }
 }
@@ -1149,14 +1367,35 @@ function buildBar(): HTMLElement {
       void playRange();
     },
     onRemove: (index) => {
+      // **テロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
+      // なると状態機械は idle に戻り、手入力の文言もまとめて消える
+      if (currentSegments.length === 1 && currentTelops.length > 0) {
+        setStatus(
+          `テロップが ${currentTelops.length} 件残っています。先にテロップを消してください`,
+        );
+        return;
+      }
       removedIndexOnNextState = index;
       send({ type: "REMOVE_SEGMENT", index });
     },
   });
 
+  telopList = createTelopList({
+    onAdd: onAddTelop,
+    onSetStart: (index) => onMoveTelopEdge(index, "start"),
+    onSetEnd: (index) => onMoveTelopEdge(index, "end"),
+    onPlay: (index) => void playTelop(index),
+    onRemove: (index) => {
+      if (!canEditTelops()) return;
+      send({ type: "REMOVE_TELOP", index });
+    },
+    onText: onTelopText,
+  });
+
   // 一覧を上、拡大バー、操作の順。区間を選んでからバーで調整する流れに合わせる
   bar.append(
     segmentList.element,
+    telopList.element,
     rangeBar.element,
     row,
     settingsPanel.element,
@@ -1221,6 +1460,7 @@ function mount(): void {
     }
   }
   refreshOverlay();
+  refreshTelopPreview();
 }
 
 /**
@@ -1315,6 +1555,12 @@ function recoverFromState(): void {
     });
 }
 
+/** 設定のうちテロップの見た目を取り込む。起動時と、別のタブで変わったときに呼ぶ */
+function applyTelopSettings(settings: Settings): void {
+  telopStyle = telopStyleOf(settings);
+  refreshTelopPreview();
+}
+
 /**
  * 起動時に設定を読む。
  *
@@ -1325,6 +1571,7 @@ function loadInitialSettings(): void {
   void loadSettings()
     .then((settings) => {
       maxClipSec = settings.maxClipSec;
+      applyTelopSettings(settings);
       applyMode(settings.mode);
     })
     .catch((error: unknown) => {
@@ -1343,6 +1590,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (change === undefined) return;
   const settings = mergeSettings(change.newValue);
   maxClipSec = settings.maxClipSec;
+  applyTelopSettings(settings);
   applyMode(settings.mode);
 });
 
@@ -1369,6 +1617,7 @@ const observer = new MutationObserver(() => {
     // 見えていない動画の範囲を書き換えることになる
     rangeBar?.setEnabled(canAdjustRange());
     refreshOverlay();
+    refreshTelopPreview();
   }
   mount();
 });

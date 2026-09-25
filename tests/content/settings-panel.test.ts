@@ -309,3 +309,41 @@ describe("入力欄の種類", () => {
     ).toEqual(["あ", "い"]);
   });
 });
+
+describe("テロップの見た目", () => {
+  test("色の項目は色の入力欄になる", () => {
+    const field = SETTINGS_FIELDS.find((f) => f.key === "telopFillColor");
+    if (field === undefined) throw new Error("項目がありません");
+    const input = createFieldInput(field) as HTMLInputElement;
+    expect(input.type).toBe("color");
+  });
+
+  test("フォントの項目は候補付きのテキスト欄になる", () => {
+    const panel = createSettingsPanel(makeDeps().deps);
+    const input = inputOf(panel, "telopFont");
+    expect(input.type).toBe("text");
+    const listId = input.getAttribute("list");
+    expect(listId).not.toBeNull();
+    const datalist = panel.element.querySelector(`#${listId ?? ""}`);
+    const values = [...(datalist?.querySelectorAll("option") ?? [])].map(
+      (option) => option.value,
+    );
+    expect(values).toEqual(["ゴシック", "明朝", "丸ゴシック"]);
+  });
+
+  test("テロップの 2 項目を同時に変えても両方が保存される", async () => {
+    // 1 つのオブジェクトにまとめると、浅いマージで後の項目が前の項目を消す
+    const { deps, store } = makeDeps();
+    const panel = createSettingsPanel(deps);
+    panel.toggle();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    inputOf(panel, "telopFontSizePx").value = "80";
+    inputOf(panel, "telopStrokeColor").value = "#112233";
+    saveButton(panel).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.telopFontSizePx).toBe(80);
+    expect(store.telopStrokeColor).toBe("#112233");
+  });
+});

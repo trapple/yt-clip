@@ -1,17 +1,18 @@
 import { describe, expect, test } from "vitest";
 import { makeVideoMeta } from "../helpers/fixtures";
 import { INITIAL_STATE, reduce } from "@/background/state";
-import type { ClipRange, ClipState } from "@/shared/types";
+import type { ClipRange, ClipState, Telop } from "@/shared/types";
 
 const meta = makeVideoMeta();
 const range: ClipRange = { startSec: 10, endSec: 40 };
 const segments = [range];
 
-const ready: ClipState = { kind: "ready", segments, meta };
+const ready: ClipState = { kind: "ready", segments, telops: [], meta };
 const preview: ClipState = {
   kind: "preview",
   clipId: "clip-1",
   segments,
+  telops: [],
   meta,
   mimeType: "video/mp4",
 };
@@ -32,6 +33,7 @@ describe("マーク操作", () => {
     expect(reduce(ready, { type: "MARK_IN", range: next, meta })).toEqual({
       kind: "ready",
       segments: [next],
+      telops: [],
       meta,
     });
   });
@@ -40,6 +42,7 @@ describe("マーク操作", () => {
     expect(reduce(ready, { type: "MARK_OUT", index: 0, sec: 55 })).toEqual({
       kind: "ready",
       segments: [{ startSec: 10, endSec: 55 }],
+      telops: [],
       meta,
     });
   });
@@ -49,6 +52,7 @@ describe("マーク操作", () => {
     expect(reduce(ready, { type: "ADJUST_SEGMENT", index: 0, range: dragged })).toEqual({
       kind: "ready",
       segments: [dragged],
+      telops: [],
       meta,
     });
   });
@@ -60,7 +64,7 @@ describe("マーク操作", () => {
     const other: ClipRange = { startSec: 0, endSec: 5 };
 
     for (const kind of ["seeking", "recording", "encoding"] as const) {
-      const busy: ClipState = { kind, segments, meta };
+      const busy: ClipState = { kind, segments, telops: [], meta };
 
       expect(
         reduce(busy, { type: "MARK_IN", range: other, meta }),
@@ -85,6 +89,7 @@ describe("録画フロー", () => {
     expect(reduce(ready, { type: "START_RECORDING" })).toEqual({
       kind: "seeking",
       segments,
+      telops: [],
       meta,
     });
   });
@@ -94,21 +99,23 @@ describe("録画フロー", () => {
     expect(reduce(seeking, { type: "SEEK_DONE" })).toEqual({
       kind: "recording",
       segments,
+      telops: [],
       meta,
     });
   });
 
   test("OUT 到達で encoding へ進む", () => {
-    const recording: ClipState = { kind: "recording", segments, meta };
+    const recording: ClipState = { kind: "recording", segments, telops: [], meta };
     expect(reduce(recording, { type: "OUT_REACHED" })).toEqual({
       kind: "encoding",
       segments,
+      telops: [],
       meta,
     });
   });
 
   test("Blob 確定で preview へ進む", () => {
-    const encoding: ClipState = { kind: "encoding", segments, meta };
+    const encoding: ClipState = { kind: "encoding", segments, telops: [], meta };
     expect(
       reduce(encoding, {
         type: "BLOB_READY",
@@ -129,6 +136,7 @@ describe("投稿と degraded path", () => {
       kind: "composing",
       clipId: "clip-1",
       segments,
+      telops: [],
       meta,
       mimeType: "video/mp4",
     });
@@ -152,6 +160,7 @@ describe("投稿と degraded path", () => {
       kind: "degraded",
       clipId: "clip-1",
       segments,
+      telops: [],
       meta,
       mimeType: "video/mp4",
       reason: "mp4-unsupported",
@@ -168,6 +177,7 @@ describe("投稿と degraded path", () => {
       kind: "degraded",
       clipId: "clip-1",
       segments,
+      telops: [],
       meta,
       mimeType: "video/mp4",
       reason: "x-attach-failed",
@@ -185,18 +195,19 @@ describe("投稿と degraded path", () => {
 
 describe("失敗と復帰", () => {
   test("録画中の失敗は範囲を保持したまま failed になる", () => {
-    const recording: ClipState = { kind: "recording", segments, meta };
+    const recording: ClipState = { kind: "recording", segments, telops: [], meta };
     expect(reduce(recording, { type: "FAIL", reason: "tab-lost" })).toEqual({
       kind: "failed",
       reason: "tab-lost",
       segments,
+      telops: [],
       meta,
     });
   });
 
   test("RETRY で ready に戻る", () => {
     const failed = reduce(
-      { kind: "seeking", segments, meta },
+      { kind: "seeking", segments, telops: [], meta },
       { type: "FAIL", reason: "seek-failed" },
     );
     expect(reduce(failed, { type: "RETRY" })).toEqual(ready);
@@ -207,6 +218,7 @@ describe("失敗と復帰", () => {
       kind: "failed",
       reason: "internal-error",
       segments: [],
+      telops: [],
       meta: null,
     };
     expect(reduce(failed, { type: "RETRY" })).toEqual({ kind: "idle" });
@@ -217,6 +229,7 @@ describe("失敗と復帰", () => {
       kind: "failed",
       reason: "internal-error",
       segments: [],
+      telops: [],
       meta: null,
     });
   });
@@ -226,6 +239,7 @@ describe("失敗と復帰", () => {
       kind: "failed",
       reason: "internal-error",
       segments,
+      telops: [],
       meta,
     });
   });
@@ -235,6 +249,7 @@ describe("投稿した後", () => {
   const posted: ClipState = {
     kind: "posted",
     segments,
+    telops: [],
     meta,
     clipId: "clip-1",
     mimeType: "video/mp4",
@@ -246,6 +261,7 @@ describe("投稿した後", () => {
       clipId: "clip-1",
       mimeType: "video/mp4",
       segments,
+      telops: [],
       meta,
     };
     expect(reduce(composing, { type: "ATTACHED" })).toEqual(posted);
@@ -257,6 +273,7 @@ describe("投稿した後", () => {
       clipId: "clip-1",
       mimeType: "video/mp4",
       segments,
+      telops: [],
       meta,
     });
   });
@@ -265,6 +282,7 @@ describe("投稿した後", () => {
     expect(reduce(posted, { type: "RETAKE" })).toEqual({
       kind: "ready",
       segments,
+      telops: [],
       meta,
     });
   });
@@ -276,6 +294,7 @@ describe("投稿した後", () => {
     expect(reduce(posted, { type: "ADJUST_SEGMENT", index: 0, range: moved })).toEqual({
       kind: "ready",
       segments: [moved],
+      telops: [],
       meta,
     });
   });
@@ -284,6 +303,7 @@ describe("投稿した後", () => {
     expect(reduce(posted, { type: "MARK_OUT", index: 0, sec: 40 })).toEqual({
       kind: "ready",
       segments: [{ startSec: range.startSec, endSec: 40 }],
+      telops: [],
       meta,
     });
   });
@@ -293,6 +313,7 @@ describe("投稿した後", () => {
     expect(reduce(posted, { type: "MARK_IN", range: next, meta })).toEqual({
       kind: "ready",
       segments: [next],
+      telops: [],
       meta,
     });
   });
@@ -308,6 +329,7 @@ describe("添付に失敗した後", () => {
     clipId: "clip-1",
     mimeType: "video/mp4",
     segments,
+    telops: [],
     meta,
     reason: "x-attach-failed",
   };
@@ -318,6 +340,7 @@ describe("添付に失敗した後", () => {
       clipId: "clip-1",
       mimeType: "video/mp4",
       segments,
+      telops: [],
       meta,
     });
   });
@@ -331,27 +354,29 @@ describe("添付に失敗した後", () => {
 
 describe("録画の中止", () => {
   test("シーク中に中止すると範囲を残して戻る", () => {
-    const seeking: ClipState = { kind: "seeking", segments, meta };
+    const seeking: ClipState = { kind: "seeking", segments, telops: [], meta };
     expect(reduce(seeking, { type: "CANCEL_RECORDING" })).toEqual({
       kind: "ready",
       segments,
+      telops: [],
       meta,
     });
   });
 
   test("録画中に中止すると範囲を残して戻る", () => {
     // 範囲を残すので、そのまま録り直せる
-    const recording: ClipState = { kind: "recording", segments, meta };
+    const recording: ClipState = { kind: "recording", segments, telops: [], meta };
     expect(reduce(recording, { type: "CANCEL_RECORDING" })).toEqual({
       kind: "ready",
       segments,
+      telops: [],
       meta,
     });
   });
 
   test("書き出し中は中止できない", () => {
     // ここで止めると、録り終えたものを捨てることになる
-    const encoding: ClipState = { kind: "encoding", segments, meta };
+    const encoding: ClipState = { kind: "encoding", segments, telops: [], meta };
     expect(reduce(encoding, { type: "CANCEL_RECORDING" }).kind).toBe("failed");
   });
 
@@ -367,6 +392,7 @@ describe("複数区間", () => {
     expect(reduce(INITIAL_STATE, { type: "ADD_SEGMENT", range, meta })).toEqual({
       kind: "ready",
       segments: [range],
+      telops: [],
       meta,
     });
   });
@@ -375,6 +401,7 @@ describe("複数区間", () => {
     expect(reduce(ready, { type: "ADD_SEGMENT", range: second, meta })).toEqual({
       kind: "ready",
       segments: [range, second],
+      telops: [],
       meta,
     });
   });
@@ -385,6 +412,7 @@ describe("複数区間", () => {
     expect(reduce(ready, { type: "ADD_SEGMENT", range: earlier, meta })).toEqual({
       kind: "ready",
       segments: [range, earlier],
+      telops: [],
       meta,
     });
   });
@@ -397,6 +425,7 @@ describe("複数区間", () => {
     ).toEqual({
       kind: "ready",
       segments: [range, overlapping],
+      telops: [],
       meta,
     });
   });
@@ -407,6 +436,7 @@ describe("複数区間", () => {
     expect(reduce(ready, { type: "ADD_SEGMENT", range: inside, meta })).toEqual({
       kind: "ready",
       segments: [range, inside],
+      telops: [],
       meta,
     });
   });
@@ -423,6 +453,7 @@ describe("複数区間", () => {
     const posted: ClipState = {
       kind: "posted",
       segments,
+      telops: [],
       meta,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -430,15 +461,17 @@ describe("複数区間", () => {
     expect(reduce(posted, { type: "ADD_SEGMENT", range: second, meta })).toEqual({
       kind: "ready",
       segments: [range, second],
+      telops: [],
       meta,
     });
   });
 
   test("区間を消せる", () => {
-    const two: ClipState = { kind: "ready", segments: [range, second], meta };
+    const two: ClipState = { kind: "ready", segments: [range, second], telops: [], meta };
     expect(reduce(two, { type: "REMOVE_SEGMENT", index: 0 })).toEqual({
       kind: "ready",
       segments: [second],
+      telops: [],
       meta,
     });
   });
@@ -451,18 +484,19 @@ describe("複数区間", () => {
   });
 
   test("index を指して区間を動かせる", () => {
-    const two: ClipState = { kind: "ready", segments: [range, second], meta };
+    const two: ClipState = { kind: "ready", segments: [range, second], telops: [], meta };
     const moved: ClipRange = { startSec: 100, endSec: 130 };
     expect(reduce(two, { type: "ADJUST_SEGMENT", index: 1, range: moved })).toEqual(
-      { kind: "ready", segments: [range, moved], meta },
+      { kind: "ready", segments: [range, moved], telops: [], meta },
     );
   });
 
   test("index を指して終端だけ動かせる", () => {
-    const two: ClipState = { kind: "ready", segments: [range, second], meta };
+    const two: ClipState = { kind: "ready", segments: [range, second], telops: [], meta };
     expect(reduce(two, { type: "MARK_OUT", index: 1, sec: 130 })).toEqual({
       kind: "ready",
       segments: [range, { startSec: 100, endSec: 130 }],
+      telops: [],
       meta,
     });
   });
@@ -471,6 +505,7 @@ describe("複数区間", () => {
     const posted: ClipState = {
       kind: "posted",
       segments: [range, second],
+      telops: [],
       meta,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -478,6 +513,7 @@ describe("複数区間", () => {
     expect(reduce(posted, { type: "REMOVE_SEGMENT", index: 1 })).toEqual({
       kind: "ready",
       segments: [range],
+      telops: [],
       meta,
     });
   });
@@ -487,18 +523,20 @@ describe("複数区間", () => {
       kind: "failed",
       reason: "internal-error",
       segments,
+      telops: [],
       meta,
     });
     expect(reduce(ready, { type: "ADJUST_SEGMENT", index: -1, range })).toEqual({
       kind: "failed",
       reason: "internal-error",
       segments,
+      telops: [],
       meta,
     });
   });
 
   test("録画中は区間を足せない", () => {
-    const recording: ClipState = { kind: "recording", segments, meta };
+    const recording: ClipState = { kind: "recording", segments, telops: [], meta };
     expect(
       reduce(recording, { type: "ADD_SEGMENT", range: second, meta }).kind,
     ).toBe("failed");
@@ -509,6 +547,7 @@ describe("複数区間", () => {
       kind: "failed",
       reason: "internal-error",
       segments: [],
+      telops: [],
       meta: null,
     };
     expect(reduce(failed, { type: "RETRY" })).toEqual({ kind: "idle" });
@@ -524,7 +563,7 @@ describe("動画をまたいだ区間の追加", () => {
     // クリップに A のタイトルと URL が付いて投稿される
     expect(
       reduce(ready, { type: "ADD_SEGMENT", range: otherRange, meta: otherMeta }),
-    ).toEqual({ kind: "ready", segments: [otherRange], meta: otherMeta });
+    ).toEqual({ kind: "ready", segments: [otherRange], telops: [], meta: otherMeta });
   });
 
   test("同じ動画なら今までどおり足す", () => {
@@ -532,7 +571,237 @@ describe("動画をまたいだ区間の追加", () => {
     expect(reduce(ready, { type: "ADD_SEGMENT", range: second, meta })).toEqual({
       kind: "ready",
       segments: [range, second],
+      telops: [],
       meta,
+    });
+  });
+});
+
+describe("テロップ", () => {
+  const telop: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+  const withTelop: ClipState = {
+    kind: "ready",
+    segments,
+    meta,
+    telops: [telop],
+  };
+  const postedWithTelop: ClipState = {
+    kind: "posted",
+    segments,
+    meta,
+    telops: [telop],
+    clipId: "clip-1",
+    mimeType: "video/mp4",
+  };
+
+  test("ready で足すと末尾に付く", () => {
+    const next: Telop = { startSec: 15, endSec: 18, text: "" };
+    expect(reduce(withTelop, { type: "ADD_TELOP", telop: next })).toEqual({
+      ...withTelop,
+      telops: [telop, next],
+    });
+  });
+
+  test("UPDATE_TELOP は指したテロップを丸ごと差し替える", () => {
+    const changed: Telop = { startSec: 12, endSec: 14, text: "やあ" };
+    expect(
+      reduce(withTelop, { type: "UPDATE_TELOP", index: 0, telop: changed }),
+    ).toEqual({ ...withTelop, telops: [changed] });
+  });
+
+  test("REMOVE_TELOP で消える", () => {
+    expect(reduce(withTelop, { type: "REMOVE_TELOP", index: 0 })).toEqual({
+      ...withTelop,
+      telops: [],
+    });
+  });
+
+  test("posted で変えるとクリップが外れて ready に戻る", () => {
+    // 焼き込まれているので、古いクリップを持ち続けると画面と投稿内容が食い違う
+    expect(reduce(postedWithTelop, { type: "REMOVE_TELOP", index: 0 })).toEqual({
+      kind: "ready",
+      segments,
+      meta,
+      telops: [],
+    });
+  });
+
+  test("preview / degraded / idle では受けない", () => {
+    // 区間の編集も受けていない状態。テロップだけ触れる非対称を作らない
+    const previewWithTelop: ClipState = {
+      kind: "preview",
+      clipId: "clip-1",
+      segments,
+      meta,
+      telops: [telop],
+      mimeType: "video/mp4",
+    };
+    const degraded: ClipState = {
+      kind: "degraded",
+      clipId: "clip-1",
+      segments,
+      meta,
+      telops: [telop],
+      mimeType: "video/mp4",
+      reason: "x-attach-failed",
+    };
+    for (const state of [previewWithTelop, degraded, INITIAL_STATE]) {
+      expect(reduce(state, { type: "REMOVE_TELOP", index: 0 }).kind).toBe("failed");
+    }
+  });
+
+  test("不正な index は internal-error", () => {
+    const next = reduce(withTelop, { type: "REMOVE_TELOP", index: 3 });
+    expect(next).toMatchObject({ kind: "failed", reason: "internal-error" });
+  });
+
+  test("不正な時刻は throw する (区間と同じく握り潰さない)", () => {
+    expect(() =>
+      reduce(withTelop, {
+        type: "ADD_TELOP",
+        telop: { startSec: 5, endSec: 5, text: "" },
+      }),
+    ).toThrow(RangeError);
+  });
+
+  test("録画中は受けない", () => {
+    const recording: ClipState = { kind: "recording", segments, meta, telops: [telop] };
+    expect(reduce(recording, { type: "REMOVE_TELOP", index: 0 }).kind).toBe("failed");
+  });
+
+  test("最後の区間を消して idle に戻るとテロップも消える", () => {
+    expect(reduce(withTelop, { type: "REMOVE_SEGMENT", index: 0 })).toEqual({
+      kind: "idle",
+    });
+  });
+
+  test("区間の編集ではテロップを残す", () => {
+    const next = reduce(withTelop, { type: "MARK_OUT", index: 0, sec: 50 });
+    expect(next).toMatchObject({ kind: "ready", telops: [telop] });
+  });
+
+  test("同じ動画に区間を足してもテロップを残す", () => {
+    const next = reduce(withTelop, {
+      type: "ADD_SEGMENT",
+      range: { startSec: 60, endSec: 70 },
+      meta,
+    });
+    expect(next).toMatchObject({ kind: "ready", telops: [telop] });
+  });
+
+  test("別の動画の区間を足すとテロップも消える", () => {
+    // 元動画の秒で書いたテロップが、別の動画のクリップに焼き込まれるのを防ぐ
+    const other = makeVideoMeta({ videoId: "other" });
+    const next = reduce(withTelop, {
+      type: "ADD_SEGMENT",
+      range: { startSec: 60, endSec: 70 },
+      meta: other,
+    });
+    expect(next).toMatchObject({ kind: "ready", telops: [] });
+  });
+
+  test("MARK_IN は常にテロップを消す", () => {
+    const next = reduce(withTelop, {
+      type: "MARK_IN",
+      range: { startSec: 60, endSec: 70 },
+      meta,
+    });
+    expect(next).toMatchObject({ kind: "ready", telops: [] });
+  });
+
+  test("RESET_MARKS で消える", () => {
+    expect(reduce(withTelop, { type: "RESET_MARKS" })).toEqual({ kind: "idle" });
+  });
+
+  test("録画から preview まで持ち回る", () => {
+    let state = reduce(withTelop, { type: "START_RECORDING" });
+    state = reduce(state, { type: "SEEK_DONE" });
+    state = reduce(state, { type: "OUT_REACHED" });
+    state = reduce(state, { type: "BLOB_READY", clipId: "c", mimeType: "video/mp4" });
+    expect(state).toMatchObject({ kind: "preview", telops: [telop] });
+  });
+
+  test("failed から RETRY するとテロップを引き継ぐ", () => {
+    const failed = reduce(withTelop, { type: "FAIL", reason: "telop-render-failed" });
+    expect(failed).toMatchObject({ kind: "failed", telops: [telop] });
+    expect(reduce(failed, { type: "RETRY" })).toEqual(withTelop);
+  });
+
+  describe("空でないテロップを持ち回る", () => {
+    // 遷移のどこかで `telops: []` を書き忘れると、手入力の文言が黙って消える。
+    // 空配列のまま確かめても書き忘れは見えないので、中身のあるもので見る
+    const base = { segments, meta, telops: [telop] };
+    const clip = { clipId: "clip-1", mimeType: "video/mp4" };
+    const cases: [string, ClipState, Parameters<typeof reduce>[1], ClipState["kind"]][] = [
+      ["seeking + CANCEL_RECORDING", { kind: "seeking", ...base }, { type: "CANCEL_RECORDING" }, "ready"],
+      ["recording + CANCEL_RECORDING", { kind: "recording", ...base }, { type: "CANCEL_RECORDING" }, "ready"],
+      ["preview + RETAKE", { kind: "preview", ...base, ...clip }, { type: "RETAKE" }, "ready"],
+      ["preview + POST", { kind: "preview", ...base, ...clip }, { type: "POST" }, "composing"],
+      [
+        "preview + DEGRADE",
+        { kind: "preview", ...base, ...clip },
+        { type: "DEGRADE", reason: "x-attach-failed" },
+        "degraded",
+      ],
+      ["composing + ATTACHED", { kind: "composing", ...base, ...clip }, { type: "ATTACHED" }, "posted"],
+      ["composing + RETAKE", { kind: "composing", ...base, ...clip }, { type: "RETAKE" }, "ready"],
+      [
+        "composing + DEGRADE",
+        { kind: "composing", ...base, ...clip },
+        { type: "DEGRADE", reason: "x-attach-failed" },
+        "degraded",
+      ],
+      ["posted + POST", { kind: "posted", ...base, ...clip }, { type: "POST" }, "composing"],
+      ["posted + RETAKE", { kind: "posted", ...base, ...clip }, { type: "RETAKE" }, "ready"],
+      [
+        "degraded + POST",
+        { kind: "degraded", ...base, ...clip, reason: "x-attach-failed" },
+        { type: "POST" },
+        "composing",
+      ],
+      [
+        "degraded + RETAKE",
+        { kind: "degraded", ...base, ...clip, reason: "x-attach-failed" },
+        { type: "RETAKE" },
+        "ready",
+      ],
+      // 不正な遷移の failed も持つ。RETRY で ready に戻るときに引き継ぐため
+      ["ready + OUT_REACHED (不正)", { kind: "ready", ...base }, { type: "OUT_REACHED" }, "failed"],
+    ];
+
+    test.each(cases)("%s", (_name, state, event, kind) => {
+      expect(reduce(state, event)).toMatchObject({ kind, telops: [telop] });
+    });
+  });
+
+  describe("ready / posted 以外ではテロップの編集を受けない", () => {
+    // 区間の編集 (isEditEvent) と同じ条件。テロップだけ触れる非対称を作らない
+    const base = { segments, meta, telops: [telop] };
+    const clip = { clipId: "clip-1", mimeType: "video/mp4" };
+    const states: ClipState[] = [
+      { kind: "preview", ...base, ...clip },
+      { kind: "degraded", ...base, ...clip, reason: "x-attach-failed" },
+      INITIAL_STATE,
+      { kind: "seeking", ...base },
+      { kind: "recording", ...base },
+      { kind: "encoding", ...base },
+      { kind: "composing", ...base, ...clip },
+    ];
+    const events: Parameters<typeof reduce>[1][] = [
+      { type: "ADD_TELOP", telop: { startSec: 15, endSec: 18, text: "" } },
+      { type: "UPDATE_TELOP", index: 0, telop: { ...telop, text: "やあ" } },
+      { type: "REMOVE_TELOP", index: 0 },
+    ];
+
+    test.each(
+      states.flatMap((state) =>
+        events.map((event) => [state.kind, event.type, state, event] as const),
+      ),
+    )("%s + %s", (_kind, _type, state, event) => {
+      expect(reduce(state, event)).toMatchObject({
+        kind: "failed",
+        reason: "internal-error",
+      });
     });
   });
 });

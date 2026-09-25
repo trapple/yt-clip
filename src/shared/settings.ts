@@ -14,6 +14,7 @@ import {
   MAX_SETTABLE_CLIP_SEC,
   MIN_CLIP_SEC,
 } from "@/shared/time";
+import { TELOP_FONT_PRESETS } from "@/shared/telop-style";
 
 export const SETTINGS_KEY = "settings";
 
@@ -39,6 +40,18 @@ export type Settings = {
   maxClipSec: number;
   /** 切り抜きの作り方。エディットでは複数の区間を結合できる */
   mode: ClipMode;
+  // テロップの見た目。**5 つの平坦なキーで持つ。** 1 つのオブジェクトにまとめると、
+  // 設定パネルの保存 (項目ごとの差分を浅く重ねる) で後の項目が前の項目を消す
+  /** テロップの文字の大きさ。動画の高さ 1080 px を基準にした px */
+  telopFontSizePx: number;
+  /** フォント。プリセットの表示名か、font-family に渡す名前 */
+  telopFont: string;
+  /** 文字の色 (#rrggbb) */
+  telopFillColor: string;
+  /** 縁取りの色 (#rrggbb) */
+  telopStrokeColor: string;
+  /** 縁取りの太さ。1080 px 基準。0 で縁取りなし */
+  telopStrokeWidthPx: number;
 };
 
 /** チャンネル。`id` が設定の鍵、`name` は表示用 */
@@ -61,6 +74,11 @@ export const DEFAULT_SETTINGS: Settings = {
   hashtagsByChannel: {},
   maxClipSec: DEFAULT_MAX_CLIP_SEC,
   mode: "simple",
+  telopFontSizePx: 64,
+  telopFont: TELOP_FONT_PRESETS[0].label,
+  telopFillColor: "#ffffff",
+  telopStrokeColor: "#000000",
+  telopStrokeWidthPx: 8,
 };
 
 /** 区切りとして扱う文字。全角空白と読点も含める */
@@ -141,6 +159,111 @@ export function parseMode(input: string): FieldResult {
     return { ok: false, message: `知らないモードです: ${input}` };
   }
   return { ok: true, patch: { mode: input } };
+}
+
+/** テロップの文字の大きさとして設定できる範囲 (1080 px 基準) */
+export const TELOP_FONT_SIZE_RANGE = { min: 16, max: 200 } as const;
+/** 縁取りの太さとして設定できる範囲 (1080 px 基準) */
+export const TELOP_STROKE_WIDTH_RANGE = { min: 0, max: 40 } as const;
+
+/** 範囲内の整数か。読み込みと入力の両方で使う */
+function isIntegerIn(
+  value: unknown,
+  range: { min: number; max: number },
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= range.min &&
+    value <= range.max
+  );
+}
+
+/**
+ * 整数の入力欄を差分にする。**範囲外は弾く。** 既定値に倒すのは読み込み側だけ
+ * (`parseMaxClipSec` と同じ。設定したつもりで録画に進ませない)
+ */
+function parseIntegerField(
+  input: string,
+  label: string,
+  range: { min: number; max: number },
+  toPatch: (value: number) => Partial<Settings>,
+): FieldResult {
+  const text = input.trim();
+  if (text === "") return { ok: false, message: `${label}を入れてください` };
+  const value = Number(text);
+  if (!isIntegerIn(value, range)) {
+    return {
+      ok: false,
+      message: `${label}は ${range.min}〜${range.max} の整数です: ${text}`,
+    };
+  }
+  return { ok: true, patch: toPatch(value) };
+}
+
+export function parseTelopFontSize(input: string): FieldResult {
+  return parseIntegerField(input, "文字サイズ", TELOP_FONT_SIZE_RANGE, (value) => ({
+    telopFontSizePx: value,
+  }));
+}
+
+export function parseTelopStrokeWidth(input: string): FieldResult {
+  return parseIntegerField(
+    input,
+    "縁取りの太さ",
+    TELOP_STROKE_WIDTH_RANGE,
+    (value) => ({ telopStrokeWidthPx: value }),
+  );
+}
+
+/** font の指定を壊す文字。引用符が混ざると `ctx.font` への代入が黙って無視される */
+const FONT_NAME_FORBIDDEN = /["'\\;]/u;
+
+/** 保存されている値がフォント名として使えるか */
+function isFontName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    !FONT_NAME_FORBIDDEN.test(value)
+  );
+}
+
+/**
+ * フォントの入力欄を差分にする。
+ *
+ * **手元に無いフォントかは調べない。** `document.fonts.check()` はシステムフォントに
+ * 常に真を返すので判定に使えない。代わりのフォントで描かれたことはプレビューで見える。
+ * `,` は弾かない (ファミリの区切りとして読まれ、候補が 2 つになるだけ)
+ */
+export function parseTelopFont(input: string): FieldResult {
+  const name = input.trim();
+  if (name === "") return { ok: false, message: "フォントを入れてください" };
+  if (!isFontName(name)) {
+    return {
+      ok: false,
+      message: `フォント名に使えない文字が入っています (" ' \\ ;): ${name}`,
+    };
+  }
+  return { ok: true, patch: { telopFont: name } };
+}
+
+/** `input type="color"` が返す形。これ以外は受け付けない */
+const HEX_COLOR = /^#[0-9a-f]{6}$/iu;
+
+function isHexColor(value: unknown): value is string {
+  return typeof value === "string" && HEX_COLOR.test(value);
+}
+
+/** 色の入力欄を差分にする。小文字に揃えて保存する */
+export function parseColor(
+  key: "telopFillColor" | "telopStrokeColor",
+  input: string,
+): FieldResult {
+  const text = input.trim();
+  if (!isHexColor(text)) {
+    return { ok: false, message: `色は #rrggbb の形で入れてください: ${text}` };
+  }
+  return { ok: true, patch: { [key]: text.toLowerCase() } };
 }
 
 /**
@@ -245,6 +368,27 @@ export function mergeSettings(stored: unknown): Settings {
     );
   }
 
+  // テロップの見た目。どれも同じ作法: 型の合う値だけ採り、合わなければ理由を残す
+  const telopFields = [
+    ["telopFontSizePx", (v: unknown) => isIntegerIn(v, TELOP_FONT_SIZE_RANGE)],
+    ["telopFont", isFontName],
+    ["telopFillColor", isHexColor],
+    ["telopStrokeColor", isHexColor],
+    ["telopStrokeWidthPx", (v: unknown) => isIntegerIn(v, TELOP_STROKE_WIDTH_RANGE)],
+  ] as const;
+  for (const [key, accepts] of telopFields) {
+    const value = source[key];
+    if (accepts(value)) {
+      Object.assign(settings, {
+        [key]: typeof value === "string" && key !== "telopFont" ? value.toLowerCase() : value,
+      });
+    } else if (value !== undefined) {
+      console.warn(
+        `[yt-clip] 保存された ${key} が使えないため既定値を使います: ${String(value)}`,
+      );
+    }
+  }
+
   return settings;
 }
 
@@ -280,8 +424,11 @@ export type SelectOption = { value: string; label: string };
  * `SETTINGS_FIELDS` の 2 箇所だけ」という性質が崩れる。
  */
 export type FieldControl =
-  | { kind: "text" }
-  | { kind: "select"; options: readonly SelectOption[] };
+  /** `suggestions` があれば候補として出す。候補以外も書ける */
+  | { kind: "text"; suggestions?: readonly string[] }
+  | { kind: "select"; options: readonly SelectOption[] }
+  /** `#rrggbb` の文字列で往復する */
+  | { kind: "color" };
 
 export type SettingsField = {
   /** 入力欄を識別する。DOM の id にも使う */
@@ -380,5 +527,59 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
 
     toText: (settings) => String(settings.maxClipSec),
     fromText: (text) => parseMaxClipSec(text),
+  },
+  // テロップの見た目。**モードに関わらず常に出す。** パネルには項目をモードで
+  // 出し分ける仕組みが無く、モード自体が同じパネルの未保存の選択肢なので、
+  // 出し分けると選び直した瞬間に項目が出入りする処理まで要る
+  {
+    key: "telopFontSizePx",
+    label: "テロップの文字サイズ",
+    scope: "global",
+    control: { kind: "text" },
+    hint: () =>
+      `エディットモードのテロップに使う。${TELOP_FONT_SIZE_RANGE.min}〜${TELOP_FONT_SIZE_RANGE.max} (1080p で見たときの px)`,
+    toText: (settings) => String(settings.telopFontSizePx),
+    fromText: (text) => parseTelopFontSize(text),
+  },
+  {
+    key: "telopFont",
+    label: "テロップのフォント",
+    scope: "global",
+    control: {
+      kind: "text",
+      suggestions: TELOP_FONT_PRESETS.map((preset) => preset.label),
+    },
+    hint: () =>
+      "エディットモードのテロップに使う。候補から選ぶか、手元にあるフォントの名前を書く (無ければ代わりのフォントで描く)",
+    toText: (settings) => settings.telopFont,
+    fromText: (text) => parseTelopFont(text),
+  },
+  {
+    key: "telopFillColor",
+    label: "テロップの文字の色",
+    scope: "global",
+    control: { kind: "color" },
+    hint: () => "エディットモードのテロップに使う",
+    toText: (settings) => settings.telopFillColor,
+    fromText: (text) => parseColor("telopFillColor", text),
+  },
+  {
+    key: "telopStrokeColor",
+    label: "テロップの縁取りの色",
+    scope: "global",
+    control: { kind: "color" },
+    hint: () => "エディットモードのテロップに使う",
+    toText: (settings) => settings.telopStrokeColor,
+    fromText: (text) => parseColor("telopStrokeColor", text),
+  },
+  {
+    key: "telopStrokeWidthPx",
+    label: "テロップの縁取りの太さ",
+    scope: "global",
+    control: { kind: "text" },
+    hint: () =>
+      `エディットモードのテロップに使う。${TELOP_STROKE_WIDTH_RANGE.min}〜${TELOP_STROKE_WIDTH_RANGE.max}、0 で縁取りなし (1080p で見たときの px)`,
+    toText: (settings) => String(settings.telopStrokeWidthPx),
+    fromText: (text) => parseTelopStrokeWidth(text),
   },
 ];

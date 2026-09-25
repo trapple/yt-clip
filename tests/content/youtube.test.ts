@@ -11,6 +11,7 @@ const RECORDED_BYTES = buildFragmentedMp4({
 });
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -24,6 +25,7 @@ import {
   FAILURE_MESSAGES,
   type ClipRange,
   type ClipState,
+  type Telop,
 } from "@/shared/types";
 
 /**
@@ -60,6 +62,8 @@ type FakeRecorder = {
   onstop: (() => void) | null;
   /** 呼ばれた順。区間の繋ぎ方を順序ごと確かめる */
   calls: string[];
+  /** 録画に渡されたストリーム */
+  stream: unknown;
 };
 let recorders: FakeRecorder[] = [];
 /** captureStream のトラックが解放された回数 */
@@ -246,6 +250,48 @@ function changeSettings(next: Record<string, unknown>): void {
   storageListener?.({ settings: { newValue: next } }, "sync");
 }
 
+/**
+ * 描ける canvas の 2D 文脈のモック。プレビューと合成が呼ぶものだけ持つ。
+ *
+ * **既定を null にしない。** 描けない環境ではテロップ付きの状態が届くたびに
+ * プレビューが warn し、テストの出力が警告で埋まる
+ */
+function makeCanvasContext(
+  options: { tainted?: boolean; fillText?: () => void } = {},
+): CanvasRenderingContext2D {
+  let font = "10px sans-serif";
+  const ctx = {
+    get font(): string {
+      return font;
+    },
+    set font(value: string) {
+      font = value;
+    },
+    drawImage: () => undefined,
+    getImageData: () => {
+      if (options.tainted) throw new DOMException("tainted", "SecurityError");
+      return {};
+    },
+    clearRect: () => undefined,
+    save: () => undefined,
+    restore: () => undefined,
+    strokeText: () => undefined,
+    fillText: options.fillText ?? (() => undefined),
+  };
+  return ctx as unknown as CanvasRenderingContext2D;
+}
+
+function spyOnGetContext() {
+  return vi.spyOn(HTMLCanvasElement.prototype, "getContext");
+}
+
+/** getContext の spy。テストが差し替えた後は `useDefaultCanvasContext` で戻す */
+let getContextSpy: ReturnType<typeof spyOnGetContext> | null = null;
+
+function useDefaultCanvasContext(): void {
+  getContextSpy?.mockImplementation(() => makeCanvasContext());
+}
+
 function installGlobals(): void {
   class FakeMediaRecorder implements FakeRecorder {
     static isTypeSupported(): boolean {
@@ -256,8 +302,10 @@ function installGlobals(): void {
     onerror: ((event: Event) => void) | null = null;
     onstop: (() => void) | null = null;
     readonly calls: string[] = [];
+    readonly stream: unknown;
 
-    constructor() {
+    constructor(stream: unknown) {
+      this.stream = stream;
       recorders.push(this);
     }
     start(): void {
@@ -333,6 +381,18 @@ function installGlobals(): void {
       },
     },
   });
+
+  // プレビュー (telop-preview.ts) のため。jsdom は ResizeObserver を持たず、
+  // canvas も描けない (getContext は "Not implemented" を出して null を返す)
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe(): void {}
+      disconnect(): void {}
+    },
+  );
+  getContextSpy = spyOnGetContext();
+  useDefaultCanvasContext();
 }
 
 /**
@@ -427,7 +487,7 @@ beforeAll(async () => {
   installGlobals();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
-  swState = { kind: "ready", segments: [RANGE], meta: META_A };
+  swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
 
   // chrome を用意してから読み込む。import 時に listener と observer を張る
   await import("@/content/youtube");
@@ -492,7 +552,7 @@ afterAll(async () => {
 
 describe("範囲再生の監視", () => {
   test("範囲を変えた後は、前の範囲の監視で録画が止まらない", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
 
     // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
     clickButton("▶ 範囲を見る");
@@ -511,9 +571,9 @@ describe("範囲再生の監視", () => {
     expect(video.pendingFrames()).toBe(0);
 
     const recording: ClipRange = { startSec: 10, endSec: 30 };
-    emit({ kind: "seeking", segments: [recording], meta: META_A });
+    emit({ kind: "seeking", segments: [recording], telops: [], meta: META_A });
     await flush();
-    emit({ kind: "recording", segments: [recording], meta: META_A });
+    emit({ kind: "recording", segments: [recording], telops: [], meta: META_A });
     await flush();
 
     const pausesBefore = video.pauseCount;
@@ -529,12 +589,12 @@ describe("範囲再生の監視", () => {
   });
 
   test("録画に入ると範囲再生の監視は解除される", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     clickButton("▶ 範囲を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
-    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(video.pendingFrames()).toBe(0);
@@ -545,12 +605,12 @@ describe("範囲再生の監視", () => {
 
 describe("動画の入れ替わり", () => {
   test("範囲を作った動画と違う動画では録画に入らない", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(overlay()).not.toBeNull();
 
     // 関連動画へ SPA 遷移してから popup で録画を始めた場合
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(clipEvents()).toContainEqual({
@@ -570,7 +630,7 @@ describe("動画の入れ替わり", () => {
     // 返ってくる。取り込むと、B のステータス行に A の範囲が出るうえ、
     // 「範囲を再生」で B を A の開始位置へ飛ばしてしまう
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(statusText()).not.toContain("0:10");
@@ -587,7 +647,7 @@ describe("動画の入れ替わり", () => {
   });
 
   test("別の動画へ移ると帯が消え、拡大バーも操作できなくなる", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(overlay()).not.toBeNull();
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
@@ -603,8 +663,8 @@ describe("動画の入れ替わり", () => {
 
 describe("録画の後始末", () => {
   test("失敗に落ちたら録画を止めてストリームを解放する", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/start");
     await flush();
 
@@ -618,6 +678,7 @@ describe("録画の後始末", () => {
       kind: "failed",
       reason: "playback-failed",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -639,8 +700,8 @@ describe("録画の後始末", () => {
     // service worker は seeking の state/changed を送った後、SEEK_DONE を
     // 受けて recorder/start を送り、録画開始の通知を受けてから recording へ
     // 進める。この順序で「録画から離れた状態」の後始末が誤爆しないこと
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     expect(clipEvents()).toContainEqual({ type: "SEEK_DONE" });
 
@@ -648,7 +709,7 @@ describe("録画の後始末", () => {
     await flush();
     expect(startedRecorder().state).toBe("recording");
 
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     // recording への遷移で録画を捨てていないこと
     expect(startedRecorder().state).toBe("recording");
@@ -656,7 +717,7 @@ describe("録画の後始末", () => {
     // OUT に到達 → 書き出し → 結果の送信まで通す
     video.advanceFrame(20.1);
     expect(clipEvents()).toContainEqual({ type: "OUT_REACHED" });
-    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/stop");
     await flush();
 
@@ -678,12 +739,12 @@ describe("録画の後始末", () => {
   });
 
   test("録画結果を送れなかったら失敗として知らせる", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/start");
     await flush();
 
-    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
     // 60 秒 1080p の base64 がメッセージ長を超える場合を再現する
     rejectMessageType = "recorder/done";
     command("recorder/stop");
@@ -720,11 +781,12 @@ describe("失敗の提示", () => {
   test("失敗の理由はバーにも出す", () => {
     // 録画中にタブをリロードした場合、popup を開かない限り何が起きたのか
     // 分からない。文言は popup と同じものを使う
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     emit({
       kind: "failed",
       reason: "recording-aborted",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
 
@@ -759,7 +821,7 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("録画済みでポスト待ちの間は操作させない", () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
     emit({
@@ -767,6 +829,7 @@ describe("拡大バーを操作できる状態", () => {
       clipId: "clip-1",
       mimeType: "video/mp4",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
     // service worker は preview での範囲変更を拒む。画面もそれに合わせる
@@ -774,12 +837,13 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("受け付けられなかった範囲変更は、画面を状態機械側へ戻す", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     emit({
       kind: "preview",
       clipId: "clip-1",
       mimeType: "video/mp4",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
 
@@ -806,16 +870,17 @@ describe("状態ごとの操作", () => {
     ).map((button) => button.textContent ?? "");
 
   test("状態が変わると出る操作も変わる", () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(labels()).toEqual(["● 録画"]);
 
     // 録り始めてからでも戻れる
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     expect(labels()).toEqual(["■ 中止"]);
 
     emit({
       kind: "posted",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -824,7 +889,7 @@ describe("状態ごとの操作", () => {
   });
 
   test("操作を押すと状態機械へイベントが飛ぶ", () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -838,6 +903,7 @@ describe("状態ごとの操作", () => {
     emit({
       kind: "posted",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -849,7 +915,7 @@ describe("状態ごとの操作", () => {
 
 describe("録画の中止", () => {
   test("中止を押すと状態機械へ伝わる", () => {
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -861,14 +927,14 @@ describe("録画の中止", () => {
   test("録画から離れると録画も監視も止まる", async () => {
     // 中止の停止処理は「recording から外れた」ことを見て走る。
     // 中止のためだけの後始末は足していないので、ここが唯一の担保になる
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/start");
     await flush();
     const recorder = startedRecorder();
     expect(recorder.state).toBe("recording");
 
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(recorder.state).toBe("inactive");
@@ -995,7 +1061,7 @@ describe("最大秒数の設定", () => {
     clickButton("IN");
     await flush();
     // 実機では service worker が state/changed を配る。それで拡大バーが有効になる
-    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], telops: [], meta: META_A });
     await flush();
 
     dragOutToEnd();
@@ -1034,7 +1100,7 @@ describe("エディットモード", () => {
 
   test("シンプルでは一覧を出さない", async () => {
     changeSettings({ mode: "simple" });
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(segmentRows()).toEqual([]);
@@ -1084,6 +1150,7 @@ describe("エディットモード", () => {
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1100,6 +1167,7 @@ describe("エディットモード", () => {
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1112,7 +1180,7 @@ describe("エディットモード", () => {
 
   test("モードが変わると作りかけの区間を消す", async () => {
     changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     sent = [];
 
@@ -1127,7 +1195,7 @@ describe("エディットモード", () => {
 
   test("録画中はモードの変更を受け付けない", async () => {
     changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     sent = [];
 
@@ -1148,7 +1216,7 @@ describe("複数区間の録画", () => {
   /** 録画が走っている状態まで進める */
   async function startTwoSegments(): Promise<FakeRecorder> {
     changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: TWO, meta: META_A });
+    emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
     await flush();
     command("recorder/start");
     await flush();
@@ -1179,7 +1247,7 @@ describe("複数区間の録画", () => {
 
   test("最初の区間の頭へ飛ぶ", async () => {
     changeSettings({ mode: "edit" });
-    emit({ kind: "seeking", segments: TWO, meta: META_A });
+    emit({ kind: "seeking", segments: TWO, telops: [], meta: META_A });
     await flush();
 
     expect(video.element.currentTime).toBe(83);
@@ -1239,7 +1307,7 @@ describe("複数区間の録画", () => {
 
     video.advanceFrame(98);
     await flush();
-    emit({ kind: "ready", segments: TWO, meta: META_A });
+    emit({ kind: "ready", segments: TWO, telops: [], meta: META_A });
     await flush();
 
     // pause 中に中止されてもストリームを掴んだままにしない
@@ -1251,7 +1319,7 @@ describe("複数区間の録画", () => {
 
     video.advanceFrame(98);
     await flush();
-    emit({ kind: "ready", segments: TWO, meta: META_A });
+    emit({ kind: "ready", segments: TWO, telops: [], meta: META_A });
     await flush();
     sent = [];
 
@@ -1286,6 +1354,7 @@ describe("シークバーの帯", () => {
         { startSec: 10, endSec: 20 },
         { startSec: 60, endSec: 70 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1338,6 +1407,7 @@ describe("エディットモードの OUT", () => {
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1367,7 +1437,7 @@ describe("進行中のモード変更", () => {
 
   test("録画が終わってから切り替わる", async () => {
     changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     sent = [];
 
@@ -1378,7 +1448,7 @@ describe("進行中のモード変更", () => {
 
     // 録画が終わったら追いつく。storage の変更通知は次に保存するまで来ないので、
     // ここで拾わないとタブは開き直すまでエディットのままになる
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(clipEvents()).toContainEqual({ type: "RESET_MARKS" });
@@ -1389,6 +1459,7 @@ describe("進行中のモード変更", () => {
     emit({
       kind: "degraded",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -1413,7 +1484,7 @@ describe("区間を足した直後の選択", () => {
 
   test("足した区間が選ばれる", async () => {
     changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 98 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 98 }], telops: [], meta: META_A });
     await flush();
 
     video.element.currentTime = 300;
@@ -1426,6 +1497,7 @@ describe("区間を足した直後の選択", () => {
         { startSec: 83, endSec: 98 },
         { startSec: 300, endSec: 315 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1444,6 +1516,7 @@ describe("合計が上限を超えた録画", () => {
         { startSec: 0, endSec: 15 },
         { startSec: 100, endSec: 115 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1455,6 +1528,7 @@ describe("合計が上限を超えた録画", () => {
         { startSec: 0, endSec: 15 },
         { startSec: 100, endSec: 115 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1478,6 +1552,7 @@ describe("エディットモードの IN", () => {
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1503,7 +1578,7 @@ describe("エディットモードの IN", () => {
 
   test("シンプルの IN は今までどおり作り直す", async () => {
     changeSettings({ mode: "simple" });
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     sent = [];
 
@@ -1551,7 +1626,7 @@ describe("重なる位置での区間追加", () => {
 
   test("区間の中で押しても区間が増える", async () => {
     changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], telops: [], meta: META_A });
     await flush();
     // 既存区間の内側
     video.element.currentTime = 90;
@@ -1568,7 +1643,7 @@ describe("重なる位置での区間追加", () => {
 
   test("足した区間が末尾で選ばれる", async () => {
     changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], telops: [], meta: META_A });
     await flush();
 
     video.element.currentTime = 90;
@@ -1581,6 +1656,7 @@ describe("重なる位置での区間追加", () => {
         { startSec: 83, endSec: 200 },
         { startSec: 90, endSec: 105 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1597,6 +1673,7 @@ describe("重なる位置での区間追加", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1611,6 +1688,7 @@ describe("重なる位置での区間追加", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1634,6 +1712,7 @@ describe("区間を消したときの選択", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1653,6 +1732,7 @@ describe("区間を消したときの選択", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1675,11 +1755,425 @@ describe("区間を消したときの選択", () => {
         { startSec: 10, endSec: 20 },
         { startSec: 30, endSec: 40 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
 
     expect(segmentRows()[0]?.dataset.selected).toBe("true");
     expect(statusText()).toContain("0:10");
+  });
+});
+
+describe("テロップ付きの録画", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+  let restoreCanvas: (() => void) | null = null;
+
+  /**
+   * 録画の canvas を用意する。tainted なら getImageData が SecurityError。
+   * recordingDrawThrows なら、録画に使った canvas (captureStream を呼んだもの) に
+   * 文字を描くと投げる。プレビューの canvas は壊さない (壊すとプレビューが warn する)
+   */
+  function installCanvas(
+    options: { tainted?: boolean; recordingDrawThrows?: boolean } = {},
+  ) {
+    const track = {
+      kind: "video",
+      requestFrame: () => undefined,
+      stopped: false,
+      stop() {
+        this.stopped = true;
+      },
+    };
+    const captured = new Set<HTMLCanvasElement>();
+    getContextSpy?.mockImplementation(function (this: HTMLCanvasElement) {
+      return makeCanvasContext({
+        tainted: options.tainted,
+        fillText: () => {
+          if (options.recordingDrawThrows && captured.has(this)) {
+            throw new Error("描画が壊れた");
+          }
+        },
+      });
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, "captureStream", {
+      configurable: true,
+      value(this: HTMLCanvasElement) {
+        captured.add(this);
+        return { getVideoTracks: () => [track] };
+      },
+    });
+    // mockRestore にしない。installGlobals の spy まで外れて jsdom の実装に戻り、
+    // 以降のテストの出力に "Not implemented" が混ざる
+    restoreCanvas = useDefaultCanvasContext;
+    return { track };
+  }
+
+  beforeEach(() => {
+    // 合成の canvas は録画開始時の動画の大きさで作る。フェイクは高さしか持たない
+    Object.defineProperty(video.element, "videoWidth", {
+      configurable: true,
+      value: 1920,
+    });
+    vi.stubGlobal(
+      "MediaStream",
+      class {
+        constructor(readonly tracks: { kind: string }[] = []) {}
+        getTracks() {
+          return this.tracks;
+        }
+        getVideoTracks() {
+          return this.tracks.filter((track) => track.kind === "video");
+        }
+        getAudioTracks() {
+          return this.tracks.filter((track) => track.kind === "audio");
+        }
+      },
+    );
+  });
+
+  afterEach(() => {
+    restoreCanvas?.();
+    restoreCanvas = null;
+  });
+
+  /**
+   * seeking → recording → recorder/start と進める。
+   *
+   * **seeking を通すこと。** 経路の判定と描けるかの検査は prepareRecording
+   * (seeking を受けたとき) で行うので、recording から始めると合成を通らない
+   */
+  async function recordWith(telops: Telop[]): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops });
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops });
+    await flush();
+    command("recorder/start");
+    await flush();
+  }
+
+  test("区間に重なるテロップがあると canvas の映像で録る", async () => {
+    const { track } = installCanvas();
+
+    await recordWith([TELOP]);
+
+    const stream = startedRecorder().stream as { getVideoTracks(): unknown[] };
+    expect(stream.getVideoTracks()).toEqual([track]);
+  });
+
+  /**
+   * 録画が今の経路 (video.captureStream の映像) で録っているか。
+   *
+   * **canvas が作られたかでは見ない。** プレビュー (Task 11) は区間外のテロップ
+   * でも canvas を作るので、録画の経路とは関係なく canvas は現れる
+   */
+  function recordsCapturedVideo(): boolean {
+    const stream = startedRecorder().stream as {
+      getVideoTracks(): object[];
+    };
+    const tracks = stream.getVideoTracks();
+    return tracks.length === 1 && !tracks.some((track) => "requestFrame" in track);
+  }
+
+  test("テロップが無ければ今の経路のまま", async () => {
+    installCanvas();
+
+    await recordWith([]);
+
+    expect(recordsCapturedVideo()).toBe(true);
+  });
+
+  test("区間外のテロップしか無ければ今の経路のまま", async () => {
+    // canvas を挟む負荷を、録画に出ないテロップのために払わない
+    installCanvas();
+
+    await recordWith([{ startSec: 100, endSec: 103, text: "外" }]);
+
+    expect(recordsCapturedVideo()).toBe(true);
+  });
+
+  test("canvas に描けなければ録画を始めずに telop-render-failed で落とす", async () => {
+    // テロップなしで録って続行すると、実時間を払った後で気付くことになる
+    installCanvas({ tainted: true });
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-render-failed" });
+    expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
+    expect(statusText()).toContain("テロップを動画に描けませんでした");
+  });
+
+  function setHidden(hidden: boolean): void {
+    Object.defineProperty(document, "hidden", { configurable: true, value: hidden });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  afterEach(() => {
+    setHidden(false);
+  });
+
+  test("録画を始める前にタブが隠れていたら始めない", async () => {
+    // 隠れたまま始めると、最初のフレームから映像が止まる
+    installCanvas();
+    setHidden(true);
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
+  });
+
+  test("seeking から recorder/start までの往復の間に隠れたら録画を始めない", async () => {
+    // prepareRecording の検査は seek の await より前の 1 回だけ。その後の
+    // service worker との往復の間に隠れると、監視はまだ付いていないので
+    // startCompositor が始まる前に見ておかないと素通りする
+    installCanvas();
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    // ここではまだ隠れていない (SEEK_DONE を通す)
+    setHidden(true);
+
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    command("recorder/start");
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(recorders).toHaveLength(0);
+  });
+
+  test("録画中にタブが隠れたら中断する", async () => {
+    installCanvas();
+    await recordWith([TELOP]);
+    sent = [];
+
+    setHidden(true);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+  });
+
+  test("録画中に合成の描画が落ちたら telop-render-failed で中断する", async () => {
+    // 描画が止まったまま録り続けると、静止した映像と進む音声が成功として書き出される
+    const { track } = installCanvas({ recordingDrawThrows: true });
+    await recordWith([TELOP]);
+    sent = [];
+
+    // テロップの出る時刻のフレームで初めて文字を描く
+    video.advanceFrame(12);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-render-failed" });
+    expect(statusText()).toContain("テロップを動画に描けませんでした");
+    expect(track.stopped).toBe(true);
+  });
+
+  test("隠れていて動画の大きさも分からないときは、隠れたことを理由にする", async () => {
+    // 隠れた窓では動画がデコードされず videoWidth が 0 になる。大きさの検査を
+    // 先にすると「動画の大きさがまだ分かりません」が出て本当の理由が伝わらない
+    installCanvas();
+    Object.defineProperty(video.element, "videoWidth", { configurable: true, value: 0 });
+    setHidden(true);
+    changeSettings({ mode: "edit" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(clipEvents()).not.toContainEqual({
+      type: "FAIL",
+      reason: "telop-render-failed",
+    });
+  });
+
+  test("テロップの無い録画では隠れても中断しない", async () => {
+    // 今の経路は隠れても映像が止まらない (§9.1)
+    await recordWith([]);
+    sent = [];
+
+    setHidden(true);
+    await flush();
+
+    expect(clipEvents()).not.toContainEqual(expect.objectContaining({ type: "FAIL" }));
+  });
+});
+
+describe("テロップの一覧", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  function telopRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='telop']")];
+  }
+
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  function addTelopButton(): HTMLButtonElement {
+    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
+    if (button === null) throw new Error("＋ テロップがありません");
+    return button;
+  }
+
+  async function showReady(
+    telops: Telop[],
+    segments: ClipRange[] = [RANGE],
+  ): Promise<void> {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments, meta: META_A, telops });
+    await flush();
+    sent = [];
+  }
+
+  async function seekVideo(sec: number): Promise<void> {
+    video.element.currentTime = sec;
+    await flush();
+  }
+
+  test("＋ テロップで今の位置から 3 秒のテロップを送る", async () => {
+    await showReady([]);
+    await seekVideo(12);
+
+    addTelopButton().click();
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "ADD_TELOP",
+      telop: { startSec: 12, endSec: 15, text: "" },
+    });
+  });
+
+  test("動画の終わりを超えるなら終わりを詰める", async () => {
+    await showReady([]);
+    await seekVideo(598);
+
+    addTelopButton().click();
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "ADD_TELOP",
+      telop: { startSec: 598, endSec: 600, text: "" },
+    });
+  });
+
+  test("開始を今にで、開始が終了以上になるなら送らず理由を出す", async () => {
+    await showReady([TELOP]);
+    await seekVideo(20);
+
+    telopRows()[0]?.querySelector<HTMLElement>("[data-role='set-start']")?.click();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("開始は終了より前にしてください");
+  });
+
+  test("文言を確定すると UPDATE_TELOP を送る", async () => {
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+
+    textarea.value = "やあ\n元気";
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "UPDATE_TELOP",
+      index: 0,
+      telop: { ...TELOP, text: "やあ\n元気" },
+    });
+  });
+
+  test("500 文字を超える文言は送らず、理由を出して入力欄は残す", async () => {
+    // 状態ごと保存され毎フレーム描かれる。上限を超えたものは状態機械に拒まれる
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+
+    textarea.value = "あ".repeat(501);
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("テロップは 500 文字までです (いま 501 文字)");
+    // 直してもらうので消さない
+    expect(textarea.value).toBe("あ".repeat(501));
+
+    textarea.value = "あ".repeat(500);
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "UPDATE_TELOP",
+      index: 0,
+      telop: { ...TELOP, text: "あ".repeat(500) },
+    });
+  });
+
+  test("テロップが残っていると最後の 1 区間は消せない", async () => {
+    // 区間が 0 個になると idle に戻り、手入力の文言もまとめて消える
+    await showReady([TELOP]);
+
+    segmentRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe(
+      "テロップが 1 件残っています。先にテロップを消してください",
+    );
+  });
+
+  test("区間の削除でテロップが消えてしまったら知らせる", async () => {
+    // 手元の写しが古くて止め損ねた場合の保険
+    await showReady([TELOP], [RANGE, { startSec: 30, endSec: 40 }]);
+    segmentRows()[1]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+
+    emit({ kind: "idle" });
+    await flush();
+
+    expect(statusText()).toBe("テロップも消えました");
+  });
+
+  test("削除の応答待ちの間に別の動画へ移っても、テロップが消えたとは言わない", async () => {
+    // 応答の状態は元の動画のもの。別の動画のタブでは取り込まないので手元の
+    // テロップは空になるが、状態機械にはまだ残っている
+    await showReady([TELOP], [RANGE, { startSec: 30, endSec: 40 }]);
+    segmentRows()[1]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+    history.pushState({}, "", "/watch?v=video-b");
+
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(statusText()).not.toBe("テロップも消えました");
+  });
+
+  test("preview では操作できない", async () => {
+    // 区間の拡大バーと同じ条件。テロップだけ触れる非対称を作らない
+    changeSettings({ mode: "edit" });
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [RANGE],
+      meta: META_A,
+      telops: [TELOP],
+    });
+    await flush();
+    sent = [];
+
+    telopRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    addTelopButton().click();
+
+    expect(clipEvents()).toEqual([]);
+  });
+
+  test("シンプルモードでは出さない", async () => {
+    changeSettings({ mode: "simple" });
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [] });
+    await flush();
+
+    // 一覧の箱は ＋ テロップの見出しの親
+    expect(addTelopButton().parentElement?.parentElement?.hidden).toBe(true);
   });
 });

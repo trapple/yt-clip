@@ -193,6 +193,47 @@ describe("buildRecordingStream", () => {
     );
     warn.mockRestore();
   });
+
+  test("映像の差し替えがあれば、その映像と落とした音声で録る", () => {
+    const capturedVideo = new FakeTrack("video", "captured");
+    const captured = new FakeStream([capturedVideo, new FakeTrack("audio", "captured")]);
+    const { create } = makeAudioContext();
+    const composed = new FakeTrack("video", "composed");
+    let overrideReleased = false;
+
+    const built = buildRecordingStream(captured as unknown as MediaStream, create, {
+      track: composed as unknown as MediaStreamTrack,
+      release: () => {
+        overrideReleased = true;
+      },
+    });
+
+    const videos = built.stream.getVideoTracks() as unknown as FakeTrack[];
+    expect(videos.map((track) => track.label)).toEqual(["composed"]);
+
+    // release は合成側も解放する。自動停止の経路でも rVFC のループを残さない
+    built.release();
+    expect(overrideReleased).toBe(true);
+    expect(capturedVideo.stopped).toBe(true);
+  });
+
+  test("音声が無くても映像の差し替えは効く", () => {
+    const captured = new FakeStream([new FakeTrack("video", "captured")]);
+    const composed = new FakeTrack("video", "composed");
+    let overrideReleased = false;
+
+    const built = buildRecordingStream(captured as unknown as MediaStream, undefined, {
+      track: composed as unknown as MediaStreamTrack,
+      release: () => {
+        overrideReleased = true;
+      },
+    });
+
+    const videos = built.stream.getVideoTracks() as unknown as FakeTrack[];
+    expect(videos.map((track) => track.label)).toEqual(["composed"]);
+    built.release();
+    expect(overrideReleased).toBe(true);
+  });
 });
 
 /** jsdom は MediaRecorder を持たないので、状態遷移だけを真似る */
