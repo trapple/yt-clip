@@ -1020,17 +1020,51 @@ test("テロップの実機確認", async () => {
     await expect(listWindow).toBeVisible();
   }
 
+  /**
+   * ⚙ を押す前にバーの窓を前に出す。⚙ はバーの右端にあり、区間・テロップの窓や設定の窓を
+   * 動かした後は同じ座標に重なりうる (触った順で重なり順が決まるため、⚙ の上に他の窓が乗ると
+   * click が塞がれて 30 秒 timeout する。実機の確認で実際に踏んだ)。grip は左端にあり他の窓と
+   * 重ならないので、押して離すだけ (位置は変わらず覚え直しもしない) で確実にバーを前に出せる
+   * (「右下をドラッグ…」の項目が元から使っていた idiom)
+   */
+  async function bringBarToFront(): Promise<void> {
+    await barGrip.click();
+  }
+
+  /**
+   * 設定の窓が閉じていれば ⚙ を押して開く。**既に開いていれば何もしない**
+   * (トグルを盲目的に押すと、開いているつもりで押して閉じてしまう)。押す前にバーを前に出すので、
+   * 他の窓が ⚙ の上に重なっていても掴める
+   */
+  async function openSettings(): Promise<void> {
+    if (await settingsWindow.isVisible()) return;
+    await bringBarToFront();
+    await button("⚙").click();
+    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+  }
+
+  /** 設定の窓が開いていれば ⚙ を押して閉じる。既に閉じていれば何もしない */
+  async function closeSettings(): Promise<void> {
+    if (!(await settingsWindow.isVisible())) return;
+    await bringBarToFront();
+    await button("⚙").click();
+    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
+  }
+
   await check("⚙ で設定が別の窓に開閉し、区間・テロップの窓はそのまま", async () => {
     await page.evaluate(() => window.scrollTo(0, 0));
-    // 受け入れ条件の確認で設定を開いたまま。どちらの窓もまだ動かしていない (1920x1080 の最初の位置)
-    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+    // 前提を自分で作る (前の項目の終わり方に依存しない)。受け入れ条件の確認で開いたまま
+    // 終わっているはずだが、閉じていれば開く。どちらの窓もまだ動かしていない (1920x1080 の最初の位置)
+    await openSettings();
     const listOpen = await boxOf(listWindow);
     const settingsOpen = await boxOf(settingsWindow);
 
+    await bringBarToFront();
     await button("⚙").click();
     await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
     const listClosed = await boxOf(listWindow);
 
+    await bringBarToFront();
     await button("⚙").click();
     await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
     const settingsReopened = await boxOf(settingsWindow);
@@ -1051,7 +1085,9 @@ test("テロップの実機確認", async () => {
 
   await check("窓を動かすと、読み込み直しても同じ位置に出る", async () => {
     await page.evaluate(() => window.scrollTo(0, 0));
-    // 設定は直前の項目で開いたまま。設定の窓は区間・テロップの窓に下へ 32px ずれて重なり、前に出ている
+    // 前提を自分で作る。設定の窓を動かすので開いていることが要る (直前の項目で開いたままの
+    // はずだが、閉じていれば開く)。設定の窓は区間・テロップの窓に下へ 32px ずれて重なり、前に出ている
+    await openSettings();
     const barStart = await boxOf(barWindow);
     const listStart = await boxOf(listWindow);
     const settingsStart = await boxOf(settingsWindow);
@@ -1073,13 +1109,12 @@ test("テロップの実機確認", async () => {
     await reloadAndWaitList();
     const barAfter = await boxOf(barWindow);
     const listAfter = await boxOf(listWindow);
-    // 設定の開閉は覚えない (読み込み直すと閉じている)。⚙ で開いて、覚えた位置に出るかを見る
-    await button("⚙").click();
-    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+    // 設定の開閉は覚えない (読み込み直すと閉じている)。⚙ で開いて、覚えた位置に出るかを見る。
+    // 覚えた位置はバーの ⚙ に重なりうるので、openSettings がバーを前に出してから押す
+    await openSettings();
     const settingsAfter = await boxOf(settingsWindow);
     // 後の項目は設定を閉じた状態から始める (設定の窓が区間・テロップの窓の右下の角を覆わないように)
-    await button("⚙").click();
-    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
+    await closeSettings();
 
     const float = floatOf(saved);
     record(
@@ -1113,9 +1148,13 @@ test("テロップの実機確認", async () => {
   });
 
   await check("右下をドラッグすると大きさが変わる (バーの窓は幅だけ)", async () => {
+    // 前提を自分で作る。設定の窓は区間・テロップの窓と同じ幅で (0, +32) に重なるので、開いたまま
+    // だと区間・テロップの窓の右下のつまみを覆ってドラッグが届かない (C1.3 のカスケードの帰結)。
+    // 閉じてから大きさを変える
+    await closeSettings();
     // バーの窓を上にしておく (右下の角が区間・テロップの窓の下に潜っていても掴めるように)。
     // 押して離すだけなので、位置は変わらず覚え直しもしない
-    await barGrip.click();
+    await bringBarToFront();
     const barBefore = await boxOf(barWindow);
     const barCorner = centerOf(await boxOf(barWindow.locator("[data-role=window-resize]")));
     await dragFromTo(barCorner, { x: barCorner.x - 200, y: barCorner.y + 50 });
@@ -1138,6 +1177,9 @@ test("テロップの実機確認", async () => {
   });
 
   await check("窓を画面の外へドラッグしても、掴む場所が画面に残る", async () => {
+    // 前提を自分で作る (前の項目の終わり方に依存しない)。設定の窓が開いていると区間・テロップの
+    // 窓の見出しに重なりうる
+    await closeSettings();
     const viewport = page.viewportSize();
     if (viewport === null) throw new Error("viewport が取れません");
     // 掴んだ点を画面の隅まで運ぶ。掴む場所の残りは画面の外へ出ようとするが、詰められて残る。
@@ -1174,13 +1216,15 @@ test("テロップの実機確認", async () => {
   });
 
   await check("掴む場所をダブルクリックすると最初の位置に戻り、覚えた位置も消える", async () => {
+    // 前提を自分で作る (前の項目の終わり方に依存しない)。設定の窓が開いていると、バーや
+    // 区間・テロップの窓のダブルクリックが塞がれうる
+    await closeSettings();
     // バーを先に戻す。区間・テロップの窓を先に右上へ戻すと、高さが画面の下まで伸びて右下のつまみに被さる
     await barGrip.dblclick();
     const listHeaderBox = await boxOf(listHeader);
     await listHeader.dblclick({ position: { x: 40, y: listHeaderBox.height / 2 } });
-    // 設定の窓は閉じているので、⚙ で開いてから見出しをダブルクリックする (開くと前に出る)
-    await button("⚙").click();
-    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+    // ⚙ で開いてから見出しをダブルクリックする (開くと前に出る)
+    await openSettings();
     const settingsHeaderBox = await boxOf(settingsHeader);
     await settingsHeader.dblclick({ position: { x: 40, y: settingsHeaderBox.height / 2 } });
     await page.waitForTimeout(500);
@@ -1203,8 +1247,7 @@ test("テロップの実機確認", async () => {
     });
     const saved = await readWindowLayout();
     // 後の項目 (帯) は区間・テロップの窓の行を押す。最初の位置の設定の窓は行を覆うので閉じておく
-    await button("⚙").click();
-    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
+    await closeSettings();
 
     // バーの最初の位置: プレイヤーの下端 + 8px。収まらなければ画面の下端から 16px。
     // ヘッダーの下 (68px) より上には置かない (window-layout.ts の initialBarRect)。
