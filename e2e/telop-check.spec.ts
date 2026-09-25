@@ -380,10 +380,12 @@ test("テロップの実機確認", async () => {
   ).not.toBeEmpty({ timeout: 30_000 });
 
   const button = (name: string) => bar.getByRole("button", { name, exact: true });
-  // 一覧と設定は右側のパネルにある。バーには拡大バーと操作の行だけ
-  const panel = page.locator("#yt-clip-panel");
-  const segmentRows = panel.locator("[data-role=segment]");
-  const telopRows = panel.locator("[data-role=telop]");
+  // 区間とテロップの一覧は区間・テロップの窓、設定は設定の窓にある (窓の分割の spec C1.1)。
+  // バーには拡大バーと操作の行だけ
+  const listWindow = page.locator("#yt-clip-list");
+  const settingsWindow = page.locator("#yt-clip-settings");
+  const segmentRows = listWindow.locator("[data-role=segment]");
+  const telopRows = listWindow.locator("[data-role=telop]");
 
   /** 広告が出ている間は操作も録画も意味を持たない。消えるまで待つ */
   async function waitNoAd(): Promise<void> {
@@ -503,7 +505,7 @@ test("テロップの実機確認", async () => {
   async function addTelops(): Promise<void> {
     for (const [i, telop] of TELOPS.entries()) {
       await seekPaused(telop.startSec);
-      await panel.locator("[data-role=add-telop]").click();
+      await listWindow.locator("[data-role=add-telop]").click();
       await expect(telopRows).toHaveCount(i + 1);
       await setTelopText(i, telop.text);
     }
@@ -793,7 +795,7 @@ test("テロップの実機確認", async () => {
     await segmentRows.nth(1).locator("[data-role=remove]").click();
     await expect(segmentRows).toHaveCount(1);
     await seekPaused(TELOPS[0]!.startSec);
-    await panel.locator("[data-role=add-telop]").click();
+    await listWindow.locator("[data-role=add-telop]").click();
     await expect(telopRows).toHaveCount(1);
     await segmentRows.nth(0).locator("[data-role=remove]").click();
     await page.waitForTimeout(500);
@@ -807,8 +809,8 @@ test("テロップの実機確認", async () => {
     );
   });
 
-  // --- パネルの位置の出所 (spec §1: 実機の値を確かめて side-panel.ts に書く) ------
-  await check("パネルの位置の出所 (YouTube の実測)", async () => {
+  // --- 窓の位置の出所 (右側パネルの spec §1: 実機の値を確かめて panel-window.ts に書く) ------
+  await check("窓の位置の出所 (YouTube の実測)", async () => {
     const measured = await page.evaluate(() => {
       const box = (selector: string) => {
         const element = document.querySelector(selector);
@@ -826,14 +828,14 @@ test("テロップの実機確認", async () => {
         mastheadZIndex: zIndex("#masthead-container"),
         secondary: box("#secondary"),
         popupContainerZIndex: zIndex("ytd-popup-container"),
-        panel: box("#yt-clip-panel"),
-        panelZIndex: zIndex("#yt-clip-panel"),
+        list: box("#yt-clip-list"),
+        listZIndex: zIndex("#yt-clip-list"),
       };
     });
-    // 値そのものは人が読んで side-panel.ts のコメントに書き写す。ここでは読めたかだけ見る
+    // 値そのものは人が読んで panel-window.ts のコメントに書き写す。ここでは読めたかだけ見る
     record(
-      "パネルの位置の出所 (YouTube の実測)",
-      measured.masthead !== null && measured.secondary !== null && measured.panel !== null,
+      "窓の位置の出所 (YouTube の実測)",
+      measured.masthead !== null && measured.secondary !== null && measured.list !== null,
       measured,
     );
   });
@@ -841,7 +843,7 @@ test("テロップの実機確認", async () => {
   // --- シンプルモードでは一覧が出ない ------------------------------------------
   await check("シンプルモードでテロップの一覧が出ない", async () => {
     await writeSettings({ mode: "simple" });
-    const addTelop = panel.locator("[data-role=add-telop]");
+    const addTelop = listWindow.locator("[data-role=add-telop]");
     // **有ることを先に確かめる。** toBeHidden は見つからない要素でも通るので、
     // 探す場所を間違えていても素通りしてしまう
     await expect(addTelop).toHaveCount(1, { timeout: 10_000 });
@@ -866,108 +868,117 @@ test("テロップの実機確認", async () => {
     });
   }
 
-  // --- 受け入れ条件 (フロートの窓の spec A.4): 1440x795 で、最初の位置のままのバーの窓が
-  // プレイヤーの下に重ならずに収まり、一覧はパネルの窓の中で届く -----------------------------
+  // --- 受け入れ条件 (フロートの窓の spec A.4・窓の分割の spec C1.5): 1440x795 で、最初の位置のままの
+  // バーの窓がプレイヤーの下に重ならずに収まり、区間・テロップの窓と設定の窓も画面に収まって、設定の窓も
+  // プレイヤーに重ならない (settings.left ≥ player.right) -------------------------------------------
   // 1920x1080 の確認がすべて済んでから切り替え、最後に戻す
-  await check(
-    "受け入れ条件 1440x795: 帯の段が最大 (2 段 + 「+N」) でも、バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
-    async () => {
-      // **先にページを先頭へ戻す。** 動かしていない窓は viewport が変わったときのプレイヤーの
-      // 画面上の位置で最初の位置を取り直し、スクロールでは取り直さない (spec A.2)
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.setViewportSize({ width: 1440, height: 795 });
-      try {
-        // 直前の項目でシンプルに切り替えたので、区間とテロップは消えている
-        await writeSettings({ mode: "edit" });
-        await expect(button("＋ 区間を追加")).toBeVisible({ timeout: 10_000 });
-        for (const [i, startSec] of LAYOUT_SEGMENT_STARTS.entries()) {
-          await seekPaused(startSec);
-          await button("＋ 区間を追加").click();
-          await expect(segmentRows).toHaveCount(i + 1);
-        }
-        // 3 つを同じ時刻に重ねて、帯の段を最大 (2 段 + 「+1」) にしてから測る (spec A.4)
-        for (const [i, startSec] of LAYOUT_TELOP_STARTS.entries()) {
-          await seekPaused(startSec);
-          await panel.locator("[data-role=add-telop]").click();
-          await expect(telopRows).toHaveCount(i + 1);
-        }
-        // 設定も開く。開くと必ず溢れるので、パネルの中でのスクロールを確実に見られる
-        await button("⚙").click();
-        await expect(page.locator("#yt-clip-setting-mode")).toBeVisible();
-
-        // 「スクロールせずに操作できる」かを測るので、ページは先頭に戻す
-        await page.evaluate(() => window.scrollTo(0, 0));
-        await page.waitForTimeout(500);
-        const measured = await page.evaluate(() => {
-          const rect = (id: string) => {
-            const element = document.getElementById(id);
-            if (element === null) throw new Error(`#${id} がありません`);
-            const b = element.getBoundingClientRect();
-            return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
-          };
-          const body = document.getElementById("yt-clip-panel-body");
-          if (body === null) throw new Error("#yt-clip-panel-body がありません");
-          const player = document.getElementById("movie_player");
-          if (player === null) throw new Error("#movie_player がありません");
-          const p = player.getBoundingClientRect();
-          return {
-            innerWidth: window.innerWidth,
-            innerHeight: window.innerHeight,
-            scrollY: window.scrollY,
-            // **窓の枠の外形で測る。** 中身の根 (#yt-clip-bar) ではない (spec A.4)
-            bar: rect("yt-clip-bar-window"),
-            panel: rect("yt-clip-panel"),
-            playerBottom: p.bottom,
-            // 合否には入れない。パネルが動画に重なっていないかを人が見る材料
-            playerRight: p.right,
-            bodyScrollHeight: body.scrollHeight,
-            bodyClientHeight: body.clientHeight,
-            // 帯の段 (spec B): 出ている帯の数・使っている段の数・「+N」。最大 (2 段 + 「+1」) の
-            // 状態で測っていることを確かめる (段が出ていないまま通ると、B の予算を測っていない)
-            telopBands: document.querySelectorAll("#yt-clip-bar [data-role=telop-band]").length,
-            telopLanes: new Set(
-              [
-                ...document.querySelectorAll<HTMLElement>("#yt-clip-bar [data-role=telop-band]"),
-              ].map((band) => band.dataset.lane),
-            ).size,
-            telopOverflow:
-              document.querySelector("#yt-clip-bar [data-role=telop-overflow]")?.textContent ?? "",
-          };
-        });
-        // **記録だけ (合否には入れない)。** 落ちたときに「最初の位置のままか、動かした窓か」を
-        // 後から読めるようにする (覚えた位置があれば、その窓は最初の位置を取り直さない)。
-        // 読めなくても測定の合否は変えない
-        const windowLayout = await readWindowLayout().catch((error: unknown) => ({
-          error: String(error),
-        }));
-        const file = join(OUT_DIR, "layout-1440x795.png");
-        await page.screenshot({ path: file });
-        record(
-          "受け入れ条件 1440x795: 帯の段が最大 (2 段 + 「+N」) でも、バーの窓がプレイヤーの下で画面に収まり、パネルの窓の中でスクロールする",
-          measured.scrollY === 0 &&
-            measured.playerBottom <= measured.bar.top &&
-            measured.bar.bottom <= measured.innerHeight &&
-            measured.panel.top >= 0 &&
-            measured.panel.left >= 0 &&
-            measured.panel.right <= measured.innerWidth &&
-            measured.panel.bottom <= measured.innerHeight &&
-            measured.bodyScrollHeight > measured.bodyClientHeight &&
-            measured.telopBands === 2 &&
-            measured.telopLanes === 2 &&
-            measured.telopOverflow === "+1",
-          { ...measured, windowLayout, file },
-        );
-      } finally {
-        await page.setViewportSize({ width: 1920, height: 1080 });
+  const ACCEPTANCE_1440 =
+    "受け入れ条件 1440x795: 帯の段が最大 (2 段 + 「+N」) で設定を開いても、バーの窓がプレイヤーの下で画面に収まり、区間・テロップの窓と設定の窓が画面に収まって、設定の窓がプレイヤーに重ならない";
+  await check(ACCEPTANCE_1440, async () => {
+    // **先にページを先頭へ戻す。** 動かしていない窓は viewport が変わったときのプレイヤーの
+    // 画面上の位置で最初の位置を取り直し、スクロールでは取り直さない (spec A.2)
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.setViewportSize({ width: 1440, height: 795 });
+    try {
+      // 直前の項目でシンプルに切り替えたので、区間とテロップは消えている
+      await writeSettings({ mode: "edit" });
+      await expect(button("＋ 区間を追加")).toBeVisible({ timeout: 10_000 });
+      for (const [i, startSec] of LAYOUT_SEGMENT_STARTS.entries()) {
+        await seekPaused(startSec);
+        await button("＋ 区間を追加").click();
+        await expect(segmentRows).toHaveCount(i + 1);
       }
-    },
-  );
+      // 3 つを同じ時刻に重ねて、帯の段を最大 (2 段 + 「+1」) にしてから測る (spec A.4)
+      for (const [i, startSec] of LAYOUT_TELOP_STARTS.entries()) {
+        await seekPaused(startSec);
+        await listWindow.locator("[data-role=add-telop]").click();
+        await expect(telopRows).toHaveCount(i + 1);
+      }
+      // 設定も開く (設定の窓に出る)。設定は 1280x800 でも窓に収まらない (screenshots.mjs の実測) ので、
+      // 設定の窓の中でのスクロールを確実に見られる (判断メモ 14)
+      await button("⚙").click();
+      await expect(page.locator("#yt-clip-setting-mode")).toBeVisible();
+      await expect(settingsWindow).toBeVisible();
 
-  // --- フロートの窓 (spec A.4): 動かす・大きさを変える・画面の外へ出しきれない・戻す ---------
+      // 「スクロールせずに操作できる」かを測るので、ページは先頭に戻す
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(500);
+      const measured = await page.evaluate(() => {
+        const rect = (id: string) => {
+          const element = document.getElementById(id);
+          if (element === null) throw new Error(`#${id} がありません`);
+          const b = element.getBoundingClientRect();
+          return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
+        };
+        const settingsBody = document.getElementById("yt-clip-settings-body");
+        if (settingsBody === null) throw new Error("#yt-clip-settings-body がありません");
+        const player = document.getElementById("movie_player");
+        if (player === null) throw new Error("#movie_player がありません");
+        const p = player.getBoundingClientRect();
+        return {
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
+          scrollY: window.scrollY,
+          // **窓の枠の外形で測る。** 中身の根 (#yt-clip-bar) ではない (spec A.4)
+          bar: rect("yt-clip-bar-window"),
+          list: rect("yt-clip-list"),
+          settings: rect("yt-clip-settings"),
+          playerBottom: p.bottom,
+          // 設定の窓もプレイヤーに重ならない (C1.5: settings.left ≥ player.right)
+          playerRight: p.right,
+          settingsScrollHeight: settingsBody.scrollHeight,
+          settingsClientHeight: settingsBody.clientHeight,
+          // 帯の段 (spec B): 出ている帯の数・使っている段の数・「+N」。最大 (2 段 + 「+1」) の
+          // 状態で測っていることを確かめる (段が出ていないまま通ると、B の予算を測っていない)
+          telopBands: document.querySelectorAll("#yt-clip-bar [data-role=telop-band]").length,
+          telopLanes: new Set(
+            [
+              ...document.querySelectorAll<HTMLElement>("#yt-clip-bar [data-role=telop-band]"),
+            ].map((band) => band.dataset.lane),
+          ).size,
+          telopOverflow:
+            document.querySelector("#yt-clip-bar [data-role=telop-overflow]")?.textContent ?? "",
+        };
+      });
+      const inside = (edges: { top: number; bottom: number; left: number; right: number }) =>
+        edges.top >= 0 &&
+        edges.left >= 0 &&
+        edges.right <= measured.innerWidth &&
+        edges.bottom <= measured.innerHeight;
+      // **記録だけ (合否には入れない)。** 落ちたときに「最初の位置のままか、動かした窓か」を
+      // 後から読めるようにする (覚えた位置があれば、その窓は最初の位置を取り直さない)。
+      // 読めなくても測定の合否は変えない
+      const windowLayout = await readWindowLayout().catch((error: unknown) => ({
+        error: String(error),
+      }));
+      const file = join(OUT_DIR, "layout-1440x795.png");
+      await page.screenshot({ path: file });
+      record(
+        ACCEPTANCE_1440,
+        measured.scrollY === 0 &&
+          measured.playerBottom <= measured.bar.top &&
+          measured.bar.bottom <= measured.innerHeight &&
+          inside(measured.list) &&
+          inside(measured.settings) &&
+          measured.settings.left >= measured.playerRight &&
+          measured.settingsScrollHeight > measured.settingsClientHeight &&
+          measured.telopBands === 2 &&
+          measured.telopLanes === 2 &&
+          measured.telopOverflow === "+1",
+        { ...measured, windowLayout, file },
+      );
+    } finally {
+      await page.setViewportSize({ width: 1920, height: 1080 });
+    }
+  });
+
+  // --- フロートの窓 (spec A.4・窓の分割の spec C1): 開閉する・動かす・大きさを変える・画面の外へ出しきれない・
+  // 戻す・古い形を読む -------------------------------------------------------------------------------------
   // 1920x1080 に戻した後に行う。受け入れ条件の確認で足した区間 5 つと、開いた設定が残っている
   const barWindow = page.locator("#yt-clip-bar-window");
   const barGrip = bar.locator("[data-role=grip]");
-  const panelHeader = panel.locator("[data-role=window-header]");
+  const listHeader = listWindow.locator("[data-role=window-header]");
+  const settingsHeader = settingsWindow.locator("[data-role=window-header]");
 
   type Box = { x: number; y: number; width: number; height: number };
   async function boxOf(locator: Locator): Promise<Box> {
@@ -977,6 +988,14 @@ test("テロップの実機確認", async () => {
   }
   const centerOf = (box: Box) => ({ x: box.x + box.width / 2, y: box.y + box.height / 2 });
   const near = (a: number, b: number, tolerance = 1) => Math.abs(a - b) <= tolerance;
+  const samePlace = (a: Box, b: Box) => near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width);
+  /** 見出しの左寄り (見出しの文字の上) の点。右端には何も置いていないが、文字の上を掴むのが人の操作に近い */
+  const headerPoint = (header: Box) => ({ x: header.x + 40, y: header.y + header.height / 2 });
+  /** 覚えた配置の float (窓ごとの位置)。v2 でなければ null */
+  const floatOf = (saved: Record<string, unknown> | null): Record<string, unknown> | null =>
+    saved !== null && saved.version === 2 && typeof saved.float === "object" && saved.float !== null
+      ? (saved.float as Record<string, unknown>)
+      : null;
 
   /** from を押して to まで動かして離す。途中も刻んで動かし、pointermove を届ける */
   async function dragFromTo(
@@ -991,49 +1010,110 @@ test("テロップの実機確認", async () => {
     await page.waitForTimeout(500);
   }
 
-  await check("窓を動かすと、読み込み直しても同じ位置に出る", async () => {
-    await page.evaluate(() => window.scrollTo(0, 0));
-    const barStart = await boxOf(barWindow);
-    const panelStart = await boxOf(panel);
-
-    const grip = centerOf(await boxOf(barGrip));
-    await dragFromTo(grip, { x: grip.x + 80, y: grip.y + 40 });
-    const header = await boxOf(panelHeader);
-    // 見出しの左寄り (「yt-clip」の文字の上) を掴む。右端の折り畳みボタンでは窓は動かない。
-    // 左へは少しだけ動かす (大きく動かすと、次の項目でバーの窓の右下の角に重なる)
-    const headerAt = { x: header.x + 40, y: header.y + header.height / 2 };
-    await dragFromTo(headerAt, { x: headerAt.x - 60, y: headerAt.y + 40 });
-    const barMoved = await boxOf(barWindow);
-    const panelMoved = await boxOf(panel);
-    const saved = await readWindowLayout();
-
+  /** ページを読み込み直し、区間 5 つが戻って区間・テロップの窓が出るまで待つ */
+  async function reloadAndWaitList(): Promise<void> {
     await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
     await expect(bar).toBeVisible({ timeout: 60_000 });
     await waitNoAd();
-    // エディットで区間があるのでパネルも出る (受け入れ条件の確認で足した区間が状態機械に残っている)
+    // エディットで区間があるので区間・テロップの窓も出る (受け入れ条件の確認で足した区間が状態機械に残っている)
     await expect(segmentRows).toHaveCount(LAYOUT_SEGMENT_STARTS.length, { timeout: 30_000 });
-    await expect(panel).toBeVisible();
-    const barAfter = await boxOf(barWindow);
-    const panelAfter = await boxOf(panel);
+    await expect(listWindow).toBeVisible();
+  }
 
-    const samePlace = (a: Box, b: Box) => near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width);
+  await check("⚙ で設定が別の窓に開閉し、区間・テロップの窓はそのまま", async () => {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    // 受け入れ条件の確認で設定を開いたまま。どちらの窓もまだ動かしていない (1920x1080 の最初の位置)
+    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+    const listOpen = await boxOf(listWindow);
+    const settingsOpen = await boxOf(settingsWindow);
+
+    await button("⚙").click();
+    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
+    const listClosed = await boxOf(listWindow);
+
+    await button("⚙").click();
+    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+    const settingsReopened = await boxOf(settingsWindow);
+
+    record(
+      "⚙ で設定が別の窓に開閉し、区間・テロップの窓はそのまま",
+      // 設定の窓は区間・テロップの窓から (0, +32) (C1.3 のカスケード)
+      near(settingsOpen.x, listOpen.x) &&
+        near(settingsOpen.y, listOpen.y + 32) &&
+        near(settingsOpen.width, 400) &&
+        // 閉じても区間・テロップの窓は同じ場所に出たまま
+        samePlace(listClosed, listOpen) &&
+        near(listClosed.height, listOpen.height) &&
+        samePlace(settingsReopened, settingsOpen),
+      { listOpen, settingsOpen, listClosed, settingsReopened },
+    );
+  });
+
+  await check("窓を動かすと、読み込み直しても同じ位置に出る", async () => {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    // 設定は直前の項目で開いたまま。設定の窓は区間・テロップの窓に下へ 32px ずれて重なり、前に出ている
+    const barStart = await boxOf(barWindow);
+    const listStart = await boxOf(listWindow);
+    const settingsStart = await boxOf(settingsWindow);
+
+    const grip = centerOf(await boxOf(barGrip));
+    await dragFromTo(grip, { x: grip.x + 80, y: grip.y + 40 });
+    // 設定の窓を先に動かす。下へ 80px 送り、区間・テロップの窓の見出しの行 (上の 32px) から離す
+    const settingsAt = headerPoint(await boxOf(settingsHeader));
+    await dragFromTo(settingsAt, { x: settingsAt.x - 60, y: settingsAt.y + 80 });
+    // 区間・テロップの窓の見出しは、設定の窓の上に出ている (カスケード)。左へは少しだけ動かす
+    // (大きく動かすと、次の項目でバーの窓の右下の角に重なる)
+    const listAt = headerPoint(await boxOf(listHeader));
+    await dragFromTo(listAt, { x: listAt.x - 60, y: listAt.y + 40 });
+    const barMoved = await boxOf(barWindow);
+    const listMoved = await boxOf(listWindow);
+    const settingsMoved = await boxOf(settingsWindow);
+    const saved = await readWindowLayout();
+
+    await reloadAndWaitList();
+    const barAfter = await boxOf(barWindow);
+    const listAfter = await boxOf(listWindow);
+    // 設定の開閉は覚えない (読み込み直すと閉じている)。⚙ で開いて、覚えた位置に出るかを見る
+    await button("⚙").click();
+    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+    const settingsAfter = await boxOf(settingsWindow);
+    // 後の項目は設定を閉じた状態から始める (設定の窓が区間・テロップの窓の右下の角を覆わないように)
+    await button("⚙").click();
+    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
+
+    const float = floatOf(saved);
     record(
       "窓を動かすと、読み込み直しても同じ位置に出る",
       near(barMoved.x, barStart.x + 80) &&
         near(barMoved.y, barStart.y + 40) &&
-        near(panelMoved.x, panelStart.x - 60) &&
-        near(panelMoved.y, panelStart.y + 40) &&
+        near(listMoved.x, listStart.x - 60) &&
+        near(listMoved.y, listStart.y + 40) &&
+        near(settingsMoved.x, settingsStart.x - 60) &&
+        near(settingsMoved.y, settingsStart.y + 80) &&
         samePlace(barAfter, barMoved) &&
-        samePlace(panelAfter, panelMoved) &&
-        saved !== null &&
-        "bar" in saved &&
-        "panel" in saved,
-      { barStart, barMoved, barAfter, panelStart, panelMoved, panelAfter, saved },
+        samePlace(listAfter, listMoved) &&
+        samePlace(settingsAfter, settingsMoved) &&
+        float !== null &&
+        "bar" in float &&
+        "list" in float &&
+        "settings" in float,
+      {
+        barStart,
+        barMoved,
+        barAfter,
+        listStart,
+        listMoved,
+        listAfter,
+        settingsStart,
+        settingsMoved,
+        settingsAfter,
+        saved,
+      },
     );
   });
 
   await check("右下をドラッグすると大きさが変わる (バーの窓は幅だけ)", async () => {
-    // バーの窓を上にしておく (右下の角がパネルの窓の下に潜っていても掴めるように)。
+    // バーの窓を上にしておく (右下の角が区間・テロップの窓の下に潜っていても掴めるように)。
     // 押して離すだけなので、位置は変わらず覚え直しもしない
     await barGrip.click();
     const barBefore = await boxOf(barWindow);
@@ -1041,19 +1121,19 @@ test("テロップの実機確認", async () => {
     await dragFromTo(barCorner, { x: barCorner.x - 200, y: barCorner.y + 50 });
     const barAfter = await boxOf(barWindow);
 
-    const panelBefore = await boxOf(panel);
-    const panelCorner = centerOf(await boxOf(panel.locator("[data-role=window-resize]")));
-    await dragFromTo(panelCorner, { x: panelCorner.x - 60, y: panelCorner.y - 100 });
-    const panelAfter = await boxOf(panel);
+    const listBefore = await boxOf(listWindow);
+    const listCorner = centerOf(await boxOf(listWindow.locator("[data-role=window-resize]")));
+    await dragFromTo(listCorner, { x: listCorner.x - 60, y: listCorner.y - 100 });
+    const listAfter = await boxOf(listWindow);
 
     record(
       "右下をドラッグすると大きさが変わる (バーの窓は幅だけ)",
       near(barAfter.width, barBefore.width - 200, 2) &&
         near(barAfter.height, barBefore.height) &&
         near(barAfter.x, barBefore.x) &&
-        near(panelAfter.width, panelBefore.width - 60, 2) &&
-        near(panelAfter.height, panelBefore.height - 100, 2),
-      { barBefore, barAfter, panelBefore, panelAfter },
+        near(listAfter.width, listBefore.width - 60, 2) &&
+        near(listAfter.height, listBefore.height - 100, 2),
+      { barBefore, barAfter, listBefore, listAfter },
     );
   });
 
@@ -1062,17 +1142,17 @@ test("テロップの実機確認", async () => {
     if (viewport === null) throw new Error("viewport が取れません");
     // 掴んだ点を画面の隅まで運ぶ。掴む場所の残りは画面の外へ出ようとするが、詰められて残る。
     // 画面の外の座標へはマウスを運べない (ページにイベントが届かない) ので、隅で止める。
-    // バーのつまみは右下、パネルの見出しは左下へ。反対の隅へ送るのは、次の項目で
+    // バーのつまみは右下、区間・テロップの窓の見出しは左下へ。反対の隅へ送るのは、次の項目で
     // ダブルクリックするときに 2 つの窓が重ならないようにするため
     const gripBefore = await boxOf(barGrip);
     const grip = centerOf(gripBefore);
     await dragFromTo(grip, { x: viewport.width - 1, y: viewport.height - 1 });
-    const headerBefore = await boxOf(panelHeader);
-    const headerAt = { x: headerBefore.x + 40, y: headerBefore.y + headerBefore.height / 2 };
+    const headerBefore = await boxOf(listHeader);
+    const headerAt = headerPoint(headerBefore);
     await dragFromTo(headerAt, { x: 1, y: viewport.height - 1 });
 
     const gripBox = await boxOf(barGrip);
-    const headerBox = await boxOf(panelHeader);
+    const headerBox = await boxOf(listHeader);
     const inside = (b: Box) =>
       b.x >= -0.5 &&
       b.y >= -0.5 &&
@@ -1094,10 +1174,15 @@ test("テロップの実機確認", async () => {
   });
 
   await check("掴む場所をダブルクリックすると最初の位置に戻り、覚えた位置も消える", async () => {
-    // バーを先に戻す。パネルを先に右上へ戻すと、高さが画面の下まで伸びて右下のつまみに被さる
+    // バーを先に戻す。区間・テロップの窓を先に右上へ戻すと、高さが画面の下まで伸びて右下のつまみに被さる
     await barGrip.dblclick();
-    const header = await boxOf(panelHeader);
-    await panelHeader.dblclick({ position: { x: 40, y: header.height / 2 } });
+    const listHeaderBox = await boxOf(listHeader);
+    await listHeader.dblclick({ position: { x: 40, y: listHeaderBox.height / 2 } });
+    // 設定の窓は閉じているので、⚙ で開いてから見出しをダブルクリックする (開くと前に出る)
+    await button("⚙").click();
+    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
+    const settingsHeaderBox = await boxOf(settingsHeader);
+    await settingsHeader.dblclick({ position: { x: 40, y: settingsHeaderBox.height / 2 } });
     await page.waitForTimeout(500);
 
     const measured = await page.evaluate(() => {
@@ -1112,34 +1197,74 @@ test("テロップの実機確認", async () => {
         innerHeight: window.innerHeight,
         player: box("movie_player"),
         bar: box("yt-clip-bar-window"),
-        panel: box("yt-clip-panel"),
+        list: box("yt-clip-list"),
+        settings: box("yt-clip-settings"),
       };
     });
     const saved = await readWindowLayout();
+    // 後の項目 (帯) は区間・テロップの窓の行を押す。最初の位置の設定の窓は行を覆うので閉じておく
+    await button("⚙").click();
+    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
+
     // バーの最初の位置: プレイヤーの下端 + 8px。収まらなければ画面の下端から 16px。
     // ヘッダーの下 (68px) より上には置かない (window-layout.ts の initialBarRect)。
-    // パネルは右 16px・上 68px・幅 400px (side-panel.ts)
+    // 区間・テロップの窓は右 16px・上 68px・幅 400px、設定の窓はその (0, +32) (panel-window.ts)
     const expectedBarTop = Math.max(
       68,
       Math.min(measured.player.bottom + 8, measured.innerHeight - 16 - measured.bar.height),
     );
+    const float = floatOf(saved);
     record(
       "掴む場所をダブルクリックすると最初の位置に戻り、覚えた位置も消える",
       near(measured.bar.left, measured.player.left) &&
         near(measured.bar.width, measured.player.width) &&
         near(measured.bar.top, expectedBarTop) &&
-        near(measured.panel.right, measured.innerWidth - 16) &&
-        near(measured.panel.top, 68) &&
-        near(measured.panel.width, 400) &&
-        saved !== null &&
-        !("bar" in saved) &&
-        !("panel" in saved),
+        near(measured.list.right, measured.innerWidth - 16) &&
+        near(measured.list.top, 68) &&
+        near(measured.list.width, 400) &&
+        near(measured.settings.left, measured.list.left) &&
+        near(measured.settings.top, 100) &&
+        near(measured.settings.width, 400) &&
+        float !== null &&
+        Object.keys(float).length === 0,
       { ...measured, expectedBarTop, saved },
     );
   });
 
+  await check("古い形 (v1) の windowLayout があると、パネルの位置に区間・テロップの窓が出る", async () => {
+    // フロートの窓 (A) の版が覚えた形。version が無く、区間・テロップと設定が 1 つのパネルだった
+    const legacy = { panel: { left: 600, top: 150, width: 420 } };
+    const worker = await getWorker();
+    await worker.evaluate(
+      (value) => chrome.storage.local.set({ windowLayout: value }),
+      legacy,
+    );
+    await reloadAndWaitList();
+    const listBox = await boxOf(listWindow);
+    // 読み込みは書き戻さない (次に動かしたときに v2 で書く。C1.3)
+    const savedAfterLoad = await readWindowLayout();
+
+    // 後の項目 (帯) のために最初の位置へ戻す。戻すと v2 の組で書かれる
+    const header = await boxOf(listHeader);
+    await listHeader.dblclick({ position: { x: 40, y: header.height / 2 } });
+    await page.waitForTimeout(500);
+    const savedAfterReset = await readWindowLayout();
+
+    record(
+      "古い形 (v1) の windowLayout があると、パネルの位置に区間・テロップの窓が出る",
+      near(listBox.x, 600) &&
+        near(listBox.y, 150) &&
+        near(listBox.width, 420) &&
+        savedAfterLoad !== null &&
+        !("version" in savedAfterLoad) &&
+        "panel" in savedAfterLoad &&
+        floatOf(savedAfterReset) !== null,
+      { legacy, listBox, savedAfterLoad, savedAfterReset },
+    );
+  });
+
   // --- 拡大バー上のテロップの帯 (フロートの窓の spec B.4) ---------------------------------
-  // 窓の確認の後 (2 つの窓は最初の位置に戻っている)。受け入れ条件の確認で足した区間 5 つと
+  // 窓の確認の後 (3 つの窓は最初の位置に戻り、設定の窓は閉じている)。受け入れ条件の確認で足した区間 5 つと
   // テロップ 5 つ (201・231・321×3) が残っている。区間 1 (200〜215) を選び直すと拡大バーの窓は
   // 192.5〜222.5 になり、テロップ 1 (201〜204) だけが帯で出る (ほかの帯と重ならない)
   type TelopTimes = { startSec: number; endSec: number; text: string };

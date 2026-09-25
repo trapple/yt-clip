@@ -101,25 +101,26 @@ try {
   await page.screenshot({ path: `${OUT_DIR}/1-range.png` });
   console.log(`${OUT_DIR}/1-range.png`);
 
-  // 設定を開く。**設定は右側の固定のパネルに開き、ページのスクロールでは動かない。**
-  // 枠取りは 1-range と同じ (プレイヤーとバーが下寄り) にして、パネルの中を設定の
-  // 先頭まで送って撮る。1280x800 ではパネルの最大高さ (716px) に 8 項目と保存ボタンが
-  // 収まらず末尾は切れるが、それでよい。パネルの中でスクロールすることが見て分かる
+  // 設定を開く。**設定は設定の窓に開き (窓の分割の spec C1.1)、ページのスクロールでは動かない。**
+  // 最初の位置は区間・テロップの窓の最初の位置から下へ 32px (シンプルモードなので区間・テロップの窓は
+  // 出ていない)。枠取りは 1-range と同じ (プレイヤーとバーが下寄り) にして、窓の中を設定の先頭まで
+  // 送って撮る。1280x800 では窓の最大高さ (800 - 100 - 16 = 684px) に 8 項目と保存ボタンが収まらず
+  // 末尾は切れるが、それでよい。窓の中でスクロールすることが見て分かる
   await bar.getByRole("button", { name: "⚙" }).click();
   await page
-    .locator("#yt-clip-panel")
+    .locator("#yt-clip-settings")
     .waitFor({ state: "visible", timeout: WAIT_TIMEOUT_MS });
 
-  // **このスクリーンショットだけ**、動画 (#primary) の幅をパネルのぶん空ける。
+  // **このスクリーンショットだけ**、動画 (#primary) の幅を設定の窓のぶん空ける。
   // 掲載画像はおすすめ列 (#secondary) を隠しているのでプレイヤーが画面右端まで
-  // 広がり、固定パネルと重なって「動画は隠れない」設計と食い違う絵になる。実際の
+  // 広がり、設定の窓と重なって「動画は隠れない」設計と食い違う絵になる。実際の
   // YouTube にはおすすめ列があるので重ならない (1440 幅の実測で
-  // playerRight 1012 < panel.left 1024)。
+  // playerRight 1012 < 窓の left 1024。設定の窓は区間・テロップの窓と同じ left)。
   // 実測 (1280x800、YouTube 2026-09-24): #secondary を隠すと #columns は
   // justify-content: center になり、max-width だけ足すとプレイヤーが中央へ
-  // 寄って逆に重なりが深くなる (primary right 1072 > panel.left 864) ので、
-  // 左詰めに戻す指定も一緒に足す。448 = パネル幅 400 + 右端の余白 16 +
-  // プレイヤー側の左マージン 32 (side-panel.ts の WIDTH_PX / EDGE_GAP_PX と対応)
+  // 寄って逆に重なりが深くなる (primary right 1072 > 窓の left 864) ので、
+  // 左詰めに戻す指定も一緒に足す。448 = 窓の幅 400 + 右端の余白 16 +
+  // プレイヤー側の左マージン 32 (panel-window.ts の WIDTH_PX / EDGE_GAP_PX と対応)
   await page.addStyleTag({
     content:
       "#columns { justify-content: flex-start !important; } #primary { max-width: calc(100vw - 448px) !important; }",
@@ -127,12 +128,12 @@ try {
   await page.waitForTimeout(500);
 
   await page.evaluate(() => {
-    const body = document.getElementById("yt-clip-panel-body");
+    const body = document.getElementById("yt-clip-settings-body");
     // 設定パネルの根は、最初の項目 (モード) の入力欄 → 項目の枠 → 根
     const settings = document.getElementById("yt-clip-setting-mode")?.parentElement
       ?.parentElement;
     if (body === null || settings == null) {
-      throw new Error("パネルか設定が見つかりません");
+      throw new Error("設定の窓か設定が見つかりません");
     }
     // 拡張も ⚙ で送っているが、掲載画像の絵をここで確定させる (拡張の振る舞いが
     // 変わっても、撮れる絵が変わらないように)
