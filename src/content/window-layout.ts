@@ -179,7 +179,8 @@ function clamp(value: number, min: number, max: number): number {
  * 窓の位置と大きさを画面に詰める (spec A.1)。
  *
  * - 大きさは最小〜画面の大きさ。画面が最小より狭いときは最小を採る
- * - 位置は**掴む場所の全体が画面に残る**ところまで詰める。窓の残りは画面の外へ出てよい
+ * - 位置は**掴む場所の全体が画面に残る**ところまで詰める。上は画面の上端ではなく YouTube の
+ *   ヘッダー (MASTHEAD_HEIGHT_PX) の下まで。窓の残りは画面の外へ出てよい
  *   (バーの窓はつまみが左端にあるので、右へ寄せると窓の大半が画面の外へ出る)。
  *   窓全体を画面に入れる案は採らない: 幅いっぱいのバーの窓が一切動かせなくなる
  */
@@ -201,7 +202,9 @@ export function fitRect(
   // 下限は `0 - grip.left` と書く。`-grip.left` だと grip.left が 0 のとき -0 になり、
   // テストの toEqual (Object.is で比べる) が 0 と区別して落ちる
   const left = clamp(rect.left, 0 - grip.left, viewport.width - grip.left - gripWidth);
-  const top = clamp(rect.top, 0 - grip.top, viewport.height - grip.top - gripHeight);
+  // 上は画面の上端ではなく YouTube のヘッダーの下まで。ヘッダーは窓より上 (z-index 2020) に
+  // 出るので、掴む場所がヘッダーの裏に入ると押せず、窓を動かせなくなる
+  const top = clamp(rect.top, MASTHEAD_HEIGHT_PX - grip.top, viewport.height - grip.top - gripHeight);
   return toRect(left, top, width, height);
 }
 

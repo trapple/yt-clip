@@ -184,19 +184,19 @@ describe("fitRect", () => {
 
   test("画面より大きい大きさは画面の大きさにする", () => {
     expect(
-      fitRect({ left: 0, top: 0, width: 5000, height: 5000 }, VIEWPORT, NO_GRIP, LIMITS),
-    ).toEqual({ left: 0, top: 0, width: 1440, height: 795 });
+      fitRect({ left: 0, top: 56, width: 5000, height: 5000 }, VIEWPORT, NO_GRIP, LIMITS),
+    ).toEqual({ left: 0, top: 56, width: 1440, height: 795 });
   });
 
   test("画面が最小より狭いときは最小を採る", () => {
     expect(
       fitRect(
-        { left: 0, top: 0, width: 400, height: 400 },
+        { left: 0, top: 56, width: 400, height: 400 },
         { width: 200, height: 100 },
         NO_GRIP,
         LIMITS,
       ),
-    ).toEqual({ left: 0, top: 0, width: 280, height: 160 });
+    ).toEqual({ left: 0, top: 56, width: 280, height: 160 });
   });
 
   test("見出しが右と下にはみ出さないよう詰める", () => {
@@ -208,10 +208,17 @@ describe("fitRect", () => {
     });
   });
 
-  test("見出しが左と上にはみ出さないよう詰める", () => {
+  test("見出しが左と上にはみ出さないよう詰める。上は YouTube のヘッダー (56px) の下まで", () => {
+    // ヘッダーは窓より上 (z-index 2020) に出る。見出しがヘッダーの裏に入ると押せず、窓を
+    // 動かせなくなる (実機で報告された不具合)
     expect(fitRect({ left: -500, top: -500, width: 400 }, VIEWPORT, HEADER, LIMITS)).toEqual({
       left: 0,
-      top: 0,
+      top: 56,
+      width: 400,
+    });
+    expect(fitRect({ left: 100, top: 20, width: 400 }, VIEWPORT, HEADER, LIMITS)).toEqual({
+      left: 100,
+      top: 56,
       width: 400,
     });
   });
@@ -224,9 +231,10 @@ describe("fitRect", () => {
       top: 705,
       width: 1000,
     });
+    // つまみの上端がヘッダーの下 (56px) に来るまで。56 - 54
     expect(fitRect({ left: -5000, top: -5000, width: 1000 }, VIEWPORT, GRIP, limits)).toEqual({
       left: -12,
-      top: -54,
+      top: 2,
       width: 1000,
     });
   });
@@ -240,13 +248,13 @@ describe("fitRect", () => {
     ).toEqual({ left: 1000, top: 100, width: 400 });
   });
 
-  test("画面が掴む場所より小さいときは、掴む場所の左上を残す", () => {
-    // 画面は最小の幅 (480) より狭いので、幅は最小を採る
+  test("画面が掴む場所より小さいときは、掴む場所の左上を残す (上はヘッダーの下)", () => {
+    // 画面は最小の幅 (480) より狭いので、幅は最小を採る。上端はヘッダー (56px) の下 (56 - 54)
     expect(
       fitRect({ left: 300, top: 300, width: 600 }, { width: 10, height: 10 }, GRIP, {
         minWidth: 480,
       }),
-    ).toEqual({ left: -12, top: -54, width: 480 });
+    ).toEqual({ left: -12, top: 2, width: 480 });
   });
 });
 

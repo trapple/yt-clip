@@ -161,13 +161,13 @@ describe("createFloatingWindow", () => {
 
   test("place で位置と大きさを置き、rect で読める", () => {
     const { frame } = makeWindow();
-    frame.place({ left: 100, top: 50, width: 400, height: 300 });
+    frame.place({ left: 100, top: 60, width: 400, height: 300 });
     expect(frame.element.style.left).toBe("100px");
-    expect(frame.element.style.top).toBe("50px");
+    expect(frame.element.style.top).toBe("60px");
     expect(frame.element.style.width).toBe("400px");
     expect(frame.element.style.height).toBe("300px");
     expect(frame.element.style.maxHeight).toBe("");
-    expect(frame.rect()).toEqual({ left: 100, top: 50, width: 400, height: 300 });
+    expect(frame.rect()).toEqual({ left: 100, top: 60, width: 400, height: 300 });
   });
 
   test("高さを決めていない「幅と高さ」の窓は、画面の下端から 16px までに抑える", () => {
@@ -420,7 +420,8 @@ describe("画面の中に詰める", () => {
     expect(frame.rect()).toEqual({ left: 624, top: 736, width: 400 });
 
     drag(headerOf(frame), -5000, -5000);
-    expect(frame.rect()).toEqual({ left: 0, top: 0, width: 400 });
+    // 上は YouTube のヘッダー (56px) の下まで。裏に入ると見出しを押せない
+    expect(frame.rect()).toEqual({ left: 0, top: 56, width: 400 });
   });
 
   test("見出しは窓の縁まで含めて数える (右端・上端に寄せても縁が画面の外へ出ない)", () => {
@@ -435,8 +436,8 @@ describe("画面の中に詰める", () => {
     expect(frame.rect()).toEqual({ left: 624, top: 735, width: 400 });
 
     drag(headerOf(frame), -5000, -5000);
-    // 縁の左上も画面の外へ出さない
-    expect(frame.rect()).toEqual({ left: 0, top: 0, width: 400 });
+    // 縁の左上も画面の外へ出さない。上は YouTube のヘッダー (56px) の下まで
+    expect(frame.rect()).toEqual({ left: 0, top: 56, width: 400 });
   });
 
   test("つまみの窓は、つまみが画面に残るところまで出せる", () => {
@@ -451,8 +452,8 @@ describe("画面の中に詰める", () => {
     expect(frame.rect()).toEqual({ left: 992, top: 678, width: 600 });
 
     drag(grip, -5000, -5000);
-    // 窓の左上は画面の外へ出てよい。つまみは画面の中に残る
-    expect(frame.rect()).toEqual({ left: -12, top: -54, width: 600 });
+    // 窓の左上は画面の外へ出てよい。つまみは画面の中の、ヘッダー (56px) より下に残る (56 - 54)
+    expect(frame.rect()).toEqual({ left: -12, top: 2, width: 600 });
   });
 
   test("ブラウザが小さくなったら詰め、大きく戻したら置いた場所に戻す", () => {
