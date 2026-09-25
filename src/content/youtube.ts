@@ -442,8 +442,18 @@ function endCapture(): void {
   driver.reconcile();
 }
 
+/**
+ * バーの中身 (中身の根とその中の部品) を id で引く。**バーの窓の中を探し、文書につながっているかは見ない** (spa-inject ③)。
+ * 動画ページ以外では窓をページから外し、差す先 (#below) が一時的に外れるとバーは外れた枠の中に残る。document から
+ * 引くとその間は「バーが無い」ことになり、出す判断 (refreshWindows) と作り直しの判断 (mount) が食い違い、届いた状態も
+ * 描かれない。窓はオンの間 1 つを使い回すので、窓の中を見れば足りる
+ */
+function barPart(id: string): HTMLElement | null {
+  return barWindow.body.querySelector<HTMLElement>(`#${id}`);
+}
+
 function setStatus(text: string): void {
-  const status = document.getElementById(`${BAR_ID}-status`);
+  const status = barPart(`${BAR_ID}-status`);
   if (status !== null) {
     status.textContent = text;
     // 1 行に省略して出すので、全文はマウスを乗せたときに読めるようにする
@@ -660,7 +670,7 @@ function applyMode(next: ClipMode): void {
   const settingsWasOpen = settingsPanel?.element.hidden === false;
   // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
   // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
-  document.getElementById(BAR_ID)?.remove();
+  barPart(BAR_ID)?.remove();
   mount();
   // 開いていたなら、⚙ と同じ経路 (開く → refreshWindows → 前に出す)
   // で新しい設定パネルを開き直す。保存済みの値は toggle の fill が入れ直すので、
@@ -1090,7 +1100,7 @@ function makeButton(
  * 出さない方が「いま何ができるか」がそのまま画面に出る
  */
 function renderActions(kind: ClipState["kind"]): void {
-  const box = document.getElementById(ACTIONS_ID);
+  const box = barPart(ACTIONS_ID);
   if (box === null) return;
 
   box.replaceChildren(
@@ -1213,7 +1223,7 @@ function placeUnderPointer(id: WindowId, point: DragPoint, grab: DragPoint | nul
 
 /** バーの窓の中の ⠿ の中心 (窓の左上から)。⠿ が無ければ窓の左上 */
 function barGripCenter(): DragPoint {
-  const grip = document.getElementById(BAR_ID)?.querySelector("[data-role='grip']");
+  const grip = barPart(BAR_ID)?.querySelector("[data-role='grip']");
   if (grip == null) return { x: 0, y: 0 };
   const frame = barWindow.element.getBoundingClientRect();
   const box = grip.getBoundingClientRect();
@@ -1289,8 +1299,9 @@ function resetWindow(id: WindowId): void {
  * 3 つの窓 (バーの窓・区間・テロップの窓・設定の窓) を出すか隠すかを決める。**`setVisible` を
  * 呼ぶのはここだけ** (右側パネルの spec §4 を 3 つの窓へ広げた。窓の分割の spec C1.2)。
  *
- * どれも隠すのは、覚えた位置を読み込む前 / 全画面 / 動画ページ以外。そのうえで、バーは中身の根
- * (BAR_ID) がある間、区間・テロップの窓は一覧のどちらかが見えている間 (一覧は中身が無いと自分で
+ * どれも隠すのは、覚えた位置を読み込む前 / 全画面 / 動画ページ以外 (動画ページ以外ではページからも外す。
+ * leaveVideoPage)。そのうえで、バーは中身の根 (BAR_ID) がバーの窓の中にある間 (文書につながっているかは見ない。
+ * barPart)、区間・テロップの窓は一覧のどちらかが見えている間 (一覧は中身が無いと自分で
  * 隠れる)、設定の窓は ⚙ で開いている間 (設定パネルの `hidden` が偽) だけ出す
  */
 function refreshWindows(): void {
@@ -1313,7 +1324,8 @@ function refreshWindows(): void {
   const barWasHidden = barWindow.element.hidden;
   const listWasHidden = listWindow.element.hidden;
   const settingsWasHidden = settingsWindow.element.hidden;
-  barWindow.setVisible(canShow && document.getElementById(BAR_ID) !== null);
+  // 中身があるかで見る (文書につながっているかは見ない。barPart)
+  barWindow.setVisible(canShow && barPart(BAR_ID) !== null);
   listWindow.setVisible(canShow && listShown);
   settingsWindow.setVisible(canShow && settingsOpen);
   // 出す条件が変わったら、枠のタブ・枠の出し入れ・退避を合わせる (C2.2 / C2.7)。**出した直後の取り直しより先に:**
@@ -2153,7 +2165,8 @@ function mount(): void {
     playheadWatched = true;
     watchPlayhead();
   }
-  if (document.getElementById(BAR_ID) !== null) return;
+  // 出す判断 (refreshWindows) と同じく、窓の中に中身があるかで見る (barPart)
+  if (barPart(BAR_ID) !== null) return;
 
   // #below に置くのはドック枠だけ (C2.1。15 行上の dockManager.attach が先頭に差している)。
   // 中身の根 (BAR_ID) は置かない。「動画ページのページができたか」の目印としては引き続き #below を見る
@@ -2459,7 +2472,7 @@ let lastHrefIsVideoPage = false;
  */
 function onThemeChanged(): void {
   const dark = isDarkTheme();
-  const bar = document.getElementById(BAR_ID);
+  const bar = barPart(BAR_ID);
   if (bar !== null) applyPalette(bar, dark);
   // 3 つの窓は body の直下にある。ページの配色は継がれない
   applyPalette(barWindow.element, dark);

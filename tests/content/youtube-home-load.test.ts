@@ -215,4 +215,22 @@ describe("動画ページ以外で読み込む", () => {
     expect(byId("yt-clip-dock-below").contains(byId("yt-clip-bar-window"))).toBe(true);
     expect(byId("yt-clip-list").hidden).toBe(false);
   });
+
+  test("ホームにいる間に届いた状態も、外していたバーに描く (戻ったときに古い操作が出ない)", async () => {
+    const recordButtons = (): number =>
+      [...byId("yt-clip-bar").querySelectorAll("button")].filter(
+        (button) => button.textContent === "● 録画",
+      ).length;
+    onMessage?.({ type: "state/changed", state: READY }, {}, () => undefined);
+    await flush();
+    expect(recordButtons()).toBe(1);
+
+    await navigate("/");
+    // 別のタブで範囲を捨てた (ホームにいる間に idle が届く)
+    onMessage?.({ type: "state/changed", state: { kind: "idle" } }, {}, () => undefined);
+    await flush();
+
+    await navigate("/watch?v=video-a");
+    expect(recordButtons()).toBe(0);
+  });
 });

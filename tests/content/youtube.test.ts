@@ -3922,6 +3922,25 @@ describe("ドック枠とタブ", () => {
     expect(tabLabels("side")).toEqual(["区間・テロップ"]);
   });
 
+  // spa-inject ③: 出す条件を「文書につながっているか」(getElementById) で見ると、外れた #below の中でバーを隠した後に
+  // sync が body へ退避しても、mount の早抜けが出し直しを呼ばず、バーが body にあるのに隠れたまま残る
+  test("バーの入った下の枠の差す先 (#below) が外れても、退避したバーの窓は隠れたまま残らない。戻れば枠に戻る", async () => {
+    const below = document.getElementById("below");
+    if (below === null) throw new Error("#below がありません");
+    const parent = below.parentElement;
+    if (parent === null) throw new Error("#below の親がありません");
+
+    below.remove();
+    await flush();
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(barWindowElement().hidden).toBe(false);
+
+    parent.prepend(below);
+    await flush();
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(barWindowElement().hidden).toBe(false);
+  });
+
   test("タブを 8px 以上ドラッグすると枠から出て指の下に付いて動き、離した位置を覚える", async () => {
     const tab = tabElement("side", "list");
 
