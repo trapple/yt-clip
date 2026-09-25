@@ -198,6 +198,12 @@ export function createDockManager(options: DockManagerOptions): DockManager {
   const evacuated = new Set<WindowId>();
   let dragging: Dragging | null = null;
   /**
+   * destroy 済みか (マスタースイッチのオフ)。ドラッグ中にオフにすると、掴んでいた要素が枠ごと外れて
+   * lostpointercapture が非同期で届き、drag の "end" が破棄の後に来る (youtube.ts の onDragPoint の由来)。
+   * 破棄済みかどうかは呼び出し側 (running) ではなく、破棄した本人であるここが持つ
+   */
+  let destroyed = false;
+  /**
    * タブから引き出した窓の、掴んだタブの要素。**指を離す (drag の end) まで DOM に残す** (display: none)。
    * Pointer Events の捕捉がこの要素に付いており、外すと lostpointercapture でドラッグが終わる (C2.4)
    */
@@ -492,6 +498,8 @@ export function createDockManager(options: DockManagerOptions): DockManager {
   }
 
   function drag(id: WindowId, phase: DragPhase, point: DragPoint): DockSlotId | null {
+    // 破棄済みの枠には当てない。当たらなかったときと同じ値を返す (呼び出し側は running を見なくてよい)
+    if (destroyed) return null;
     if (phase === "start") {
       const started: Dragging = { id, origin: point, waitingOut: new Set(), hover: null };
       dragging = started;
@@ -577,6 +585,7 @@ export function createDockManager(options: DockManagerOptions): DockManager {
     state,
 
     destroy(): void {
+      destroyed = true;
       for (const slot of allSlots) slot.root.remove();
     },
   };

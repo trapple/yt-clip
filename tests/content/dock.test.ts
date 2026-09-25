@@ -765,4 +765,18 @@ describe("destroy (マスタースイッチのオフ)", () => {
     // ドック中の窓は枠の根と一緒に外れる (youtube.ts の stop は枠を窓より先に destroy する)
     expect(windows.list.element.isConnected).toBe(false);
   });
+
+  test("destroy の後に届く drag (lostpointercapture が非同期で来る) は何もせず、当たらなかったときの値 (null) を返す", () => {
+    const { manager, onChange } = setup();
+    // 帯に当たる直前まで動かす (「落とし先 (drag)」の当たる例と同じ点)
+    manager.drag("list", "start", AWAY);
+    manager.drag("list", "move", SIDE_BAND);
+    manager.destroy();
+    const changes = onChange.mock.calls.length;
+
+    // youtube.ts の stop() は同期で終わるので、lostpointercapture が届く頃には枠も窓も無い。
+    // 破棄済みの枠には当てない (dock も onChange もしない)
+    expect(manager.drag("list", "end", SIDE_BAND)).toBeNull();
+    expect(onChange).toHaveBeenCalledTimes(changes);
+  });
 });

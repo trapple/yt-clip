@@ -224,8 +224,9 @@ function createWindows(): void {
     onUserMove: (rect) => rememberWindowRect("list", rect),
     onResetRequest: () => resetWindow("list"),
     // 見出しのドラッグの落とし先の当たり判定 (C2.3)。枠に引き取られたら onUserMove は来ない。
-    // オフの後 (ドラッグ中に片付けて lostpointercapture が届いた) は、破棄済みの dockManager に判定させない (3 つとも同じ)
-    onDragPoint: (phase, point) => running && dockManager.drag("list", phase, point) !== null,
+    // オフの後 (ドラッグ中に片付けて lostpointercapture が届いた) に破棄済みの枠を当てない判断は
+    // dockManager.drag 自身が持つ (dock.ts の destroy。3 つとも同じ)
+    onDragPoint: (phase, point) => dockManager.drag("list", phase, point) !== null,
   });
   // 窓は body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
   applyPalette(listWindow.element, isDarkTheme());
@@ -234,7 +235,7 @@ function createWindows(): void {
     title: WINDOW_TITLES.settings,
     onUserMove: (rect) => rememberWindowRect("settings", rect),
     onResetRequest: () => resetWindow("settings"),
-    onDragPoint: (phase, point) => running && dockManager.drag("settings", phase, point) !== null,
+    onDragPoint: (phase, point) => dockManager.drag("settings", phase, point) !== null,
   });
   applyPalette(settingsWindow.element, isDarkTheme());
   barWindow = createFloatingWindow({
@@ -243,7 +244,7 @@ function createWindows(): void {
     minWidth: BAR_MIN_WIDTH_PX,
     onUserMove: (rect) => rememberWindowRect("bar", rect),
     onResetRequest: () => resetWindow("bar"),
-    onDragPoint: (phase, point) => running && dockManager.drag("bar", phase, point) !== null,
+    onDragPoint: (phase, point) => dockManager.drag("bar", phase, point) !== null,
     // 枠に入ったバーは ⠿ を 8px 動かすと引き出す (バーだけの枠にはタブが無く、⠿ が唯一の掴む場所。C2.4)
     onUndockRequest: (point, grab) => {
       dockManager.undock("bar");
