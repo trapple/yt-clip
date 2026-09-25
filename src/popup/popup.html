@@ -11,9 +11,35 @@
         font-family: system-ui, sans-serif;
         font-size: 13px;
       }
+      #switch-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      #switch-note {
+        margin: 2px 0 0 24px;
+        color: #606060;
+        font-size: 12px;
+      }
+      #switch-error {
+        margin: 6px 0 0;
+        color: #c00;
+      }
+      hr {
+        margin: 10px 0;
+        border: none;
+        border-top: 1px solid #ddd;
+      }
       #message {
-        margin-bottom: 10px;
+        margin: 0 0 10px;
         line-height: 1.5;
+      }
+      #note {
+        margin: 0 0 10px;
+        line-height: 1.5;
+        color: #606060;
       }
       #progress-area {
         display: flex;
@@ -24,28 +50,22 @@
       #progress {
         flex: 1;
       }
-      #preview {
-        width: 100%;
-        margin-bottom: 10px;
-        background: #000;
-      }
-      #actions {
-        display: flex;
-        gap: 8px;
-      }
-      button {
-        flex: 1;
-        padding: 6px;
-        cursor: pointer;
-      }
-      button:disabled {
-        cursor: default;
-        opacity: 0.5;
-      }
     </style>
   </head>
   <body>
+    <!--
+      全機能のオン / オフ (マスタースイッチの spec §6.1)。popup が持つ唯一の操作。どの状態でも押せる (disabled を付けない)。
+      既定はオンなので checked で始める (読み終えるまでの一瞬にオフに見えないように)
+    -->
+    <label id="switch-row">
+      <input type="checkbox" role="switch" id="enabled" checked />
+      yt-clip を使う
+    </label>
+    <p id="switch-note">この端末だけに効く (同期しない)</p>
+    <p id="switch-error" hidden></p>
+    <hr />
     <p id="message"></p>
+    <p id="note" hidden></p>
     <div id="progress-area" hidden>
       <progress id="progress" value="0" max="1"></progress>
       <span id="remain"></span>
