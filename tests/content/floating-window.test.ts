@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import {
+  UNDOCK_THRESHOLD_PX,
   createFloatingWindow,
   type FloatingWindow,
   type FloatingWindowOptions,
@@ -81,8 +82,14 @@ function makeWindow(overrides: Partial<FloatingWindowOptions> = {}) {
 }
 
 /** バーの窓と同じ形 (見出し無し・幅だけ・つまみを登録) */
-function makeBarLikeWindow() {
-  const made = makeWindow({ title: undefined, resize: "width", minWidth: 480, minHeight: undefined });
+function makeBarLikeWindow(overrides: Partial<FloatingWindowOptions> = {}) {
+  const made = makeWindow({
+    title: undefined,
+    resize: "width",
+    minWidth: 480,
+    minHeight: undefined,
+    ...overrides,
+  });
   const grip = document.createElement("span");
   made.frame.body.append(grip);
   made.frame.addDragHandle(grip);
@@ -105,6 +112,14 @@ function resizeGripOf(frame: FloatingWindow): HTMLElement {
 function styleOf(frame: FloatingWindow): { left: string; top: string; width: string; height: string } {
   const { left, top, width, height } = frame.element.style;
   return { left, top, width, height };
+}
+
+/** onDragPoint の形 (vi.fn の呼び出しの記録を型付きで読むため) */
+type DragPointFn = NonNullable<FloatingWindowOptions["onDragPoint"]>;
+
+/** jsdom は PointerEvent を持たない。beginMoveFrom に渡す pointermove を MouseEvent で作る */
+function moveEvent(x: number, y: number): PointerEvent {
+  return new MouseEvent("pointermove", { bubbles: true, clientX: x, clientY: y }) as PointerEvent;
 }
 
 beforeAll(() => {
@@ -683,5 +698,182 @@ describe("ページの中の枠に入れる (setDocked)", () => {
     pointer(a.body, "pointerdown", 0, 0);
     b.setDocked(false);
     expect([a.element.style.zIndex, b.element.style.zIndex]).toEqual(["2001", "2000"]);
+  });
+});
+
+describe("落とし先へ指の位置を知らせる (onDragPoint)", () => {
+  test("動かし始めたときに開始点で start、動くたびに move、離すと end", () => {
+    const onDragPoint = vi.fn<DragPointFn>(() => false);
+    const { frame, onUserMove } = makeWindow({ onDragPoint });
+    frame.place({ left: 100, top: 100, width: 400 });
+
+    drag(headerOf(frame), 30, 20);
+
+    expect(onDragPoint.mock.calls).toEqual([
+      ["start", { x: 100, y: 100 }],
+      ["move", { x: 130, y: 120 }],
+      ["end", { x: 130, y: 120 }],
+    ]);
+    expect(onUserMove).toHaveBeenCalledTimes(1);
+  });
+
+  test("押して動かさずに離したときは知らせない", () => {
+    const onDragPoint = vi.fn<DragPointFn>(() => false);
+    const { frame } = makeWindow({ onDragPoint });
+    pointer(headerOf(frame), "pointerdown", 100, 100);
+    pointer(headerOf(frame), "pointerup", 100, 100);
+    expect(onDragPoint).not.toHaveBeenCalled();
+  });
+
+  test("end で true が返ったら (枠に引き取られた) onUserMove を呼ばない", () => {
+    const { frame, onUserMove } = makeWindow({ onDragPoint: (phase) => phase === "end" });
+    frame.place({ left: 100, top: 100, width: 400 });
+    drag(headerOf(frame), 30, 20);
+    expect(onUserMove).not.toHaveBeenCalled();
+  });
+
+  test("大きさを変えるドラッグでは知らせない", () => {
+    const onDragPoint = vi.fn<DragPointFn>(() => false);
+    const { frame } = makeWindow({ onDragPoint });
+    frame.place({ left: 100, top: 100, width: 400, height: 300 });
+    drag(resizeGripOf(frame), 30, 20);
+    expect(onDragPoint).not.toHaveBeenCalled();
+  });
+});
+
+describe("ドック中の掴む場所から引き出す (onUndockRequest)", () => {
+  test(`ドック中の掴む場所は ${UNDOCK_THRESHOLD_PX}px 動くまで窓を動かさず、動いたら押した点の窓の中の位置と一緒に知らせる`, () => {
+    let made: ReturnType<typeof makeBarLikeWindow> | null = null;
+    const onUndockRequest = vi.fn(() => {
+      // 呼ばれた側 (youtube.ts) の代わり: 枠から出して、窓の左上 = 指 − 押した点の窓の中の位置 に置く
+      made?.frame.setDocked(false);
+      made?.frame.place({ left: 18, top: 500, width: 480 });
+    });
+    made = makeBarLikeWindow({ onUndockRequest });
+    const { frame, grip, onUserMove } = made;
+    frame.setDocked(true);
+    // ドック中の窓の左上は (20, 500)。⠿ を (100, 540) で掴む = 窓の中の (80, 40)。押した後は測りを戻す
+    // (浮いた窓の詰め方 fitRect が、⠿ の箱をこの枠の位置から測ってしまわないように)
+    const spy = vi
+      .spyOn(frame.element, "getBoundingClientRect")
+      .mockReturnValue(boxAt(20, 500, 800, 140));
+    pointer(grip, "pointerdown", 100, 540);
+    spy.mockRestore();
+    pointer(grip, "pointermove", 105, 540);
+    expect(onUndockRequest).not.toHaveBeenCalled();
+
+    pointer(grip, "pointermove", 98, 540);
+    pointer(grip, "pointermove", 100, 548);
+    expect(onUndockRequest).toHaveBeenCalledTimes(1);
+    expect(onUndockRequest).toHaveBeenCalledWith({ x: 100, y: 548 }, { x: 80, y: 40 });
+
+    // 引き出した後は、その時点の指の位置から窓が付いて動く
+    pointer(grip, "pointermove", 120, 568);
+    pointer(grip, "pointerup", 120, 568);
+    expect(styleOf(frame)).toEqual({ left: "38px", top: "520px", width: "480px", height: "" });
+    expect(onUserMove).toHaveBeenCalledWith({ left: 38, top: 520, width: 480 });
+  });
+
+  test(`${UNDOCK_THRESHOLD_PX}px 未満で離すと何もしない (onUndockRequest も onUserMove も呼ばない)`, () => {
+    const onUndockRequest = vi.fn();
+    const { frame, grip, onUserMove } = makeBarLikeWindow({ onUndockRequest });
+    frame.setDocked(true);
+    pointer(grip, "pointerdown", 100, 540);
+    pointer(grip, "pointermove", 104, 540);
+    pointer(grip, "pointerup", 104, 540);
+    expect(onUndockRequest).not.toHaveBeenCalled();
+    expect(onUserMove).not.toHaveBeenCalled();
+  });
+
+  test("引き取られなかった (枠に入ったまま) ら、そこでドラッグを終える", () => {
+    const onUndockRequest = vi.fn();
+    const { frame, grip, onUserMove } = makeBarLikeWindow({ onUndockRequest });
+    frame.setDocked(true);
+    pointer(grip, "pointerdown", 100, 540);
+    pointer(grip, "pointermove", 120, 540);
+    pointer(grip, "pointermove", 160, 540);
+    pointer(grip, "pointerup", 160, 540);
+    expect(onUndockRequest).toHaveBeenCalledTimes(1);
+    expect(frame.element.style.position).toBe("static");
+    expect(onUserMove).not.toHaveBeenCalled();
+  });
+
+  test("付け直した捕捉が生きている間の lostpointercapture ではドラッグを終えない (窓を body へ移したときの知らせ)", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, "hasPointerCapture");
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      writable: true,
+      value: () => true,
+    });
+    try {
+      const { frame, onUserMove } = makeWindow();
+      frame.place({ left: 100, top: 100, width: 400 });
+      const header = headerOf(frame);
+      pointer(header, "pointerdown", 100, 100);
+      pointer(header, "pointermove", 110, 100);
+      header.dispatchEvent(new MouseEvent("lostpointercapture", { bubbles: true }));
+      pointer(header, "pointermove", 130, 120);
+      pointer(header, "pointerup", 130, 120);
+      expect(onUserMove).toHaveBeenCalledWith({ left: 130, top: 120, width: 400 });
+    } finally {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(Element.prototype, "hasPointerCapture");
+      } else {
+        Object.defineProperty(Element.prototype, "hasPointerCapture", descriptor);
+      }
+    }
+  });
+});
+
+describe("窓の外の要素から移動を続ける (beginMoveFrom)", () => {
+  test("タブなど窓の外の要素で始まったドラッグで窓が動き、離すと置いた場所を知らせる", () => {
+    const { frame, onUserMove } = makeWindow();
+    frame.place({ left: 100, top: 100, width: 400 });
+    const tab = document.createElement("div");
+    document.body.append(tab);
+
+    frame.beginMoveFrom(tab, moveEvent(150, 150), { x: 150, y: 140 });
+    pointer(tab, "pointermove", 170, 180);
+    pointer(tab, "pointerup", 170, 180);
+
+    expect(styleOf(frame)).toEqual({ left: "120px", top: "130px", width: "400px", height: "" });
+    expect(onUserMove).toHaveBeenCalledWith({ left: 120, top: 130, width: 400 });
+    tab.remove();
+  });
+
+  test("動かさずに離しても置いた場所を知らせる (引き出した窓を「動かしていない窓」にしない)", () => {
+    const { frame, onUserMove } = makeWindow();
+    frame.place({ left: 100, top: 100, width: 400 });
+    const tab = document.createElement("div");
+    document.body.append(tab);
+
+    frame.beginMoveFrom(tab, moveEvent(150, 150), { x: 150, y: 140 });
+    pointer(tab, "pointerup", 150, 150);
+
+    expect(onUserMove).toHaveBeenCalledWith({ left: 100, top: 100, width: 400 });
+    tab.remove();
+  });
+
+  test("落とし先へは、引き出す前に押した点 (開始点) で start を知らせ、すぐ今の点で move を知らせる", () => {
+    const onDragPoint = vi.fn<DragPointFn>(() => false);
+    const { frame } = makeWindow({ onDragPoint });
+    const tab = document.createElement("div");
+    document.body.append(tab);
+
+    frame.beginMoveFrom(tab, moveEvent(150, 150), { x: 150, y: 140 });
+
+    expect(onDragPoint.mock.calls).toEqual([
+      ["start", { x: 150, y: 140 }],
+      ["move", { x: 150, y: 150 }],
+    ]);
+    pointer(tab, "pointerup", 150, 150);
+    tab.remove();
+  });
+
+  test("枠に入っている窓で呼ぶと throw する (先に setDocked(false) で引き出す)", () => {
+    const { frame } = makeWindow();
+    frame.setDocked(true);
+    const tab = document.createElement("div");
+    expect(() => frame.beginMoveFrom(tab, moveEvent(0, 0), { x: 0, y: 0 })).toThrow();
   });
 });

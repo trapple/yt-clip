@@ -45,6 +45,18 @@ function raise(target: HTMLElement): void {
 }
 
 /**
+ * ドック中の掴む場所 (バーの ⠿。dock.ts のタブも同じ値を使う) を、これだけ動かしたら枠から引き出す (C2.4)。
+ * テロップの帯の「押して離した」の 4px (telop-track.ts の TELOP_CLICK_SLOP_PX) より大きくし、タブを押すつもりの
+ * 指の震えで抜けないようにする
+ */
+export const UNDOCK_THRESHOLD_PX = 8;
+
+/** 画面 (viewport) の座標の点。ドラッグの指の位置 */
+export type DragPoint = { x: number; y: number };
+/** 窓を動かすドラッグの段階 (落とし先の当たり判定へ知らせる。C2.3) */
+export type DragPhase = "start" | "move" | "end";
+
+/**
  * 押した場所が、掴む場所の中のボタンや入力欄か。**そこでは窓を動かさない** (バーの操作の行のボタンを
  * 押したら、そのボタンの操作だけ。spec A.1)
  */
@@ -88,6 +100,13 @@ export type FloatingWindow = {
    * **枠のどこに置くか (DOM の親) は dock.ts が決める**
    */
   setDocked(docked: boolean): void;
+  /**
+   * 窓の外の要素 (dock.ts のタブ) で始まったドラッグを、窓の移動として続ける (C2.8)。捕捉と listener は source に
+   * 付ける。event はその時点の pointermove、origin はドラッグの開始点 (タブを押した点。落とし先の距離の起点。C2.3)。
+   * **浮いた窓でだけ呼ぶ** (枠に入っている間は throw。先に setDocked(false) で引き出す)。この続きのドラッグは、
+   * 動かさずに離しても置いた場所を onUserMove で知らせる (引き出した窓を「動かしていない窓」にしない)
+   */
+  beginMoveFrom(source: HTMLElement, event: PointerEvent, origin: DragPoint): void;
   destroy(): void;
 };
 
@@ -102,6 +121,17 @@ export type FloatingWindowOptions = {
   onUserMove(rect: WindowRect): void;
   /** 掴む場所 (addDragHandle で登録した要素) のダブルクリック */
   onResetRequest(): void;
+  /**
+   * 窓を動かすドラッグの指の位置 (C2.3)。**落とし先の当たり判定は dock.ts が持つ** (窓の枠は枠を知らない)。
+   * start は動かし始めたとき (押して離しただけでは呼ばない) に開始点で、move は動くたびに、end は指を離したときに
+   * 呼ぶ。end で true を返したら (枠に引き取った) onUserMove を呼ばない
+   */
+  onDragPoint?(phase: DragPhase, point: DragPoint): boolean;
+  /**
+   * 枠に入っている間に、掴む場所 (バーの ⠿) を UNDOCK_THRESHOLD_PX 動かした (C2.8)。grab は窓の左上から見た押した点。
+   * 呼ばれた側が窓を枠から出し (setDocked(false))、指の下に place する。その後のドラッグはこの窓が続ける
+   */
+  onUndockRequest?(point: DragPoint, grab: DragPoint): void;
 };
 
 export function createFloatingWindow(options: FloatingWindowOptions): FloatingWindow {
@@ -213,22 +243,63 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
 
   /**
    * ドラッグを始める。**Pointer Events と捕捉を使う** (spec A.3)。捕捉すると、指が窓の外へ
-   * 出ても pointermove が掴んだ要素に届き続ける
+   * 出ても pointermove が掴んだ要素に届き続ける。
+   *
+   * 窓を動かすドラッグ (move) は、動かし始めてから指を離すまで onDragPoint で落とし先の当たり判定へ指の位置を
+   * 知らせる (C2.3)。`continued` は窓の外の要素 (タブ) で始まったドラッグの続き (beginMoveFrom) の開始点
    */
-  function beginDrag(source: HTMLElement, kind: "move" | "resize", event: PointerEvent): void {
-    // 主ボタン以外 (右クリックのメニューなど) では動かさない
-    if (event.button !== 0) return;
+  function beginDrag(
+    source: HTMLElement,
+    kind: "move" | "resize",
+    event: PointerEvent,
+    continued: DragPoint | null = null,
+  ): void {
+    // 主ボタン以外 (右クリックのメニューなど) では動かさない。続き (タブから引き出した後) は pointermove から
+    // 始まり、button は -1 (押しているボタンが変わっていない) なので見ない
+    if (continued === null && event.button !== 0) return;
     // 文字の選択やページのスクロールを始めさせない
     event.preventDefault();
     // このドラッグを起こした指だけを追う。**違う pointerId の move / up / cancel は無視する**
     // (2 本目の指が同じ要素に触れても、こちらの位置を横から書き換えない)
     const pointerId = event.pointerId;
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const start = current;
+    /** ドラッグの開始点。落とし先に当てる距離 (C2.3) と、枠からの引き出し (C2.8) の起点 */
+    const origin: DragPoint = continued ?? { x: event.clientX, y: event.clientY };
+    /** 窓の動きを測る基準の点。枠から引き出したら、その時点の指の位置に取り直す */
+    let baseX = event.clientX;
+    let baseY = event.clientY;
+    let start = current;
     // 高さを決めていない窓を縦に広げるときは、今の見た目の高さから始める
     const startHeight = start.height ?? element.getBoundingClientRect().height;
+    /**
+     * 枠に入っている窓の掴む場所 (バーの ⠿) から始めたか。UNDOCK_THRESHOLD_PX 動くまで窓を動かさず、動いたら
+     * onUndockRequest で枠から引き出してもらう (C2.8)
+     */
+    let pendingUndock = kind === "move" && docked;
+    const frame = pendingUndock ? element.getBoundingClientRect() : null;
+    /** 窓の左上から見た押した点 (引き出した窓を、⠿ が指の下に残るよう置くため) */
+    const grab: DragPoint =
+      frame === null ? { x: 0, y: 0 } : { x: origin.x - frame.left, y: origin.y - frame.top };
+    /**
+     * 枠から引き出した窓か。引き出した後は、動かさずに離しても置いた場所を知らせる (知らせないと float に位置が
+     * 入らず「動かしていない窓」になり、次の resize で最初の位置へ跳ぶ)
+     */
+    let undocked = continued !== null;
+    /** 落とし先へ知らせているか。押して動かさずに離した (クリック) ときは知らせない (C2.3) */
+    let reporting = false;
+    let last: DragPoint = { x: event.clientX, y: event.clientY };
     source.setPointerCapture(pointerId);
+
+    const report = (phase: DragPhase, point: DragPoint): boolean =>
+      options.onDragPoint?.(phase, point) === true;
+    const startReporting = (): void => {
+      reporting = true;
+      report("start", origin);
+    };
+    // タブから引き出した続きは、もう動いている。開始点と今の点をすぐ知らせる
+    if (continued !== null && kind === "move") {
+      startReporting();
+      report("move", last);
+    }
 
     /** ドラッグを終わらせる。捕捉とリスナをまとめて解く (range-bar.ts の拡大バーと同じ作法) */
     const finish = (): void => {
@@ -241,10 +312,33 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
 
     const onMove = (move: PointerEvent): void => {
       if (move.pointerId !== pointerId) return;
-      const dx = move.clientX - startX;
-      const dy = move.clientY - startY;
+      last = { x: move.clientX, y: move.clientY };
+      if (pendingUndock) {
+        // 押すつもりの指の震えでは抜けない
+        if (Math.hypot(last.x - origin.x, last.y - origin.y) < UNDOCK_THRESHOLD_PX) return;
+        pendingUndock = false;
+        options.onUndockRequest?.(last, grab);
+        // 引き取られなかった (枠から出されなかった) ら、ここで終える。枠の中の窓は動かさない
+        if (docked) {
+          finish();
+          return;
+        }
+        // 窓は枠から body へ移った。掴む場所ごと移したので捕捉が外れうる。付け直す (C2.8)
+        source.setPointerCapture(pointerId);
+        undocked = true;
+        start = current;
+        baseX = last.x;
+        baseY = last.y;
+        startReporting();
+        report("move", last);
+        return;
+      }
+      const dx = last.x - baseX;
+      const dy = last.y - baseY;
       if (kind === "move") {
+        if (!reporting && (dx !== 0 || dy !== 0)) startReporting();
         apply({ ...start, left: start.left + dx, top: start.top + dy });
+        if (reporting) report("move", last);
       } else if (options.resize === "both") {
         // 高さを決めていない窓は、実際に縦へ動いた (dy !== 0) ときだけ高さを持たせる。
         // 移動量 0 の pointermove (押して動かさずに離す) だけで height が入ると、元は
@@ -267,11 +361,20 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
       const settledPointerId = (settled as PointerEvent).pointerId;
       // lostpointercapture は座標を持たない。current (最後の pointermove で反映済み) を使う
       if (settledPointerId !== undefined && settledPointerId !== pointerId) return;
+      // 枠から引き出すときに掴む場所ごと body へ移すと、古い捕捉が外れた知らせが後から届く。付け直した
+      // 捕捉が生きていれば、ドラッグは続いている
+      if (settled.type === "lostpointercapture" && source.hasPointerCapture?.(pointerId) === true) {
+        return;
+      }
       finish();
+      // 枠に入ったまま押して離しただけ (引き出すほど動かさなかった)。何も変えない
+      if (pendingUndock) return;
       requested = current;
+      // 落とし先の枠に引き取られた。浮いた窓の位置は変えない (C2.3)
+      if (reporting && report("end", last)) return;
       // 押して離しただけ (クリックやダブルクリックの 1 回目) は知らせない。知らせると
-      // 「動かした窓」になり、最初の位置を取り直さなくなる
-      if (sameRect(start, current)) return;
+      // 「動かした窓」になり、最初の位置を取り直さなくなる。引き出した窓は知らせる (undocked の doc)
+      if (!undocked && sameRect(start, current)) return;
       options.onUserMove({ ...current });
     };
 
@@ -386,6 +489,12 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
       resizeGrip.hidden = docked;
       resizeGrip.style.display = docked ? "none" : "";
       if (!docked) apply(requested);
+    },
+
+    beginMoveFrom(source: HTMLElement, event: PointerEvent, origin: DragPoint): void {
+      // 枠の中のまま動かす経路は無い (位置はページの流れが決める)。先に setDocked(false) で引き出す。配線の誤り
+      if (docked) throw new Error("[yt-clip] 枠に入っている窓は beginMoveFrom で動かせません");
+      beginDrag(source, "move", event, origin);
     },
 
     destroy(): void {

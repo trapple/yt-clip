@@ -1,5 +1,7 @@
 import {
   createFloatingWindow,
+  type DragPhase,
+  type DragPoint,
   type FloatingWindow,
   type WindowRect,
 } from "@/content/floating-window";
@@ -51,6 +53,12 @@ const MIN_HEIGHT_PX = 160;
  */
 export const SETTINGS_CASCADE_PX = 32;
 
+/**
+ * 見出しの行の高さ (padding 8px × 2 + 文字の行。C1.3 の「見出しの行 (32px)」)。タブから引き出した窓を、指が
+ * 見出しの中に来るよう置くのに使う (C2.4: 上端 = 指 − 見出しの高さの半分)
+ */
+export const PANEL_HEADER_HEIGHT_PX = 32;
+
 export type PanelWindow = {
   element: HTMLElement;
   /** 中身の箱。区間・テロップの窓には区間の一覧とテロップの一覧、設定の窓には設定パネルを入れる */
@@ -79,6 +87,8 @@ export type PanelWindowOptions = {
   onUserMove?(rect: WindowRect): void;
   /** 見出しのダブルクリック (最初の位置に戻す) */
   onResetRequest?(): void;
+  /** 見出しのドラッグの指の位置 (落とし先の当たり判定。dock.ts へ渡す。C2.3)。end で true なら枠に引き取った */
+  onDragPoint?(phase: DragPhase, point: DragPoint): boolean;
 };
 
 /**
@@ -117,6 +127,7 @@ export function createPanelWindow(options: PanelWindowOptions): PanelWindow {
     minHeight: MIN_HEIGHT_PX,
     onUserMove: (rect) => options.onUserMove?.(rect),
     onResetRequest: () => options.onResetRequest?.(),
+    onDragPoint: (phase, point) => options.onDragPoint?.(phase, point) ?? false,
   });
   const { element, body } = frame;
 

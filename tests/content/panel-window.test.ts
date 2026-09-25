@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import {
+  PANEL_HEADER_HEIGHT_PX,
   SETTINGS_CASCADE_PX,
   createPanelWindow,
   initialListRect,
@@ -149,6 +150,23 @@ describe("createPanelWindow", () => {
     headerOf(target).dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
     expect(onResetRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test("見出しのドラッグの指の位置を onDragPoint へそのまま渡す (落とし先の当たり判定は dock.ts)", () => {
+    const onDragPoint = vi.fn<NonNullable<PanelWindowOptions["onDragPoint"]>>(() => false);
+    const target = makeWindow({ onDragPoint });
+    target.setVisible(true);
+    target.frame.place({ left: 100, top: 100, width: 400 });
+
+    pointer(headerOf(target), "pointerdown", 100, 100);
+    pointer(headerOf(target), "pointermove", 130, 120);
+    pointer(headerOf(target), "pointerup", 130, 120);
+
+    expect(onDragPoint.mock.calls.map(([phase]) => phase)).toEqual(["start", "move", "end"]);
+  });
+
+  test("見出しの行の高さは 32px (タブから引き出した窓を、指が見出しの中に来るよう置く)", () => {
+    expect(PANEL_HEADER_HEIGHT_PX).toBe(32);
   });
 
   test("body に入れたものは窓の中に出る", () => {
