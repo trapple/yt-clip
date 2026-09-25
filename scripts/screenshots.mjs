@@ -93,30 +93,45 @@ try {
   await page.screenshot({ path: `${OUT_DIR}/1-range.png` });
   console.log(`${OUT_DIR}/1-range.png`);
 
-  /**
-   * バー全体 (開いているパネルも含む) が画面に収まるよう送る。
-   *
-   * **上端ではなく下端を基準にする。** 設定項目が増えるとパネルは下へ伸びるので、
-   * 上端を固定していると新しい項目が画面外へこぼれる (モードを足したときに
-   * 「最大秒数」が切れた)
-   */
-  const frameWholeBar = async (bottomMarginPx) => {
-    await page.evaluate((margin) => {
-      const element = document.getElementById("yt-clip-bar");
-      if (element === null) throw new Error("バーが見つかりません");
-      const bottom = element.getBoundingClientRect().bottom + window.scrollY;
-      window.scrollTo({
-        top: bottom - window.innerHeight + margin,
-        behavior: "instant",
-      });
-    }, bottomMarginPx);
-    // スクロール後の再描画を待つ
-    await page.waitForTimeout(500);
-  };
-
-  // 設定パネルを開く。パネルのぶん背が伸びるので枠取りを取り直す
+  // 設定を開く。**設定は右側の固定のパネルに開き、ページのスクロールでは動かない。**
+  // 枠取りは 1-range と同じ (プレイヤーとバーが下寄り) にして、パネルの中を設定の
+  // 先頭まで送って撮る。1280x800 ではパネルの最大高さ (716px) に 8 項目と保存ボタンが
+  // 収まらず末尾は切れるが、それでよい。パネルの中でスクロールすることが見て分かる
   await bar.getByRole("button", { name: "⚙" }).click();
-  await frameWholeBar(24);
+  await page
+    .locator("#yt-clip-panel")
+    .waitFor({ state: "visible", timeout: WAIT_TIMEOUT_MS });
+
+  // **このスクリーンショットだけ**、動画 (#primary) の幅をパネルのぶん空ける。
+  // 掲載画像はおすすめ列 (#secondary) を隠しているのでプレイヤーが画面右端まで
+  // 広がり、固定パネルと重なって「動画は隠れない」設計と食い違う絵になる。実際の
+  // YouTube にはおすすめ列があるので重ならない (1440 幅の実測で
+  // playerRight 1012 < panel.left 1024)。
+  // 実測 (1280x800、YouTube 2026-09-24): #secondary を隠すと #columns は
+  // justify-content: center になり、max-width だけ足すとプレイヤーが中央へ
+  // 寄って逆に重なりが深くなる (primary right 1072 > panel.left 864) ので、
+  // 左詰めに戻す指定も一緒に足す。448 = パネル幅 400 + 右端の余白 16 +
+  // プレイヤー側の左マージン 32 (side-panel.ts の WIDTH_PX / EDGE_GAP_PX と対応)
+  await page.addStyleTag({
+    content:
+      "#columns { justify-content: flex-start !important; } #primary { max-width: calc(100vw - 448px) !important; }",
+  });
+  await page.waitForTimeout(500);
+
+  await page.evaluate(() => {
+    const body = document.getElementById("yt-clip-panel-body");
+    // 設定パネルの根は、最初の項目 (モード) の入力欄 → 項目の枠 → 根
+    const settings = document.getElementById("yt-clip-setting-mode")?.parentElement
+      ?.parentElement;
+    if (body === null || settings == null) {
+      throw new Error("パネルか設定が見つかりません");
+    }
+    // 拡張も ⚙ で送っているが、掲載画像の絵をここで確定させる (拡張の振る舞いが
+    // 変わっても、撮れる絵が変わらないように)
+    body.scrollTop +=
+      settings.getBoundingClientRect().top - body.getBoundingClientRect().top;
+  });
+  await framePlayerAndBar(0.72);
   await page.screenshot({ path: `${OUT_DIR}/2-settings.png` });
   console.log(`${OUT_DIR}/2-settings.png`);
 } finally {

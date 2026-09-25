@@ -21,7 +21,7 @@ import {
   type BarAction,
 } from "@/content/actions";
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
-import { createSettingsPanel } from "@/content/settings-panel";
+import { createSettingsPanel, type SettingsPanel } from "@/content/settings-panel";
 import { BAR_STYLE, applyPalette, isDarkTheme } from "@/content/styles";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
 import { makeDefaultRange } from "@/content/range-math";
@@ -32,6 +32,7 @@ import {
   type RecorderHandle,
 } from "@/content/recorder";
 import { createSegmentList, type SegmentList } from "@/content/segment-list";
+import { createSidePanel } from "@/content/side-panel";
 import { createTelopList, type TelopList } from "@/content/telop-list";
 import { createTelopPreview } from "@/content/telop-preview";
 import { YT_SELECTORS } from "@/content/selectors";
@@ -110,6 +111,18 @@ let telopList: TelopList | null = null;
 /** プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため) */
 const telopPreview = createTelopPreview();
 /**
+ * 右側のパネル。区間の一覧・テロップの一覧・設定を入れる。
+ *
+ * **1 つを使い回す。** 畳んだ状態はタブを開いている間だけ覚える (spec §3) ので、
+ * バーを作り直すたびに作り直さない。中身の入れ替えは `buildBar`、body への
+ * 付け直しは `mount`、出すかの判定は `refreshSidePanel` が行う
+ */
+const sidePanel = createSidePanel();
+// パネルは body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
+applyPalette(sidePanel.element, isDarkTheme());
+/** 設定パネル。⚙ の開閉と、パネルを出すかの判定の両方が読む。`buildBar` が作る */
+let settingsPanel: SettingsPanel | null = null;
+/**
  * 状態機械から最後に届いた種類。
  *
  * モードを切り替えてよいかの判定に使う。`busy` だけでは、録画済みクリップを
@@ -132,6 +145,13 @@ let pendingMode: ClipMode | null = null;
  * 足した区間は必ず末尾に来る (並べ替えないため)
  */
 let selectLastOnNextState = false;
+/**
+ * 次に状態が届いたとき、テロップの一覧の末尾の行をパネルの見える範囲に入れる。
+ *
+ * `selectLastOnNextState` と同じ形。**クリックの時点では行がまだ無い** (状態機械の
+ * 答えを待って描く) ので、応答を描いた後に 1 回だけ送る
+ */
+let revealLastTelopOnNextState = false;
 /**
  * 次に状態が届いたとき、この位置が消えたものとして選択を詰める。
  *
@@ -212,6 +232,8 @@ function setStatus(text: string): void {
   const status = document.getElementById(`${BAR_ID}-status`);
   if (status !== null) {
     status.textContent = text;
+    // 1 行に省略して出すので、全文はマウスを乗せたときに読めるようにする
+    status.title = text;
   }
 }
 
@@ -375,11 +397,8 @@ function onMarkIn(): void {
  * 選び直しは状態の変化ではないので、`send` を通すと往復のぶん反応が遅れる
  */
 function applyStateToSelection(): void {
-  segmentList?.update(
-    mode === "edit" ? currentSegments : [],
-    selectedIndex,
-    maxClipSec,
-  );
+  // 一覧に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
+  segmentList?.update(listedItems().segments, selectedIndex, maxClipSec);
 
   const segment = selectedSegment();
   if (segment === null) return;
@@ -420,10 +439,22 @@ function applyMode(next: ClipMode): void {
 
   pendingMode = null;
   mode = next;
+  // 作り直す前に開いていたかを覚えておく。バーを作り直すと設定パネルも
+  // 新しい隠れたものに替わるので、覚えておかないとモードを変えた瞬間に
+  // 設定 (シンプルならパネルごと) が消える。1 つのパネルを使い回す設計に
+  // なったので、開いたままにする
+  const settingsWasOpen = settingsPanel?.element.hidden === false;
   // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
   // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
   document.getElementById(BAR_ID)?.remove();
   mount();
+  // 開いていたなら、⚙ と同じ経路 (開く → refreshSidePanel → reveal → scrollTo)
+  // で新しい設定パネルを開き直す。保存済みの値は toggle の fill が入れ直すので、
+  // 未保存の入力は失われてよい (モード変更は設定の保存を経由するため保存済み)
+  // **新しい隠れたパネルがあるときだけ開く。** onToggleSettings は toggle なので、
+  // mount() がバーを作り直さなかった場合 (#below が無い) に呼ぶと、開いたままの
+  // 古いパネルを逆に閉じてしまう
+  if (settingsWasOpen && settingsPanel?.element.hidden === true) onToggleSettings();
 
   if (currentSegments.length > 0) {
     send({ type: "RESET_MARKS" });
@@ -483,6 +514,8 @@ function onAddTelop(): void {
     setStatus("動画の終わりにはテロップを足せません");
     return;
   }
+  // 足した行をパネルの見える範囲に入れる。畳んでいても開く (spec §3)
+  revealLastTelopOnNextState = true;
   send({ type: "ADD_TELOP", telop: { startSec, endSec, text: "" } });
 }
 
@@ -830,6 +863,68 @@ function renderActions(kind: ClipState["kind"]): void {
   );
 }
 
+/**
+ * 一覧に出す区間とテロップ。**エディットモードで、範囲を作った動画を見ているときだけ。**
+ *
+ * シンプルで使っている人に、関係のない概念を見せない。別の動画の区間は出さない
+ * (帯・プレビューと同じ規則)。固定のパネルに出すので、SPA で動画 B へ移ったのに
+ * 動画 A の区間が出続けると目立つ (spec §4)
+ */
+function listedItems(): { segments: ClipRange[]; telops: Telop[] } {
+  if (mode !== "edit" || rangeVideoId !== currentVideoId()) {
+    return { segments: [], telops: [] };
+  }
+  return { segments: currentSegments, telops: currentTelops };
+}
+
+/**
+ * パネルを出すか隠すかを決める。**`setVisible` を呼ぶのはここだけ** (spec §4)。
+ *
+ * 隠すのは、中身が無い / 全画面 / 動画ページ以外、のどれか。中身があるかは
+ * 各部品の `hidden` で見る (一覧は区間が無いと自分で隠れ、設定は ⚙ で開閉する)
+ */
+function refreshSidePanel(): void {
+  const parts = [segmentList?.element, telopList?.element, settingsPanel?.element];
+  const hasContent = parts.some((part) => part !== undefined && !part.hidden);
+  // **`!= null` にする。** jsdom は fullscreenElement を持たず undefined を返すので、
+  // `!== null` だとテストで常に全画面扱いになる。body 直下の fixed 要素は全画面の
+  // 動画の上に残りうるので、全画面では出さない
+  const fullscreen = document.fullscreenElement != null;
+  const onVideoPage = currentVideoId() !== null;
+  sidePanel.setVisible(hasContent && !fullscreen && onVideoPage);
+}
+
+/**
+ * 一覧を手元の写しに合わせて描き直し、パネルを出すかを決め直す。
+ * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ
+ */
+function refreshLists(): void {
+  const { segments, telops } = listedItems();
+  segmentList?.setEnabled(!busy);
+  segmentList?.update(segments, selectedIndex, maxClipSec);
+  telopList?.setEnabled(canEditTelops());
+  telopList?.update(telops, segments);
+  refreshSidePanel();
+}
+
+/**
+ * 足した行をパネルの見える範囲に入れる。**応答を描いた後に呼ぶ** (クリックの時点では
+ * 行がまだ無い)。畳んでいても開く。押した結果が見えないと無反応に見える (spec §3)。
+ *
+ * パネルが隠れている (全画面など) ときは何もしない。出す判断は `refreshSidePanel` のもの
+ */
+function revealLastRow(
+  list: HTMLElement | undefined,
+  role: "segment" | "telop",
+): void {
+  if (list === undefined || sidePanel.element.hidden) return;
+  const rows = list.querySelectorAll<HTMLElement>(`[data-role='${role}']`);
+  const last = rows[rows.length - 1];
+  if (last === undefined) return;
+  sidePanel.reveal();
+  sidePanel.scrollTo(last);
+}
+
 function applyStateToDisplay(state: ClipState): void {
   const stateSegments = "segments" in state ? state.segments : [];
   const stateMeta = "meta" in state ? state.meta : null;
@@ -891,7 +986,11 @@ function applyStateToDisplay(state: ClipState): void {
       selectedIndex = liveSegments.length - 1;
     }
   }
+  // 足した直後の 1 回だけ、足した行へ送る。描き終えてから送るので、ここでは覚えるだけ
+  const revealSegment = selectLastOnNextState;
+  const revealTelop = revealLastTelopOnNextState;
   selectLastOnNextState = false;
+  revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;
 
   const current = selectedSegment();
@@ -919,19 +1018,10 @@ function applyStateToDisplay(state: ClipState): void {
   // 描き直すと窓が計算し直されてハンドルが跳ねる。
   // ただし録画中は、打ち切られたドラッグの見た目が最後の位置に残るため、
   // ずれていなくても確定済みの範囲で描き直す
-  // 一覧はエディットモードでだけ出す。シンプルで使っている人に、関係のない
-  // 概念を見せない
-  segmentList?.setEnabled(!busy);
-  segmentList?.update(
-    mode === "edit" ? currentSegments : [],
-    selectedIndex,
-    maxClipSec,
-  );
-  telopList?.setEnabled(canEditTelops());
-  telopList?.update(
-    mode === "edit" ? currentTelops : [],
-    mode === "edit" ? currentSegments : [],
-  );
+  refreshLists();
+  // 一覧とパネルの表示が決まってから送る (出す → 開く → 送る の順)
+  if (revealSegment) revealLastRow(segmentList?.element, "segment");
+  if (revealTelop) revealLastRow(telopList?.element, "telop");
 
   lastKind = state.kind;
   // 待たせていた切り替えを拾う。`applyMode` はバーを作り直すので、
@@ -1303,6 +1393,26 @@ function readChannelContext(): SettingsContext {
   return { channel: channel.id === "" ? null : channel };
 }
 
+/**
+ * ⚙。設定をパネルに開閉する。**開いたら畳みを解き、設定の先頭まで送る** (spec §3)。
+ * 設定は一覧の下に入るので、区間とテロップが多いと押しても見えないところで開く。
+ *
+ * **出す → 開く → 送る の順を崩さない。** 隠れていた・畳んでいたパネルは寸法が 0 で、
+ * 先に送っても scrollTop が効かない (シンプルモードで ⚙ を押す経路で効く)
+ */
+function onToggleSettings(): void {
+  // ⚙ は buildBar の中で設定パネルを作った後に作るので、押せた時点で null は
+  // ありえない。null なら配線のバグなので、黙って何もしない形で隠さない
+  if (settingsPanel === null) {
+    throw new Error("設定パネルを作る前に ⚙ が押されました");
+  }
+  settingsPanel.toggle();
+  refreshSidePanel();
+  if (settingsPanel.element.hidden) return;
+  sidePanel.reveal();
+  sidePanel.scrollTo(settingsPanel.element);
+}
+
 function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
@@ -1331,17 +1441,19 @@ function buildBar(): HTMLElement {
   status.id = `${BAR_ID}-status`;
   status.style.cssText = BAR_STYLE.status;
   status.textContent = "IN を押して開始位置を指定";
+  status.title = status.textContent;
 
   // 状態ごとに中身を入れ替える箱。押しても拒まれるだけの操作は出さない
   const actions = document.createElement("div");
   actions.id = ACTIONS_ID;
   actions.style.cssText = BAR_STYLE.row;
 
-  const settingsPanel = createSettingsPanel({ getContext: readChannelContext });
-  const settingsButton = makeButton("⚙", false, () => settingsPanel.toggle());
+  const settings = createSettingsPanel({ getContext: readChannelContext });
+  settingsPanel = settings;
+  // 状態の文言 (flex:1) が残りの幅を取るので、⚙ は右端に来る。操作の並びから
+  // 外して、押し間違いを減らす
+  const settingsButton = makeButton("⚙", false, onToggleSettings);
   settingsButton.title = "設定";
-  // 右端へ寄せる。操作の並びから外して、押し間違いを減らす
-  settingsButton.style.cssText += "margin-left:auto;";
 
   // 「追加してから頭と尻を決める」順に並べる
   if (addButton !== null) row.append(addButton);
@@ -1392,13 +1504,15 @@ function buildBar(): HTMLElement {
     onText: onTelopText,
   });
 
-  // 一覧を上、拡大バー、操作の順。区間を選んでからバーで調整する流れに合わせる
-  bar.append(
+  // バーは拡大バー → 操作の行だけ。拡大バーは幅がそのまま精度になるので、
+  // プレイヤー直下に残す (spec §1)
+  bar.append(rangeBar.element, row);
+  // 一覧と設定は右側のパネルへ。**中身ごと入れ替える。** 足すだけにすると、
+  // バーを作り直すたびに古い一覧が残って 2 重になる
+  sidePanel.body.replaceChildren(
     segmentList.element,
     telopList.element,
-    rangeBar.element,
-    row,
-    settingsPanel.element,
+    settings.element,
   );
   return bar;
 }
@@ -1424,6 +1538,11 @@ function watchPlayhead(): void {
 }
 
 function mount(): void {
+  // パネルは body の直下に置く (#below の中だと YouTube の再描画でバーと一緒に外れる)。
+  // **バーの有無より先に見る。** body の子を差し替えられるとパネルだけが外れる
+  if (sidePanel.element.parentElement !== document.body) {
+    document.body.append(sidePanel.element);
+  }
   if (document.getElementById(BAR_ID) !== null) return;
 
   const anchor = document.querySelector(YT_SELECTORS.mountAnchor);
@@ -1461,6 +1580,9 @@ function mount(): void {
   }
   refreshOverlay();
   refreshTelopPreview();
+  // 作り直した一覧は空で隠れている。次の状態通知を待たずに手元の写しで描き直し、
+  // パネルの表示も決め直す
+  refreshLists();
 }
 
 /**
@@ -1600,13 +1722,19 @@ let lastHref = location.href;
 // テーマの切り替えに追従する。YouTube は <html dark> を付け外しするだけで
 // 画面を作り直さないため、DOM 変化の監視では拾えない
 const themeObserver = new MutationObserver(() => {
+  const dark = isDarkTheme();
   const bar = document.getElementById(BAR_ID);
-  if (bar !== null) applyPalette(bar, isDarkTheme());
+  if (bar !== null) applyPalette(bar, dark);
+  // パネルは body の直下でバーの外にある。バーの配色は継がれない
+  applyPalette(sidePanel.element, dark);
 });
 themeObserver.observe(document.documentElement, {
   attributes: true,
   attributeFilter: ["dark"],
 });
+
+// 全画面の間はパネルを隠す。body 直下の fixed 要素は全画面の動画の上に残りうる
+document.addEventListener("fullscreenchange", refreshSidePanel);
 
 // YouTube は SPA 遷移するため DOM 変化を監視して再マウントする
 const observer = new MutationObserver(() => {
@@ -1618,6 +1746,9 @@ const observer = new MutationObserver(() => {
     rangeBar?.setEnabled(canAdjustRange());
     refreshOverlay();
     refreshTelopPreview();
+    // 一覧も同じ規則で描き直す。固定のパネルに A の区間が B の画面で出続けないように。
+    // 動画ページ以外へ移ったら、パネルごと隠れる (refreshSidePanel)
+    refreshLists();
   }
   mount();
 });
