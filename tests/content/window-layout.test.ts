@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  WINDOW_IDS,
   WINDOW_LAYOUT_KEY,
   acceptsDock,
   fitRect,
@@ -280,6 +281,17 @@ describe("parseDockState", () => {
       side: { tabs: ["list"] },
     });
     expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  test("tabs が窓の数より多い巨大な配列は先頭 (窓の数ぶん) だけ見て、要素の数だけ warn しない (whole-branch review M3)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // 壊れた保存値 (chrome.storage.local を直接書き換えられる人だけが作れる) を模す。
+    // 打ち切らないと "bar" の重複ぶん (499 回) warn が出る
+    const rawTabs = new Array(500).fill("bar");
+    expect(parseDockState({ below: { tabs: rawTabs } })).toEqual({ below: { tabs: ["bar"] } });
+    // 打ち切り後は WINDOW_IDS.length (3) 件のうち先頭の "bar" だけ採用、残り 2 件が重複で捨てられ、
+    // 打ち切りの warn が 1 回。要素の数 (500) には比例しない
+    expect(warn.mock.calls.length).toBeLessThanOrEqual(WINDOW_IDS.length + 1);
   });
 
   test("知らない枠の名前は黙って無視する (後の版で枠が増えても古い版が騒がない)", () => {

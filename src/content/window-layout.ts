@@ -199,8 +199,19 @@ export function parseDockState(value: unknown): DockState {
       );
       continue;
     }
+    // 窓は WINDOW_IDS.length 個しか無いので、正しい値でもこれより長くはならない。壊れた保存値
+    // (chrome.storage.local を直接書き換えられる人だけが作れる) が巨大な配列だと、打ち切らずに
+    // 回すと要素の数だけ console.warn が出て DevTools を開いていると固まる (whole-branch review M3)
+    let boundedTabs = rawTabs as unknown[];
+    if (boundedTabs.length > WINDOW_IDS.length) {
+      console.warn(
+        `[yt-clip] 保存された windowLayout.docks.${slot}.tabs が窓の数 (${WINDOW_IDS.length}) より` +
+          ` 多い (${boundedTabs.length} 件) ため、先頭 ${WINDOW_IDS.length} 件だけを見ます`,
+      );
+      boundedTabs = boundedTabs.slice(0, WINDOW_IDS.length);
+    }
     const tabs: WindowId[] = [];
-    for (const tab of rawTabs as unknown[]) {
+    for (const tab of boundedTabs) {
       if (!isWindowId(tab) || seen.has(tab) || !acceptsDock(tab, slot)) {
         console.warn(
           `[yt-clip] 保存された windowLayout.docks.${slot}.tabs の ${JSON.stringify(tab)} を捨てます (知らない窓・重複・入れられない枠)`,
