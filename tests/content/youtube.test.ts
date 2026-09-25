@@ -4317,6 +4317,31 @@ describe("オン / オフ (マスタースイッチ)", () => {
     expect(styleRect(listElement())).toEqual(moved);
   });
 
+  test("浮いた窓をドラッグしている最中にオフにすると、外れた見出しに lostpointercapture が届いても配置を保存しない (他の窓の覚えた位置が残る)", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    // バーの位置を覚えさせる (オフで消えてはいけない他の窓の記憶)
+    drag(barGrip(), 30, -20);
+    await flush();
+    const remembered = storedLayout;
+    expect(remembered).toMatchObject({ float: { bar: expect.any(Object) } });
+    layoutWrites = [];
+
+    // 区間・テロップの窓を掴んで動かしている最中にオフにする。destroy が見出しを外すと、Chrome は外れた要素へ
+    // lostpointercapture を配る (jsdom では手で配る)
+    const header = listHeader();
+    pointer(header, "pointerdown", 100, 100);
+    pointer(header, "pointermove", 60, 140);
+    setEnabled(false);
+    await flush();
+    header.dispatchEvent(new Event("lostpointercapture"));
+    await flush();
+
+    expect(layoutWrites).toEqual([]);
+    expect(storedLayout).toEqual(remembered);
+  });
+
   test("オンにした直後にオフにすると、遅れて届いた応答と覚えた配置の読みで窓も帯も出さない", async () => {
     setEnabled(false);
     await flush();
@@ -4410,6 +4435,67 @@ describe("録画中・書き出し中のオフ (マスタースイッチの spec
 
     expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
     expect(ourElements()).toBe(0);
+  });
+
+  test("準備中 (seeking) にオフにした後、中止の応答より先に同じ録画の recording が届いても、応答 (ready) で片付く (ready の同報を待たない)", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    // 中止を送る (応答は setTimeout の後に返る)。その間に router の queue で先に進んだ recording の同報が届いた
+    setEnabled(false);
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    // ready の同報は失われた (emit しない)。頼れるのは中止の応答だけ
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+    // 次のテストのために、状態機械を中止が通った後の状態に揃える (オンに戻すと content/loaded の応答で読まれる)
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+  });
+
+  test("オフを待つ間にオンへ戻して録り直した後に古い中止の応答 (ready) が届いても、新しい録画の旗を下ろさない (判断メモ 33)", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    // 中止を送り、応答が返る前にオンへ戻して、別の録画を始める (ready → seeking で capturing が立ち直す)
+    setEnabled(false);
+    setEnabled(true);
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    sent = [];
+
+    // 新しい録画はまだ準備中。古い応答で旗が下りていれば、ここでその場で片付いてしまう
+    setEnabled(false);
+    expect(ourElements()).toBeGreaterThan(0);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+  });
+
+  test("準備中にオフにして片付いた後に録画の開始 (startRecording) が失敗しても、recorder/failed を送らない", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    const original = (video.element as unknown as { captureStream: () => unknown }).captureStream;
+    Object.assign(video.element, {
+      captureStream: () => {
+        throw new Error("captureStream に失敗しました");
+      },
+    });
+    try {
+      sent = [];
+      // startRecording は次の microtask で reject する。その前に (同期に) 片付けを済ませ、reject を片付けた後に届かせる。
+      // capturing が偽なのでオフはその場で stop する (中止の応答で ready に戻して片付けた後と同じ、走っていない回)
+      command("recorder/start");
+      setEnabled(false);
+      expect(ourElements()).toBe(0);
+      await flush();
+
+      expect(sent.some((message) => message.type === "recorder/failed")).toBe(false);
+      expect(swState.kind).toBe("ready");
+    } finally {
+      Object.assign(video.element, { captureStream: original });
+    }
   });
 
   test("複数区間の継ぎ目でオフにすると、片付けた後に seek が済んでも再生も rVFC も始めず、FAIL も送らない", async () => {

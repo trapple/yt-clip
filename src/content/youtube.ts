@@ -223,8 +223,9 @@ function createWindows(): void {
     title: WINDOW_TITLES.list,
     onUserMove: (rect) => rememberWindowRect("list", rect),
     onResetRequest: () => resetWindow("list"),
-    // 見出しのドラッグの落とし先の当たり判定 (C2.3)。枠に引き取られたら onUserMove は来ない
-    onDragPoint: (phase, point) => dockManager.drag("list", phase, point) !== null,
+    // 見出しのドラッグの落とし先の当たり判定 (C2.3)。枠に引き取られたら onUserMove は来ない。
+    // オフの後 (ドラッグ中に片付けて lostpointercapture が届いた) は、破棄済みの dockManager に判定させない (3 つとも同じ)
+    onDragPoint: (phase, point) => running && dockManager.drag("list", phase, point) !== null,
   });
   // 窓は body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
   applyPalette(listWindow.element, isDarkTheme());
@@ -233,7 +234,7 @@ function createWindows(): void {
     title: WINDOW_TITLES.settings,
     onUserMove: (rect) => rememberWindowRect("settings", rect),
     onResetRequest: () => resetWindow("settings"),
-    onDragPoint: (phase, point) => dockManager.drag("settings", phase, point) !== null,
+    onDragPoint: (phase, point) => running && dockManager.drag("settings", phase, point) !== null,
   });
   applyPalette(settingsWindow.element, isDarkTheme());
   barWindow = createFloatingWindow({
@@ -242,7 +243,7 @@ function createWindows(): void {
     minWidth: BAR_MIN_WIDTH_PX,
     onUserMove: (rect) => rememberWindowRect("bar", rect),
     onResetRequest: () => resetWindow("bar"),
-    onDragPoint: (phase, point) => dockManager.drag("bar", phase, point) !== null,
+    onDragPoint: (phase, point) => running && dockManager.drag("bar", phase, point) !== null,
     // 枠に入ったバーは ⠿ を 8px 動かすと引き出す (バーだけの枠にはタブが無く、⠿ が唯一の掴む場所。C2.4)
     onUndockRequest: (point, grab) => {
       dockManager.undock("bar");
@@ -360,10 +361,11 @@ function isCurrentRun(id: number): boolean {
  */
 let capturing = false;
 /**
- * 受けた state/changed の数。オフのための中止の応答が、送った後に届いた新しい状態より古いかを見分ける (cancelForSwitch。
- * 判断メモ 33)
+ * `capturing` が偽 → 真に立った回数 (= このタブで始まった録画の数)。オフのための中止の応答が、送った後に始まった
+ * **別の録画** より古いかを見分ける (cancelForSwitch。判断メモ 33)。受けた state/changed の数では数えない: 同じ録画の中の
+ * seeking → recording の進みでも応答を捨ててしまい、ready の同報が届かなければ永久に待つ
  */
-let stateSeq = 0;
+let captureRun = 0;
 
 /**
  * 状態機械へイベントを送る。
@@ -1226,8 +1228,13 @@ function currentWindowLayout(): WindowLayout {
   return { version: WINDOW_LAYOUT_VERSION, float: { ...floatLayout }, docks: dockManager.state() };
 }
 
-/** 覚える配置を組ごと保存する */
+/**
+ * 覚える配置を組ごと保存する。**走っている間だけ効く** (保存の唯一の口)。ドラッグ中にオフにすると、外れた掴む場所へ
+ * lostpointercapture が届いて onUserMove や dock の onChange がここへ来る。オフでは floatLayout を空にしてあるので、
+ * 保存すると他の窓の覚えた位置を消す
+ */
 function persistWindowLayout(): void {
+  if (!running) return;
   void saveWindowLayout(currentWindowLayout()).catch((error: unknown) => {
     // 覚えられないだけで、今の画面の窓は置いた場所にある。次に開くと前に覚えた配置で出る
     console.warn(`窓の位置を保存できませんでした: ${String(error)}`);
@@ -1698,6 +1705,9 @@ async function beginRecording(): Promise<void> {
   } catch (error) {
     // release は二度呼んでも安全 (startRecording の中で解放済みのことがある)
     videoOverride?.release();
+    // 録画の準備を待っている間に片付いた (オフにして中止が通った)。状態機械はもう ready に戻っているので、失敗を伝えて
+    // failed に落とさない。オフのページから送らない (spec §1)
+    if (!isCurrentRun(id)) return;
     notifyOutcome({ type: "recorder/failed", reason: String(error) });
   }
 }
@@ -2170,8 +2180,9 @@ function onRuntimeMessage(
 
   // state/changed は録画対象のタブにしか届かない (router は captureTabId にだけ同報する)。busy の間は、このタブで
   // 録画の準備・録画・書き出しが走っている (capturing の doc。判断メモ 13)
-  stateSeq += 1;
-  capturing = BUSY_KINDS.has(message.state.kind);
+  const nextCapturing = BUSY_KINDS.has(message.state.kind);
+  if (nextCapturing && !capturing) captureRun += 1;
+  capturing = nextCapturing;
   handleStateChanged(message.state);
   // 状態を処理し終えた。オフを待っていたなら、ここで片付けてよくなったかもしれない (spec §4.1)
   driver.reconcile();
@@ -2230,12 +2241,13 @@ function onStopDeferred(): void {
  */
 function cancelForSwitch(): void {
   const id = runId;
-  const seq = stateSeq;
+  const run = captureRun;
   /**
-   * この応答が古くなったか (判断メモ 33)。オフ → オンで作り直した後か、送った後に届いた state/changed が録画中を
-   * 知らせた (オフを待つ間にオンへ戻して新しい録画が始まった) なら、新しい状態が正なので応答で旗を下ろさない
+   * この応答が古くなったか (判断メモ 33)。オフ → オンで作り直した後か、送った後に別の録画が始まった (オフを待つ間に
+   * オンへ戻して録り直した) なら、新しい録画の状態が正なので応答で旗を下ろさない。同じ録画の中の seeking → recording
+   * の進みでは捨てない (応答の口は同報が失われても片付くためにある。判断メモ 1)
    */
-  const stale = (): boolean => !isCurrentRun(id) || (stateSeq !== seq && capturing);
+  const stale = (): boolean => !isCurrentRun(id) || captureRun !== run;
   void chrome.runtime
     .sendMessage({
       type: "clip/event",
@@ -2457,7 +2469,7 @@ function resetModuleState(): void {
   handle = null;
   observedPlayer = null;
   capturing = false;
-  stateSeq = 0;
+  captureRun = 0;
 }
 
 /**
