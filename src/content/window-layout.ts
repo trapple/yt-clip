@@ -14,12 +14,20 @@ export const WINDOW_LAYOUT_KEY = "windowLayout";
 
 /** 窓の名前 (窓の分割の spec C1.1)。覚えた配置の鍵にも使う */
 export type WindowId = "bar" | "list" | "settings";
-const WINDOW_IDS: readonly WindowId[] = ["bar", "list", "settings"];
-/** ドック枠の名前 (C2)。C1 では型だけを置き、枠の中身は常に空 */
+export const WINDOW_IDS: readonly WindowId[] = ["bar", "list", "settings"];
+/**
+ * ドック枠の名前 (C2.1)。below はプレイヤーの下 (#below の先頭)、side は右の列 (#secondary-inner の先頭。
+ * おすすめ動画の上)
+ */
 export type DockSlotId = "below" | "side";
-const DOCK_SLOT_IDS: readonly DockSlotId[] = ["below", "side"];
-/** 枠に入っている窓 (タブの並び。前から) と、前に出しているタブ (C2) */
-export type DockState = { tabs: WindowId[]; active?: WindowId };
+export const DOCK_SLOT_IDS: readonly DockSlotId[] = ["below", "side"];
+/** 1 つの枠に入っている窓 (タブの並び。前から = 入れた順) と、前に出しているタブ (C2.2) */
+export type DockTabs = { tabs: WindowId[]; active?: WindowId };
+/**
+ * 枠ごとの中身 (C2.6)。窓が 1 つも無い枠は鍵ごと持たない。**型はここに置く** (保存データの検証が使う。
+ * dock.ts に置くと dock.ts → floating-window.ts → このファイルと循環する)。dock.ts は見せ直すだけ
+ */
+export type DockState = Partial<Record<DockSlotId, DockTabs>>;
 
 /** 画面 (viewport) の座標で、窓の左上と大きさ。height が無い窓は高さを中身に任せる */
 export type WindowRect = { left: number; top: number; width: number; height?: number };
@@ -32,17 +40,65 @@ export type WindowLayout = {
   version: 2;
   /** フロートで置いた位置と大きさ。無い窓は最初の位置 (A.2 / C1.3) */
   float: Partial<Record<WindowId, WindowRect>>;
-  /** 枠ごとの、入っている窓 (タブの並び。前から) と前に出しているタブ。C1 では常に空 */
-  docks: Partial<Record<DockSlotId, DockState>>;
+  /**
+   * 枠ごとの、入っている窓 (タブの並び。前から) と前に出しているタブ (C2.6)。**float と両方にある窓は枠に入っている**
+   * (float の値は引き出したときの大きさにだけ使う。C2.1 / C2.4)
+   */
+  docks: DockState;
 };
 export type Viewport = { width: number; height: number };
 /** 掴む場所 (区間・テロップの窓と設定の窓は見出し、バーはつまみ) の箱。窓の左上からの位置 */
 export type GripBox = { left: number; top: number; width: number; height: number };
 export type SizeLimits = { minWidth: number; minHeight?: number };
 
-/** 何も覚えていないときの配置 (3 つとも最初の位置)。呼ぶたびに新しい組を返す (書き換えても共有しない) */
-export function emptyWindowLayout(): WindowLayout {
-  return { version: WINDOW_LAYOUT_VERSION, float: {}, docks: {} };
+/**
+ * 最初の配置 (C2.6): **ドック**。バーは下の枠、区間・テロップの窓と設定の窓は右の枠 (並びは区間・テロップ → 設定)。
+ * 設定のタブは ⚙ で開いている間、区間・テロップのタブはエディットモードで区間がある間だけ出る (隠れた窓のタブは出さない)。
+ * ユーザーが 2026-09-25 に選んだ。**最初の配置はここ 1 か所に置く**: initialWindowLayout (何も覚えていない・壊れた値・
+ * 読めない版)、v1 の読み替え (位置の無い窓)、ダブルクリックの戻し先 (dock.ts の restore に youtube.ts が渡す) がここを見る
+ */
+const INITIAL_DOCKS: DockState = {
+  below: { tabs: ["bar"] },
+  side: { tabs: ["list", "settings"] },
+};
+
+/** 枠の中身を写す (呼び出し側が書き換えても共有しない) */
+function cloneDocks(docks: DockState): DockState {
+  const copy: DockState = {};
+  for (const slot of DOCK_SLOT_IDS) {
+    const entry = docks[slot];
+    if (entry === undefined) continue;
+    copy[slot] =
+      entry.active === undefined
+        ? { tabs: [...entry.tabs] }
+        : { tabs: [...entry.tabs], active: entry.active };
+  }
+  return copy;
+}
+
+/** 最初の配置の枠の写し */
+export function initialDocks(): DockState {
+  return cloneDocks(INITIAL_DOCKS);
+}
+
+/**
+ * 最初の配置の枠から、ids の窓を除いたもの (v1 で位置を覚えていた窓は浮いた窓のまま読む。C2.6)。
+ * 窓が残らない枠は鍵ごと持たない
+ */
+function initialDocksWithout(ids: readonly WindowId[]): DockState {
+  const docks: DockState = {};
+  for (const slot of DOCK_SLOT_IDS) {
+    const tabs = INITIAL_DOCKS[slot]?.tabs.filter((id) => !ids.includes(id)) ?? [];
+    if (tabs.length > 0) docks[slot] = { tabs };
+  }
+  return docks;
+}
+
+/**
+ * 最初の配置の組 (浮いた窓の位置は無く、枠は INITIAL_DOCKS)。呼ぶたびに新しい組を返す (書き換えても共有しない)
+ */
+export function initialWindowLayout(): WindowLayout {
+  return { version: WINDOW_LAYOUT_VERSION, float: {}, docks: initialDocks() };
 }
 
 /*
@@ -97,6 +153,79 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isWindowId(value: unknown): value is WindowId {
+  return typeof value === "string" && (WINDOW_IDS as readonly string[]).includes(value);
+}
+
+/**
+ * その窓をその枠に入れられるか (C2.5)。**バーは右の枠に入れない**: バーの最小の幅 480px (フロートの窓の spec A.1。
+ * 拡大バーの精度) が右の列の幅 (1920x1080 で 544px、1440x795 で 400px 前後) より広く、入れると最小の幅より
+ * 狭くなるか列からはみ出す
+ */
+export function acceptsDock(id: WindowId, slot: DockSlotId): boolean {
+  return !(id === "bar" && slot === "side");
+}
+
+/**
+ * 覚えた枠の中身を読む (C2.6)。**型は保証されない。** 使えないものは捨てて warn する (ほかは使う):
+ *
+ * - 組でない → どの枠も空
+ * - 枠ごと: 組でない・`tabs` が配列でない → その枠を捨てる
+ * - `tabs` の窓: 知らない名前・既に入っている窓 (同じ枠の重複は先頭、別の枠との重複は below → side の先を残す。
+ *   窓は 1 つの枠にしか入らない)・入れられない組み合わせ (右の枠のバー。acceptsDock) を捨てる。残りが無い枠は鍵ごと持たない
+ * - `active` が `tabs` に無ければ無い扱い (前のタブは見えているタブの先頭になる)
+ *
+ * 無いだけ (undefined) なら空として読み、warn しない。知らない枠の名前は黙って無視する (後の版で枠が増えても
+ * 古い版が騒がない。float の知らない窓と同じ)
+ */
+export function parseDockState(value: unknown): DockState {
+  if (value === undefined) return {};
+  if (!isRecord(value)) {
+    console.warn(
+      `[yt-clip] 保存された windowLayout.docks が使えないため、どの窓も枠に入れません: ${JSON.stringify(value)}`,
+    );
+    return {};
+  }
+  const docks: DockState = {};
+  /** 既にどこかの枠に入れた窓。窓は 1 つの枠にしか入らない */
+  const seen = new Set<WindowId>();
+  for (const slot of DOCK_SLOT_IDS) {
+    const entry = value[slot];
+    if (entry === undefined) continue;
+    const rawTabs: unknown = isRecord(entry) ? entry.tabs : undefined;
+    if (!isRecord(entry) || !Array.isArray(rawTabs)) {
+      console.warn(
+        `[yt-clip] 保存された windowLayout.docks.${slot} が使えないため捨てます: ${JSON.stringify(entry)}`,
+      );
+      continue;
+    }
+    const tabs: WindowId[] = [];
+    for (const tab of rawTabs as unknown[]) {
+      if (!isWindowId(tab) || seen.has(tab) || !acceptsDock(tab, slot)) {
+        console.warn(
+          `[yt-clip] 保存された windowLayout.docks.${slot}.tabs の ${JSON.stringify(tab)} を捨てます (知らない窓・重複・入れられない枠)`,
+        );
+        continue;
+      }
+      seen.add(tab);
+      tabs.push(tab);
+    }
+    if (tabs.length === 0) continue;
+    const active = entry.active;
+    if (active === undefined) {
+      docks[slot] = { tabs };
+    } else if (isWindowId(active) && tabs.includes(active)) {
+      docks[slot] = { tabs, active };
+    } else {
+      console.warn(
+        `[yt-clip] 保存された windowLayout.docks.${slot}.active (${JSON.stringify(active)}) が tabs に無いため捨てます`,
+      );
+      docks[slot] = { tabs };
+    }
+  }
+  return docks;
+}
+
 /**
  * 覚えた位置を窓ごとに読む。keys は「保存されている鍵 → 窓の名前」。型と範囲が合わない窓は
  * 捨てて warn する (ほかの窓は使う)。知らない鍵は黙って無視する (後の版で窓が増えても古い版が騒がない)
@@ -130,41 +259,50 @@ const V1_KEYS = [
 const V2_KEYS = WINDOW_IDS.map((id) => [id, id] as const);
 
 /**
- * 覚えた配置を読む (C1.3)。**型は保証されない** (古い版が書いたもの・手で書き換えたもの)。
+ * 覚えた配置を読む (C1.3 / C2.6)。**型は保証されない** (古い版が書いたもの・手で書き換えたもの)。
  *
+ * - 何も覚えていない・組でない → 最初の配置 (ドック。INITIAL_DOCKS)
  * - `version` のキーが無ければ古い形 (v1: `{ bar?, panel? }`)。`bar` → `float.bar`、`panel` → `float.list`
- *   に読み替える。**読み替えた組は書き戻さない** (読み込みは書かない。次に動かしたときに v2 で書く)
- * - `version` が 2 なら v2。`float` と `docks` が組でなければ、組ごと捨てて warn する
+ *   に読み替える。**位置を覚えていた窓は浮いた窓のまま**、位置の無い窓 (`settings` を含む) は最初の配置の枠に入れる
+ *   (A で自分で動かした窓を黙ってドックへ移さない)。**読み替えた組は書き戻さない** (読み込みは書かない。
+ *   次に動かしたときに v2 で書く)
+ * - `version` が 2 なら v2 を書いてあるとおりに読む (`docks: {}` なら 3 つとも浮いた窓)。`float` と `docks` は**無いだけなら空**
+ *   として読む (正しい float まで捨てない)。組でなければ、その部分だけ捨てて warn する。枠の中身は parseDockState が確かめる
  * - それ以外の `version` (後の版が書いた 3 など) は形が分からないので、推測で読まずに warn して最初の配置
  *
- * 窓ごとに型と範囲を確かめ、合わない窓は捨てて最初の位置に戻す。握りつぶさず理由は残す
- * (設定の mergeSettings と同じ作法)。**`docks` の中身はまだ読まない** (枠に入れる経路がまだ無い。
- * タブの並びの検証はドック枠を入れるときに足す)
+ * 窓ごとに型と範囲を確かめ、合わない窓は捨てて warn する。握りつぶさず理由は残す (設定の mergeSettings と同じ作法)。
+ * **同じ窓が float と docks の両方にあれば枠に入る** (float の値は引き出したときの大きさにだけ使うので捨てない。C2.1 / C2.6)
  */
 export function mergeWindowLayout(stored: unknown): WindowLayout {
-  if (stored === undefined) return emptyWindowLayout();
+  if (stored === undefined) return initialWindowLayout();
   if (!isRecord(stored)) {
     console.warn(
-      `[yt-clip] 保存された windowLayout が使えないため最初の位置を使います: ${JSON.stringify(stored)}`,
+      `[yt-clip] 保存された windowLayout が使えないため最初の配置を使います: ${JSON.stringify(stored)}`,
     );
-    return emptyWindowLayout();
+    return initialWindowLayout();
   }
   if (!("version" in stored)) {
-    return { ...emptyWindowLayout(), float: readRects(stored, V1_KEYS, "") };
+    const float = readRects(stored, V1_KEYS, "");
+    const placed = WINDOW_IDS.filter((id) => float[id] !== undefined);
+    return { version: WINDOW_LAYOUT_VERSION, float, docks: initialDocksWithout(placed) };
   }
   if (stored.version !== WINDOW_LAYOUT_VERSION) {
     console.warn(
-      `[yt-clip] 保存された windowLayout の版 (${JSON.stringify(stored.version)}) を読めないため最初の位置を使います`,
+      `[yt-clip] 保存された windowLayout の版 (${JSON.stringify(stored.version)}) を読めないため最初の配置を使います`,
     );
-    return emptyWindowLayout();
+    return initialWindowLayout();
   }
-  if (!isRecord(stored.float) || !isRecord(stored.docks)) {
+  const float: unknown = stored.float === undefined ? {} : stored.float;
+  if (!isRecord(float)) {
     console.warn(
-      `[yt-clip] 保存された windowLayout の float / docks が使えないため最初の位置を使います: ${JSON.stringify(stored)}`,
+      `[yt-clip] 保存された windowLayout.float が使えないため、浮いた窓を最初の位置に置きます: ${JSON.stringify(float)}`,
     );
-    return emptyWindowLayout();
   }
-  return { ...emptyWindowLayout(), float: readRects(stored.float, V2_KEYS, "float.") };
+  return {
+    version: WINDOW_LAYOUT_VERSION,
+    float: isRecord(float) ? readRects(float, V2_KEYS, "float.") : {},
+    docks: parseDockState(stored.docks),
+  };
 }
 
 /**
@@ -250,23 +388,14 @@ function toStored(layout: WindowLayout): WindowLayout {
     const rect = layout.float[id];
     if (rect !== undefined) float[id] = toRect(rect.left, rect.top, rect.width, rect.height);
   }
-  const docks: Partial<Record<DockSlotId, DockState>> = {};
-  for (const slot of DOCK_SLOT_IDS) {
-    const dock = layout.docks[slot];
-    if (dock === undefined) continue;
-    docks[slot] =
-      dock.active === undefined
-        ? { tabs: [...dock.tabs] }
-        : { tabs: [...dock.tabs], active: dock.active };
-  }
-  return { version: WINDOW_LAYOUT_VERSION, float, docks };
+  return { version: WINDOW_LAYOUT_VERSION, float, docks: cloneDocks(layout.docks) };
 }
 
 /**
  * 覚えた配置を読む。
  *
- * ※ 局所例外 (Fail Fast): **読めなくても reject しない。** warn を残して空の組を返し、窓は
- * 最初の位置で出る (spec A.2「読み込みが失敗 (reject) したら console.warn を残して最初の位置で
+ * ※ 局所例外 (Fail Fast): **読めなくても reject しない。** warn を残して最初の配置の組を返し、窓は
+ * 最初の配置で出る (spec A.2「読み込みが失敗 (reject) したら console.warn を残して最初の位置で
  * 出す」)。投げると、呼び出し側が窓を出さないままにする経路を作りうる
  */
 export async function loadWindowLayout(): Promise<WindowLayout> {
@@ -274,8 +403,8 @@ export async function loadWindowLayout(): Promise<WindowLayout> {
     const stored = await chrome.storage.local.get(WINDOW_LAYOUT_KEY);
     return mergeWindowLayout(stored[WINDOW_LAYOUT_KEY]);
   } catch (error) {
-    console.warn(`[yt-clip] 窓の位置を読めないため最初の位置を使います: ${String(error)}`);
-    return emptyWindowLayout();
+    console.warn(`[yt-clip] 窓の配置を読めないため最初の配置を使います: ${String(error)}`);
+    return initialWindowLayout();
   }
 }
 

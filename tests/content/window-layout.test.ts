@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   WINDOW_LAYOUT_KEY,
-  emptyWindowLayout,
+  acceptsDock,
   fitRect,
   initialBarRect,
+  initialWindowLayout,
   loadWindowLayout,
   mergeWindowLayout,
+  parseDockState,
   saveWindowLayout,
   type WindowLayout,
 } from "@/content/window-layout";
@@ -24,15 +26,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** 何も覚えていないときの組 (3 つとも最初の位置) */
+/** 最初の配置 (ドック。spec C2.6): バーは下の枠、区間・テロップの窓と設定の窓は右の枠 */
+const INITIAL: WindowLayout = {
+  version: 2,
+  float: {},
+  docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"] } },
+};
+/** v2 で枠を空に書いてある組 (3 つとも浮いた窓の最初の位置) */
 const EMPTY: WindowLayout = { version: 2, float: {}, docks: {} };
 
 describe("mergeWindowLayout", () => {
-  test("何も覚えていなければ空の組。warn しない", () => {
+  test("何も覚えていなければ最初の配置 (ドック)。warn しない", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout(undefined)).toEqual(EMPTY);
-    expect(emptyWindowLayout()).toEqual(EMPTY);
+    expect(mergeWindowLayout(undefined)).toEqual(INITIAL);
+    expect(initialWindowLayout()).toEqual(INITIAL);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("最初の配置の組は呼ぶたびに新しい (書き換えても次の組に残らない)", () => {
+    const first = initialWindowLayout();
+    first.docks.side?.tabs.push("bar");
+    expect(initialWindowLayout()).toEqual(INITIAL);
   });
 
   test("v2 の組を読む。高さは無くてよい", () => {
@@ -50,21 +64,21 @@ describe("mergeWindowLayout", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  test("古い形 (v1: version が無い) は bar → float.bar、panel → float.list に読み替える。設定の窓は無い扱い", () => {
+  test("古い形 (v1: version が無い) は bar → float.bar、panel → float.list に読み替える。位置のある窓は浮いた窓のまま、設定の窓は最初の配置の枠", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const bar = { left: 24, top: 636, width: 988 };
     const panel = { left: 1024, top: 68, width: 400, height: 500 };
     expect(mergeWindowLayout({ bar, panel })).toEqual({
       version: 2,
       float: { bar, list: panel },
-      docks: {},
+      docks: { side: { tabs: ["settings"] } },
     });
     expect(warn).not.toHaveBeenCalled();
   });
 
-  test("v1 の空の組 (前に全部の窓を戻した) は空の組。warn しない", () => {
+  test("v1 の空の組 (前に全部の窓を戻した) は最初の配置。warn しない", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout({})).toEqual(EMPTY);
+    expect(mergeWindowLayout({})).toEqual(INITIAL);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -88,7 +102,7 @@ describe("mergeWindowLayout", () => {
     expect(mergeWindowLayout({ bar: { left: "24", top: 636, width: 988 }, panel })).toEqual({
       version: 2,
       float: { list: panel },
-      docks: {},
+      docks: { below: { tabs: ["bar"] }, side: { tabs: ["settings"] } },
     });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain("windowLayout.bar");
@@ -118,44 +132,159 @@ describe("mergeWindowLayout", () => {
     expect(warn).toHaveBeenCalledTimes(bad.length);
   });
 
-  test("組でないもの (数値・null・配列) は空の組にして warn する", () => {
+  test("組でないもの (数値・null・配列) は最初の配置にして warn する", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout(42)).toEqual(EMPTY);
-    expect(mergeWindowLayout(null)).toEqual(EMPTY);
-    expect(mergeWindowLayout([])).toEqual(EMPTY);
+    expect(mergeWindowLayout(42)).toEqual(INITIAL);
+    expect(mergeWindowLayout(null)).toEqual(INITIAL);
+    expect(mergeWindowLayout([])).toEqual(INITIAL);
     expect(warn).toHaveBeenCalledTimes(3);
   });
 
-  test("読めない版 (3・1・数でない版) は空の組にして warn する (後の版が書いた形を推測で読まない)", () => {
+  test("読めない版 (3・1・数でない版) は最初の配置にして warn する (後の版が書いた形を推測で読まない)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const bar = { left: 24, top: 636, width: 988 };
-    expect(mergeWindowLayout({ version: 3, float: { bar }, docks: {} })).toEqual(EMPTY);
-    expect(mergeWindowLayout({ version: 1, bar })).toEqual(EMPTY);
-    expect(mergeWindowLayout({ version: "2", float: { bar }, docks: {} })).toEqual(EMPTY);
+    expect(mergeWindowLayout({ version: 3, float: { bar }, docks: {} })).toEqual(INITIAL);
+    expect(mergeWindowLayout({ version: 1, bar })).toEqual(INITIAL);
+    expect(mergeWindowLayout({ version: "2", float: { bar }, docks: {} })).toEqual(INITIAL);
     expect(warn).toHaveBeenCalledTimes(3);
     expect(String(warn.mock.calls[0]?.[0])).toContain("版");
   });
 
-  test("v2 で float か docks が組でなければ、組ごと空にして warn する", () => {
+  test("v2 で float か docks が組でなければ、その部分だけ捨てて warn する (ほかの部分は使う)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(mergeWindowLayout({ version: 2, float: null, docks: {} })).toEqual(EMPTY);
-    expect(mergeWindowLayout({ version: 2, float: {}, docks: 5 })).toEqual(EMPTY);
-    expect(mergeWindowLayout({ version: 2, float: {} })).toEqual(EMPTY);
-    expect(warn).toHaveBeenCalledTimes(3);
+    const bar = { left: 24, top: 636, width: 988 };
+    expect(
+      mergeWindowLayout({ version: 2, float: null, docks: { below: { tabs: ["bar"] } } }),
+    ).toEqual({ version: 2, float: {}, docks: { below: { tabs: ["bar"] } } });
+    expect(mergeWindowLayout({ version: 2, float: { bar }, docks: 5 })).toEqual({
+      version: 2,
+      float: { bar },
+      docks: {},
+    });
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  test("v2 で float か docks が無いだけなら空として読み、warn しない (正しい float を捨てない)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const bar = { left: 24, top: 636, width: 988 };
+    expect(mergeWindowLayout({ version: 2, float: { bar } })).toEqual({
+      version: 2,
+      float: { bar },
+      docks: {},
+    });
+    expect(mergeWindowLayout({ version: 2, docks: { side: { tabs: ["list"] } } })).toEqual({
+      version: 2,
+      float: {},
+      docks: { side: { tabs: ["list"] } },
+    });
+    expect(warn).not.toHaveBeenCalled();
   });
 
   test("知らない窓の名前は黙って無視する (後の版で窓が増えても古い版が騒がない)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(mergeWindowLayout({ version: 2, float: { other: { left: 0 } }, docks: {} })).toEqual(EMPTY);
-    expect(mergeWindowLayout({ other: { left: 0 } })).toEqual(EMPTY);
+    expect(mergeWindowLayout({ other: { left: 0 } })).toEqual(INITIAL);
     expect(warn).not.toHaveBeenCalled();
   });
 
-  test("ドック枠の中身はまだ読まない (空で返す。枠を入れる経路がまだ無い)", () => {
+  test("枠の中身 (タブの並びと前のタブ) を読む", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const stored = {
+      version: 2,
+      float: {},
+      docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "settings" } },
+    };
+    expect(mergeWindowLayout(stored)).toEqual(stored);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("float と docks の両方にある窓は枠に入れ、float の値も残す (引き出したときの大きさに使う)", () => {
+    const list = { left: 1024, top: 68, width: 400, height: 500 };
+    const stored = { version: 2, float: { list }, docks: { side: { tabs: ["list"], active: "list" } } };
+    expect(mergeWindowLayout(stored)).toEqual(stored);
+  });
+
+  test("枠の中身の検証は parseDockState と同じ (右の枠のバーは捨てて warn する)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(
-      mergeWindowLayout({ version: 2, float: {}, docks: { below: { tabs: ["bar"] } } }),
-    ).toEqual(EMPTY);
+      mergeWindowLayout({ version: 2, float: {}, docks: { side: { tabs: ["bar", "list"] } } }),
+    ).toEqual({ version: 2, float: {}, docks: { side: { tabs: ["list"] } } });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("acceptsDock", () => {
+  test("バーは右の枠に入れない。ほかの組み合わせは入れる", () => {
+    expect(acceptsDock("bar", "side")).toBe(false);
+    expect(acceptsDock("bar", "below")).toBe(true);
+    for (const id of ["list", "settings"] as const) {
+      expect(acceptsDock(id, "below")).toBe(true);
+      expect(acceptsDock(id, "side")).toBe(true);
+    }
+  });
+});
+
+describe("parseDockState", () => {
+  test("枠ごとのタブの並びと前のタブを読む", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const docks = { below: { tabs: ["bar", "list"], active: "list" }, side: { tabs: ["settings"] } };
+    expect(parseDockState(docks)).toEqual(docks);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("無ければ空。warn しない", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(parseDockState(undefined)).toEqual({});
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("組でなければ空にして warn する", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (const value of [5, null, [], "side"]) {
+      expect(parseDockState(value)).toEqual({});
+    }
+    expect(warn).toHaveBeenCalledTimes(4);
+  });
+
+  test("組でない枠・tabs が配列でない枠は捨てて warn する。ほかの枠は使う", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(parseDockState({ below: { tabs: "bar" }, side: { tabs: ["list"] } })).toEqual({
+      side: { tabs: ["list"] },
+    });
+    expect(parseDockState({ below: 3 })).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  test("同じ枠の重複は先頭を残し、別の枠にも入っている窓は below の方を残す", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(
+      parseDockState({ below: { tabs: ["list", "list"] }, side: { tabs: ["list", "settings"] } }),
+    ).toEqual({ below: { tabs: ["list"] }, side: { tabs: ["settings"] } });
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  test("知らない窓と、入れられない組み合わせ (右の枠のバー) は捨てて warn する。残りが無い枠は鍵ごと持たない", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(parseDockState({ below: { tabs: ["panel", "bar"] }, side: { tabs: ["bar"] } })).toEqual({
+      below: { tabs: ["bar"] },
+    });
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  test("active が tabs に無ければ無い扱いにして warn する", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(parseDockState({ side: { tabs: ["list"], active: "settings" } })).toEqual({
+      side: { tabs: ["list"] },
+    });
+    expect(parseDockState({ side: { tabs: ["list"], active: 7 } })).toEqual({
+      side: { tabs: ["list"] },
+    });
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  test("知らない枠の名前は黙って無視する (後の版で枠が増えても古い版が騒がない)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(parseDockState({ top: { tabs: ["bar"] } })).toEqual({});
     expect(warn).not.toHaveBeenCalled();
   });
 });
@@ -325,18 +454,18 @@ describe("覚えた配置の保存と読み込み", () => {
     expect(await loadWindowLayout()).toEqual({
       version: 2,
       float: { bar: BAR, list: LIST },
-      docks: {},
+      docks: { side: { tabs: ["settings"] } },
     });
     expect(writes).toBe(0);
     expect(store[WINDOW_LAYOUT_KEY]).toEqual({ bar: BAR, panel: LIST });
   });
 
-  test("読めなければ warn して空の組を返す (最初の位置で出す)", async () => {
+  test("読めなければ warn して最初の配置の組を返す", async () => {
     vi.stubGlobal("chrome", {
       storage: { local: { get: () => Promise.reject(new Error("壊れた")) } },
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(await loadWindowLayout()).toEqual(EMPTY);
+    expect(await loadWindowLayout()).toEqual(INITIAL);
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
@@ -385,5 +514,18 @@ describe("覚えた配置の保存と読み込み", () => {
     if (bar !== undefined) bar.left = 0;
     await saving;
     expect(store[WINDOW_LAYOUT_KEY]).toEqual({ version: 2, float: { bar: BAR }, docks: {} });
+  });
+
+  test("枠の中身も組ごと書く (タブの並びと前のタブ)", async () => {
+    await saveWindowLayout({
+      version: 2,
+      float: { list: LIST },
+      docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "settings" } },
+    });
+    expect(store[WINDOW_LAYOUT_KEY]).toEqual({
+      version: 2,
+      float: { list: LIST },
+      docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "settings" } },
+    });
   });
 });
