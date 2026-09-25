@@ -24,6 +24,15 @@ export type { DockSlotId, DockState } from "@/content/window-layout";
  * 見える)。浮いた窓の位置も知らない: 退避した窓は onEvacuate、引き出した窓は onUndock で youtube.ts が置く
  */
 
+/*
+ * 差す先の実測 (YouTube。2026-09-25 に `npm run check:telop` の「ドック: …」と「窓の位置の出所」で測った):
+ * - 1440x795: プレイヤーの下端 628px、#below の上端 628px (上の余白 0px)、
+ *   #secondary-inner の幅 396px (バーの最小の幅 480px より狭い。C2.5)
+ * - 1920x1080: #secondary-inner の左端 1376px・幅 528px (「窓の位置の出所」の secondaryInner)
+ * - シアターモード (1920x1080): #secondary は動画の下 (top 991px ≥ プレイヤーの下端 967px)、幅 544px
+ * YouTube のレイアウトが変わったら測り直す
+ */
+
 /**
  * 下の枠の上の余白の補正 (px。負で詰める)。1440x795 でバーだけを下の枠に入れたとき、枠の外形が画面に収まる予算は
  * 795 − 628 (プレイヤーの下端の実測) = 167px、バーの窓は約 140px (C2.10)。#below の上の余白が 27px を超えると収まらない

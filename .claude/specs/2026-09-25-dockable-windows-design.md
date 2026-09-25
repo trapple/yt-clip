@@ -556,3 +556,6 @@
 - [plan C2] .claude/plans/2026-09-25-dockable-windows-c2.md (10 タスク、判断メモ 43 項目)。[review:plan/ゼロ context の実装者/fable] 1 往復目 Issues 2 件
   (26eaebd の fitRect の上限 56px と食い違う期待値) → 修正、同時にユーザーの決定でドック既定へ切り替え。2 往復目 Issues 1 件 (setDocked の cssText
   置き換えが配色の --ytc-* を消し、引き出した窓の地が透ける) → replaceStyle で修正。3 往復目 Approved。Gate は付けない
+- [実機 C2] 2026-09-25 check:telop 32 項目通過。#below の上の余白 0px (1440x795。BELOW_SLOT_MARGIN_TOP_PX = 0)、#secondary-inner の幅 396px (1440x795。480px 未満)、シアターモードの #secondary は top 991px (プレイヤーの下端 967px の下)。値は dock.ts のコメント
+- [実装 C2] 差す先そのものが無いとき (C2.7「何もしない」) も、幅 0 と同じく「使えない枠」として退避にした (C2.1 と規則を 1 つにする)。動画ページ以外では 3 つの窓が隠れているので、見た目は「何もしない」と同じ
+- [実機 C2] 1 回目の check:telop で 6 項目が落ちたが、すべて E2E の書き方 (読み込み直した直後 1〜2 秒は ⠿ の点の当たり判定が html にしか当たらない / 保存値の鍵の並びで比べていた) で、製品の変更は無し (4218f85)。読み込み直した直後に当たり判定が効かない Chrome 側の理由は未解明 (人の操作ではまず踏まない)
