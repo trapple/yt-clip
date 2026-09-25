@@ -3,6 +3,7 @@
 import { Blob as NodeBlob } from "node:buffer";
 import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
 import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
+import { ourElements } from "../helpers/our-elements";
 import { decodeBase64 } from "@/shared/base64";
 
 /** 録画結果として流す、最小限の断片化 MP4 */
@@ -540,11 +541,6 @@ function statusText(): string {
 
 function overlay(): HTMLElement | null {
   return document.getElementById("yt-clip-overlay");
-}
-
-/** 拡張が足した要素の数 (マスタースイッチの spec §1 の測り方。窓・ドック枠・帯・プレビューの canvas を覆う) */
-function ourElements(): number {
-  return document.querySelectorAll('[id^="yt-clip-"], [data-role^="dock-"]').length;
 }
 
 /** 拡大バー本体。操作を受け付けるかどうかは pointer-events で決まる */

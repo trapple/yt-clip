@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { ourElements } from "../helpers/our-elements";
 import type { Message } from "@/shared/messages";
 
 /**
@@ -21,10 +22,6 @@ async function flush(): Promise<void> {
   for (let round = 0; round < 6; round += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
-}
-
-function ourElements(): number {
-  return document.querySelectorAll('[id^="yt-clip-"], [data-role^="dock-"]').length;
 }
 
 // import の前に張る (import 時に張られたものも数える)。どれも本物へ通す
