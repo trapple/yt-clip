@@ -8,7 +8,9 @@ export type { WindowRect } from "@/content/window-layout";
  *
  * **枠だけを持つ**: 見出し・本体の箱・右下のつまみ・ドラッグで動かす・大きさを変える・
  * 画面の中に詰める・重なり順・ページの中の枠に入っている間の見た目 (`setDocked`。
- * `.claude/specs/2026-09-25-dockable-windows-design.md` C2.8)。中身と「いつ出すか・最初にどこへ置くか・
+ * `.claude/specs/2026-09-25-dockable-windows-design.md` C2.8)。ドラッグ中は指の位置を `onDragPoint` で
+ * 外へ知らせ (落とし先の当たり判定は dock.ts が持つ)、窓の外の要素 (タブ) で始まったドラッグは
+ * `beginMoveFrom` で窓の移動として続ける (C2.8)。中身と「いつ出すか・最初にどこへ置くか・
  * どの枠に入れるか」は知らない (panel-window.ts・dock.ts・youtube.ts が決める)。3 つの窓で同じ処理を
  * 何度も書かないために 1 つにしている
  */
@@ -104,7 +106,10 @@ export type FloatingWindow = {
    * 窓の外の要素 (dock.ts のタブ) で始まったドラッグを、窓の移動として続ける (C2.8)。捕捉と listener は source に
    * 付ける。event はその時点の pointermove、origin はドラッグの開始点 (タブを押した点。落とし先の距離の起点。C2.3)。
    * **浮いた窓でだけ呼ぶ** (枠に入っている間は throw。先に setDocked(false) で引き出す)。この続きのドラッグは、
-   * 動かさずに離しても置いた場所を onUserMove で知らせる (引き出した窓を「動かしていない窓」にしない)
+   * 動かさずに離しても置いた場所を onUserMove で知らせる (引き出した窓を「動かしていない窓」にしない)。
+   * **source を document に残すのは呼ぶ側の責任**: source が外れる (document から切り離される) と
+   * Pointer Events の捕捉が解けて `lostpointercapture` が届き、ドラッグはその時点で終わる
+   * (whole-branch review M1。C2.4 の「掴んだタブの要素だけは指を離すまで DOM に残す」も同じ理由)
    */
   beginMoveFrom(source: HTMLElement, event: PointerEvent, origin: DragPoint): void;
   destroy(): void;
@@ -123,8 +128,9 @@ export type FloatingWindowOptions = {
   onResetRequest(): void;
   /**
    * 窓を動かすドラッグの指の位置 (C2.3)。**落とし先の当たり判定は dock.ts が持つ** (窓の枠は枠を知らない)。
-   * start は動かし始めたとき (押して離しただけでは呼ばない) に開始点で、move は動くたびに、end は指を離したときに
-   * 呼ぶ。end で true を返したら (枠に引き取った) onUserMove を呼ばない
+   * start は動かし始めたとき (押して離しただけでは呼ばない) に開始点で、move は動くたびに、end は**終わったとき**
+   * (指を離した・pointercancel・lostpointercapture。終わり方は区別しない。取り消しでも画面に出ている状態で確定する
+   * 既存方針と揃える。whole-branch review M2) に呼ぶ。end で true を返したら (枠に引き取った) onUserMove を呼ばない
    */
   onDragPoint?(phase: DragPhase, point: DragPoint): boolean;
   /**

@@ -1965,8 +1965,9 @@ function mount(): void {
   watchPlayerSize();
   if (document.getElementById(BAR_ID) !== null) return;
 
-  // #below にはもう何も置かないが、「動画ページのページができたか」の目印として見続ける
-  // (spec A.3)。まだ無い間にバーを作ると、タイトルもプレイヤーも読めないまま IN を押せる
+  // #below に置くのはドック枠だけ (C2.1。15 行上の dockManager.attach が先頭に差している)。
+  // 中身の根 (BAR_ID) は置かない。「動画ページのページができたか」の目印としては引き続き #below を見る
+  // (spec A.3 / C2.1)。まだ無い間にバーを作ると、タイトルもプレイヤーも読めないまま IN を押せる
   const anchor = document.querySelector(YT_SELECTORS.mountAnchor);
   if (anchor === null) {
     // applyMode が中身の根 (BAR_ID) を外した直後にここで抜けると、バーの窓が中身の無いまま

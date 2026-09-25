@@ -484,6 +484,8 @@ export function createDockManager(options: DockManagerOptions): DockManager {
         current.waitingOut.delete(slot.id);
         continue;
       }
+      // 帯は実際には重ならない (below はプレイヤーの下、side は右の列)。重なる配置になっても
+      // DOCK_SLOT_IDS の順 (below → side) で先に見つかった方が勝つ (whole-branch review 6-5)
       if (armed && !current.waitingOut.has(slot.id) && hit === null) hit = slot.id;
     }
     return hit;
