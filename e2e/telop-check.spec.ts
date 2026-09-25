@@ -1034,11 +1034,29 @@ test("テロップの実機確認", async () => {
       ? (saved.float as Record<string, unknown>)
       : null;
 
+  /**
+   * 点 at の当たり判定が、ページの要素に届くようになるまで待つ。**読み込み直した直後の 1〜2 秒は、窓の上を押しても
+   * 当たり判定が根 (html) にしか当たらない** (実機で、⠿ の箱の中の点の elementsFromPoint が [html] だけを返し、
+   * pointerdown も html に届いた。300ms ほど待つと ⠿ に当たる)。page.mouse は locator の操作と違って当たるまで
+   * 待たないので、押す前にここで待つ。押す点はいつも yt-clip の要素 (⠿・見出し・タブ・つまみ) の上
+   */
+  async function waitForHitTest(at: { x: number; y: number }): Promise<void> {
+    await page.waitForFunction(
+      (point) => {
+        const hit = document.elementFromPoint(point.x, point.y);
+        return hit !== null && hit !== document.documentElement;
+      },
+      at,
+      { timeout: 10_000 },
+    );
+  }
+
   /** from を押して to まで動かして離す。途中も刻んで動かし、pointermove を届ける */
   async function dragFromTo(
     from: { x: number; y: number },
     to: { x: number; y: number },
   ): Promise<void> {
+    await waitForHitTest(from);
     await page.mouse.move(from.x, from.y);
     await page.mouse.down();
     await page.mouse.move(to.x, to.y, { steps: 8 });
@@ -1111,7 +1129,22 @@ test("テロップの実機確認", async () => {
     saved !== null && saved.version === 2 && typeof saved.docks === "object" && saved.docks !== null
       ? (saved.docks as Record<string, unknown>)
       : null;
-  const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  /**
+   * 鍵の順を揃えた JSON (配列の順は残す)。**chrome.storage.local から読んだ値は鍵が名前順に並び替わって返る**
+   * (実機で `{ tabs, active }` と書いたものが `{ active, tabs }` で返った)。鍵の順で食い違わないようにする
+   */
+  const canonical = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(canonical)
+      : value !== null && typeof value === "object"
+        ? Object.fromEntries(
+            Object.keys(value)
+              .sort()
+              .map((key) => [key, canonical((value as Record<string, unknown>)[key])]),
+          )
+        : value;
+  const sameJson = (a: unknown, b: unknown) =>
+    JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
   /** 覚えた配置を書いてから読み込み直す (前提を作る。区間 5 つが残っていることが要る) */
   async function setLayoutAndReload(layout: Record<string, unknown>): Promise<void> {
@@ -1133,6 +1166,7 @@ test("テロップの実機確認", async () => {
    * ドラッグの間だけページの流れに出る)
    */
   async function dropInto(from: Point, detour: Point, slot: Locator): Promise<void> {
+    await waitForHitTest(from);
     await page.mouse.move(from.x, from.y);
     await page.mouse.down();
     await page.mouse.move(detour.x, detour.y, { steps: 8 });
