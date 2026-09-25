@@ -47,6 +47,16 @@ export type WindowLayout = {
   docks: DockState;
 };
 export type Viewport = { width: number; height: number };
+
+/**
+ * 窓を置く・詰める計算に使う画面の大きさ。**スクロールバーを除く** (`document.documentElement.clientWidth` /
+ * `clientHeight`)。`innerWidth` / `innerHeight` はスクロールバーを含むので、右端に寄せた窓の縁や見出しが
+ * スクロールバーの下に潜る (フロートの窓の spec A.1)
+ */
+export function currentViewport(): Viewport {
+  const root = document.documentElement;
+  return { width: root.clientWidth, height: root.clientHeight };
+}
 /** 掴む場所 (区間・テロップの窓と設定の窓は見出し、バーはつまみ) の箱。窓の左上からの位置 */
 export type GripBox = { left: number; top: number; width: number; height: number };
 export type SizeLimits = { minWidth: number; minHeight?: number };

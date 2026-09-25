@@ -6,6 +6,7 @@ import {
   type FloatingWindow,
   type FloatingWindowOptions,
 } from "@/content/floating-window";
+import { stubClientSize } from "../helpers/viewport";
 
 /** jsdom の画面の既定。テストが変えたら afterEach で戻す */
 const DEFAULT_VIEWPORT = { width: 1024, height: 768 };
@@ -123,6 +124,7 @@ function moveEvent(x: number, y: number): PointerEvent {
 }
 
 beforeAll(() => {
+  stubClientSize();
   // jsdom は Pointer Capture を持たない
   Element.prototype.setPointerCapture = (): void => undefined;
   Element.prototype.releasePointerCapture = (): void => undefined;
@@ -133,6 +135,7 @@ afterEach(() => {
   created = [];
   vi.restoreAllMocks();
   setViewport(DEFAULT_VIEWPORT.width, DEFAULT_VIEWPORT.height);
+  stubClientSize();
 });
 
 describe("createFloatingWindow", () => {
@@ -488,6 +491,36 @@ describe("画面の中に詰める", () => {
     setViewport(1024, 768);
     window.dispatchEvent(new Event("resize"));
     expect(frame.rect()).toEqual({ left: 600, top: 100, width: 400 });
+  });
+
+  test("詰めた状態で見出しを動かさずに押して離しても、画面を戻すと置いた場所へ戻る", () => {
+    // クリックしただけで詰めた後の位置を「置いた場所」として覚え直さない
+    const { frame, onUserMove } = makeWindow();
+    vi.spyOn(frame.element, "getBoundingClientRect").mockReturnValue(boxAt(0, 0, 400, 300));
+    vi.spyOn(headerOf(frame), "getBoundingClientRect").mockReturnValue(boxAt(0, 0, 400, 32));
+    frame.place({ left: 600, top: 100, width: 400 });
+    setViewport(900, 768);
+    window.dispatchEvent(new Event("resize"));
+    expect(frame.rect()).toEqual({ left: 500, top: 100, width: 400 });
+
+    drag(headerOf(frame), 0, 0);
+
+    expect(onUserMove).not.toHaveBeenCalled();
+    setViewport(1024, 768);
+    window.dispatchEvent(new Event("resize"));
+    expect(frame.rect()).toEqual({ left: 600, top: 100, width: 400 });
+  });
+
+  test("画面の幅はスクロールバーを除いて数える (右端に寄せても縁がスクロールバーの下に潜らない)", () => {
+    stubClientSize({ width: 15 });
+    const { frame } = makeWindow();
+    vi.spyOn(frame.element, "getBoundingClientRect").mockReturnValue(boxAt(0, 0, 400, 300));
+    vi.spyOn(headerOf(frame), "getBoundingClientRect").mockReturnValue(boxAt(0, 0, 400, 32));
+
+    frame.place({ left: 900, top: 100, width: 400 });
+
+    // 1024 - 15 - 400
+    expect(frame.rect()).toEqual({ left: 609, top: 100, width: 400 });
   });
 
   test("隠れている間に置いた窓は、出すときに掴む場所を測って詰め直す", () => {

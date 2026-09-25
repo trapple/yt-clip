@@ -4,6 +4,7 @@ import { Blob as NodeBlob } from "node:buffer";
 import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
 import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
 import { ourElements } from "../helpers/our-elements";
+import { stubClientSize } from "../helpers/viewport";
 import { decodeBase64 } from "@/shared/base64";
 
 /** 録画結果として流す、最小限の断片化 MP4 */
@@ -754,6 +755,7 @@ let windowsAfterLayout = {
 beforeAll(async () => {
   buildPage();
   installGlobals();
+  stubClientSize();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
   swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
@@ -2462,6 +2464,21 @@ describe("テロップの一覧", () => {
     });
   });
 
+  test("500 文字を超えて送らなかった文言は、次の状態通知でも前の文言に戻さない", async () => {
+    // フォーカスが外れた後の描き直しで telop.text を書くと、打った文字が黙って消える
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+    textarea.value = "あ".repeat(501);
+    textarea.dispatchEvent(new Event("change"));
+
+    // 別の操作 (開始を今に など) の状態通知。文言は前のまま
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [{ ...TELOP, startSec: 12 }] });
+    await flush();
+
+    expect(textarea.value).toBe("あ".repeat(501));
+  });
+
   test("テロップが残っていると最後の 1 区間は消せない", async () => {
     // 区間が 0 個になると idle に戻り、手入力の文言もまとめて消える
     await showReady([TELOP]);
@@ -3205,6 +3222,19 @@ describe("フロートの窓", () => {
       width: "400px",
       height: "",
     });
+  });
+
+  test("スクロールバーが画面の幅を食っていたら、区間・テロップの窓の右端はスクロールバーの左から 16px", () => {
+    // innerWidth はスクロールバーを含む。それで置くと右端の縁と見出しがスクロールバーの下に潜る
+    stubClientSize({ width: 15 });
+    try {
+      dblclick(listHeader());
+      expect(document.documentElement.clientWidth).toBe(window.innerWidth - 15);
+      expect(listElement().style.left).toBe(`${document.documentElement.clientWidth - 416}px`);
+    } finally {
+      stubClientSize();
+      dblclick(listHeader());
+    }
   });
 
   test("設定の窓の最初の位置は、区間・テロップの窓から下へ 32px だけずらす (left は同じ)", () => {

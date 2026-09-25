@@ -61,6 +61,7 @@ import {
   WINDOW_IDS,
   WINDOW_LAYOUT_VERSION,
   acceptsDock,
+  currentViewport,
   initialBarRect,
   initialDocks,
   loadWindowLayout,
@@ -751,20 +752,24 @@ function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
   send({ type: "UPDATE_TELOP", index, telop: next });
 }
 
-/** 文言の確定。改行はそのまま持つ */
-function onTelopText(index: number, text: string): void {
+/**
+ * 文言の確定。改行はそのまま持つ。**送らなかったら false** (一覧はその入力欄を下書きとして
+ * 残し、次の描き直しで前の文言に戻さない)
+ */
+function onTelopText(index: number, text: string): boolean {
   const telop = currentTelops[index];
-  if (telop === undefined || !canEditTelops()) return;
-  if (telop.text === text) return;
+  if (telop === undefined || !canEditTelops()) return false;
+  if (telop.text === text) return true;
   // 状態機械は上限を超えた文言を UI のバグとして拒む。送る前に止めて理由を出す。
   // 入力欄は消さない (削って直してもらう)
   if (text.length > MAX_TELOP_TEXT_LENGTH) {
     setStatus(
       `テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`,
     );
-    return;
+    return false;
   }
   send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
+  return true;
 }
 
 /** そのテロップの頭から再生する。範囲再生の監視は解く (押した場所からの再生が止まる) */
@@ -1133,7 +1138,7 @@ function windowOf(id: WindowId): FloatingWindow {
  * 測る (隠れている窓は 0 になる。そのため出した直後に取り直す: refreshWindows)
  */
 function initialWindowRect(id: WindowId): WindowRect | null {
-  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const viewport = currentViewport();
   if (id === "list") return initialListRect(viewport);
   // 区間・テロップの窓の**最初の位置**から下へずらす。一覧を動かしていても、その位置には付いていかない
   if (id === "settings") return initialSettingsRect(viewport);
@@ -1190,7 +1195,7 @@ function placeUnderPointer(id: WindowId, point: DragPoint, grab: DragPoint | nul
     barWindow.place({ left: point.x - offset.x, top: point.y - offset.y, width });
     return;
   }
-  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const viewport = currentViewport();
   const width = remembered?.width ?? initialListRect(viewport).width;
   const tabX = Math.min(Math.max(grab?.x ?? 0, 0), width);
   const left = point.x - tabX;

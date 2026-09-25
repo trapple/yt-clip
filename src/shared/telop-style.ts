@@ -42,13 +42,21 @@ export const TELOP_FONT_PRESETS = [
  * プリセットの表示名ならその font-family、それ以外はフォント名とみなして
  * ゴシック系に落とす。**名前で指定するだけなら権限は要らない** (Local Font Access
  * が要るのは列挙するときだけ)。表示名を変えると保存済みの値はフォント名扱いに
- * なるが、`sans-serif` に落ちるだけで壊れない
+ * なるが、`sans-serif` に落ちるだけで壊れない。
+ *
+ * **`,` は区切り** (`parseTelopFont` が弾かない理由)。名前ごとに引用符で囲み、最後に
+ * `sans-serif` を足す。全体を 1 組の引用符で囲むと `Arial, Meiryo` という 1 つの名前として
+ * 探され、どちらも使われない。空の名前は捨てる
  */
 export function expandFontFamily(font: string): string {
   const name = font.trim();
   const preset = TELOP_FONT_PRESETS.find((candidate) => candidate.label === name);
   if (preset !== undefined) return preset.family;
-  return `"${name}", sans-serif`;
+  const names = name
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  return [...names.map((part) => `"${part}"`), "sans-serif"].join(", ");
 }
 
 /** `mergeSettings` を通った設定から見た目を組み立てる */

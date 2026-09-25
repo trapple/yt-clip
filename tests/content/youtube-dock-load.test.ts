@@ -2,6 +2,7 @@
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
+import { stubClientSize } from "../helpers/viewport";
 import type { Message } from "@/shared/messages";
 import type { ClipState } from "@/shared/types";
 
@@ -112,6 +113,7 @@ let beforeLoad = { slotsShown: [] as boolean[], windowsHidden: [] as boolean[] }
 
 beforeAll(async () => {
   buildPage();
+  stubClientSize();
   // 差す先に幅を持たせる (jsdom はレイアウトを持たず、幅 0 の枠は使えない扱いになる)
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
     this: Element,
