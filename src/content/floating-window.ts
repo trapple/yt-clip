@@ -7,9 +7,10 @@ export type { WindowRect } from "@/content/window-layout";
  * 画面の上に浮いた窓の枠 (`.claude/specs/2026-09-24-floating-windows-design.md` A.3)。
  *
  * **枠だけを持つ**: 見出し・本体の箱・右下のつまみ・ドラッグで動かす・大きさを変える・
- * 画面の中に詰める・重なり順。中身と「いつ出すか・最初にどこへ置くか」は知らない
- * (panel-window.ts と youtube.ts が決める)。3 つの窓で同じ処理を何度も書かないために
- * 1 つにしている
+ * 画面の中に詰める・重なり順・ページの中の枠に入っている間の見た目 (`setDocked`。
+ * `.claude/specs/2026-09-25-dockable-windows-design.md` C2.8)。中身と「いつ出すか・最初にどこへ置くか・
+ * どの枠に入れるか」は知らない (panel-window.ts・dock.ts・youtube.ts が決める)。3 つの窓で同じ処理を
+ * 何度も書かないために 1 つにしている
  */
 
 /*
@@ -27,8 +28,8 @@ const Z_BASE = 2000;
 const BOTTOM_GAP_PX = 16;
 
 /**
- * 今ある窓の枠を、下から上への順に並べたもの (末尾がいちばん上)。作った窓は**いちばん下**に
- * 入れる。まだ触っていない窓が、触った窓の上に出ないように
+ * 今ある浮いた窓の枠を、下から上への順に並べたもの (末尾がいちばん上)。作った窓は**いちばん下**に
+ * 入れる。まだ触っていない窓が、触った窓の上に出ないように。**ページの中の枠に入っている窓は外す** (setDocked)
  */
 let stack: HTMLElement[] = [];
 
@@ -44,7 +45,7 @@ function raise(target: HTMLElement): void {
 }
 
 /**
- * 押した場所が、掴む場所の中のボタンや入力欄か。**そこでは窓を動かさない** (見出しの右側のボタンを
+ * 押した場所が、掴む場所の中のボタンや入力欄か。**そこでは窓を動かさない** (バーの操作の行のボタンを
  * 押したら、そのボタンの操作だけ。spec A.1)
  */
 function isOnControl(target: EventTarget | null, handle: HTMLElement): boolean {
@@ -59,27 +60,34 @@ function sameRect(a: WindowRect, b: WindowRect): boolean {
 
 export type FloatingWindow = {
   element: HTMLElement;
-  /** 見出しの右側に置く部品の箱 (今は何も置いていない)。見出しの無い窓では null */
-  headerActions: HTMLElement | null;
   /** この要素を押してドラッグすると窓が動く (中のボタンを押したときは動かさない) */
   addDragHandle(element: HTMLElement): void;
   /** 中身の箱。見た目 (余白・スクロール・出し入れ) は中身を入れる側が決める */
   body: HTMLElement;
   setVisible(visible: boolean): void;
-  /** 位置と大きさを置く。画面に収まるよう詰める */
+  /** 位置と大きさを置く。画面に収まるよう詰める。**ページの中の枠に入っている間は当てずに覚えるだけ** */
   place(rect: WindowRect): void;
-  /** 今の位置と大きさ (詰めた後) */
+  /** 今の位置と大きさ (詰めた後)。枠に入っている間は、最後に place で求められた位置と大きさ */
   rect(): WindowRect;
   /**
-   * 最後に place (またはドラッグ) で置いた位置と大きさから、画面に詰め直す (本体を畳む・開くとき)。
-   * place(rect()) で代えない: 詰めた後の位置で置いた場所を上書きし、ブラウザを大きく戻しても戻らない
+   * 最後に place (またはドラッグ) で置いた位置と大きさから、画面に詰め直す (テロップの帯の段が出る・消えて窓の
+   * 高さが変わったとき)。place(rect()) で代えない: 詰めた後の位置で置いた場所を上書きし、ブラウザを大きく戻しても
+   * 戻らない
    */
   refit(): void;
   /**
    * この窓をいちばん上に出す (窓のどこかを押したときと同じ)。押していないのに前に出したいとき
-   * (⚙ で設定の窓を開いたとき) に youtube.ts が呼ぶ
+   * (⚙ で設定の窓を開いたとき) に youtube.ts が呼ぶ。枠に入っている間は何もしない
    */
   bringToFront(): void;
+  /**
+   * ページの中の枠に入れる (true) / 出す (false) (C2.8)。入れている間は `position: static`・幅いっぱい・影なしで
+   * ページの流れに任せ、見出しの行 (文言はタブが持つ) と右下のつまみ (大きさは枠が決める) を隠し、重なり順にも
+   * 加わらない。place / refit / resize では位置を当てず、求められた位置と大きさ (requested) だけを覚える。
+   * 出すと浮いた窓の見た目に戻り、requested から詰めて置き、いちばん上に出す (引き出した窓はいま触っている窓)。
+   * **枠のどこに置くか (DOM の親) は dock.ts が決める**
+   */
+  setDocked(docked: boolean): void;
   destroy(): void;
 };
 
@@ -102,7 +110,6 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
   element.style.cssText = `${FLOATING_WINDOW_STYLE.root}z-index:${Z_BASE};`;
 
   let header: HTMLElement | null = null;
-  let headerActions: HTMLElement | null = null;
   if (options.title !== undefined) {
     header = document.createElement("div");
     header.dataset.role = "window-header";
@@ -110,9 +117,7 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     const title = document.createElement("span");
     title.style.cssText = FLOATING_WINDOW_STYLE.title;
     title.textContent = options.title;
-    headerActions = document.createElement("div");
-    headerActions.style.cssText = FLOATING_WINDOW_STYLE.headerActions;
-    header.append(title, headerActions);
+    header.append(title);
     element.append(header);
   }
 
@@ -133,6 +138,11 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
   let requested: WindowRect = { left: 0, top: 0, width: options.minWidth };
   /** 今の位置と大きさ (画面に詰めた後) */
   let current: WindowRect = requested;
+  /**
+   * ページの中の枠に入っているか (C2.8)。入っている間は位置を当てず (ページの流れが決める)、requested だけを覚える
+   * (引き出したときの大きさを youtube.ts が覚えた float から決めるので、ここの値は使われなくてもよい)
+   */
+  let docked = false;
 
   /**
    * 掴む場所の箱 (窓の左上から)。登録した中で窓の中にある、いちばん新しいもの。
@@ -157,7 +167,22 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     };
   }
 
-  /** 位置と大きさを画面に詰めて当てる */
+  /**
+   * 見た目 (cssText) を丸ごと置き換える。**配色の変数 (`--ytc-*`) は残す**: youtube.ts の applyPalette は同じ要素の inline の
+   * custom property に配色を書くので、cssText の置き換えで消えると `var(--ytc-panel)` などが解決できず、枠から引き出した・
+   * 退避した浮いた窓の地が透け、縁も消える (テーマを切り替えるまで戻らない)。`--` で始まる inline のプロパティを拾って戻す
+   */
+  function replaceStyle(cssText: string): void {
+    const custom: [string, string][] = [];
+    for (let index = 0; index < element.style.length; index += 1) {
+      const name = element.style.item(index);
+      if (name.startsWith("--")) custom.push([name, element.style.getPropertyValue(name)]);
+    }
+    element.style.cssText = cssText;
+    for (const [name, value] of custom) element.style.setProperty(name, value);
+  }
+
+  /** 位置と大きさを画面に詰めて当てる。**枠に入っている間は呼ばない** (呼ぶ側が docked を見る) */
   function apply(rect: WindowRect): void {
     // 幅だけの窓は高さを持たない (覚えた位置に高さが混ざっていても使わない)。高さは中身で決まる
     const source: WindowRect =
@@ -171,9 +196,7 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     element.style.left = `${fitted.left}px`;
     element.style.top = `${fitted.top}px`;
     element.style.width = `${fitted.width}px`;
-    // 本体を隠した窓は見出しだけにする。高さを残すと空の枠が残る (今は本体を隠す者はいない)
-    const bodyShown = !body.hidden;
-    if (fitted.height !== undefined && bodyShown) {
+    if (fitted.height !== undefined) {
       element.style.height = `${fitted.height}px`;
       element.style.maxHeight = "";
     } else {
@@ -186,8 +209,6 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
           ? `${Math.max(options.minHeight ?? 0, viewport.height - fitted.top - BOTTOM_GAP_PX)}px`
           : "";
     }
-    resizeGrip.hidden = !bodyShown;
-    resizeGrip.style.display = bodyShown ? "block" : "none";
   }
 
   /**
@@ -278,8 +299,15 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
   }
 
   // 窓のどこを押しても、その窓を上にする (触った順が新しいほど上。窓の分割の spec C1.1)。捕捉の
-  // 段階で拾うのは、中の部品 (拡大バーのハンドルなど) が伝播を扱っても漏らさないため
-  element.addEventListener("pointerdown", () => raise(element), true);
+  // 段階で拾うのは、中の部品 (拡大バーのハンドルなど) が伝播を扱っても漏らさないため。
+  // **枠に入っている窓は重なり順に加わらない** (押しても、ほかの浮いた窓の順を変えない。C2.8)
+  element.addEventListener(
+    "pointerdown",
+    () => {
+      if (!docked) raise(element);
+    },
+    true,
+  );
   resizeGrip.addEventListener("pointerdown", (event: PointerEvent) => {
     beginDrag(resizeGrip, "resize", event);
   });
@@ -287,9 +315,12 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
 
   /**
    * ブラウザの大きさが変わったら、掴む場所が画面に残るよう詰め直す。**詰めた後の位置ではなく
-   * 置いた場所 (requested) から詰める** (小さくしてから戻すと、置いた場所に戻る)
+   * 置いた場所 (requested) から詰める** (小さくしてから戻すと、置いた場所に戻る)。枠に入っている間は
+   * ページの流れが決めるので詰めない
    */
-  const onResize = (): void => apply(requested);
+  const onResize = (): void => {
+    if (!docked) apply(requested);
+  };
   window.addEventListener("resize", onResize);
   stack = [element, ...stack];
 
@@ -300,7 +331,6 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
 
   return {
     element,
-    headerActions,
     body,
     addDragHandle,
 
@@ -308,29 +338,54 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
       const wasHidden = element.hidden;
       // 出し入れは hidden と style.display の両方で行う。root は flex で並べるので display を
       // 持ち、inline の display は UA の [hidden] { display: none } に勝つ。hidden は外から
-      // 「出ているか」を読むために残す
+      // 「出ているか」を読むために残す (dock.ts もタブを出すかをこれで決める)
       element.hidden = !visible;
       element.style.display = visible ? "flex" : "none";
       // 隠れている間は掴む場所の寸法が 0 で、詰め方を測れていない。出した直後に詰め直す。
-      // **出ている間は置き直さない** (ドラッグ中に状態の通知で呼ばれても、指の下の窓を戻さない)
-      if (visible && wasHidden) apply(requested);
+      // **出ている間は置き直さない** (ドラッグ中に状態の通知で呼ばれても、指の下の窓を戻さない)。
+      // 枠に入っている間は位置を当てない
+      if (visible && wasHidden && !docked) apply(requested);
     },
 
     place(rect: WindowRect): void {
       requested = { ...rect };
-      apply(requested);
+      // 枠に入っている間は覚えるだけ。位置はページの流れが決める
+      if (!docked) apply(requested);
     },
 
     rect(): WindowRect {
-      return { ...current };
+      // 枠に入っている間は画面の位置を持たない。覚えている (求められた) 位置と大きさを返す
+      return docked ? { ...requested } : { ...current };
     },
 
     refit(): void {
-      apply(requested);
+      if (!docked) apply(requested);
     },
 
     bringToFront(): void {
-      raise(element);
+      if (!docked) raise(element);
+    },
+
+    setDocked(next: boolean): void {
+      if (next === docked) return;
+      docked = next;
+      // cssText を置き換えると出し入れ (setVisible) の display も消えるので、今の出し入れを当て直す
+      const display = element.hidden ? "none" : "flex";
+      if (docked) {
+        // 重なり順から外す。ページの流れの中の要素に z-index は効かず、押してもほかの浮いた窓の順を変えない
+        stack = stack.filter((candidate) => candidate !== element);
+        replaceStyle(FLOATING_WINDOW_STYLE.docked);
+      } else {
+        replaceStyle(FLOATING_WINDOW_STYLE.root);
+        // 引き出した窓はいま触っている窓なので、いちばん上に出す (z-index もここで当て直す)
+        raise(element);
+      }
+      element.style.display = display;
+      // 見出しの文言はタブが持ち、大きさは枠が決める (C2.8)
+      if (header !== null) header.style.display = docked ? "none" : "flex";
+      resizeGrip.hidden = docked;
+      resizeGrip.style.display = docked ? "none" : "";
+      if (!docked) apply(requested);
     },
 
     destroy(): void {

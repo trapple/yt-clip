@@ -101,6 +101,12 @@ function resizeGripOf(frame: FloatingWindow): HTMLElement {
   return grip;
 }
 
+/** 窓の枠に当てた位置と大きさ */
+function styleOf(frame: FloatingWindow): { left: string; top: string; width: string; height: string } {
+  const { left, top, width, height } = frame.element.style;
+  return { left, top, width, height };
+}
+
 beforeAll(() => {
   // jsdom は Pointer Capture を持たない
   Element.prototype.setPointerCapture = (): void => undefined;
@@ -144,19 +150,16 @@ describe("createFloatingWindow", () => {
     expect(frame.element.style.display).toBe("none");
   });
 
-  test("見出しのある窓は、見出しの文言と右側の部品の箱を持つ", () => {
+  test("見出しのある窓は、見出しの文言を持つ", () => {
     const { frame } = makeWindow({ title: "yt-clip" });
     const header = headerOf(frame);
-    expect(header.textContent).toContain("yt-clip");
-    expect(frame.headerActions).not.toBeNull();
-    expect(header.contains(frame.headerActions)).toBe(true);
+    expect(header.textContent).toBe("yt-clip");
     expect(frame.element.contains(frame.body)).toBe(true);
   });
 
   test("見出しの無い窓は見出しの行を作らない", () => {
     const { frame } = makeWindow({ title: undefined });
     expect(frame.element.querySelector("[data-role='window-header']")).toBeNull();
-    expect(frame.headerActions).toBeNull();
   });
 
   test("place で位置と大きさを置き、rect で読める", () => {
@@ -225,7 +228,7 @@ describe("ドラッグで動かす", () => {
     const { frame, onUserMove } = makeWindow();
     frame.place({ left: 100, top: 100, width: 400 });
     const button = document.createElement("button");
-    frame.headerActions?.append(button);
+    headerOf(frame).append(button);
 
     pointer(button, "pointerdown", 10, 10);
     pointer(button, "pointermove", 60, 50);
@@ -389,21 +392,6 @@ describe("大きさを変える", () => {
   test("右下のつまみのカーソルは向きで変える (幅だけは ew-resize)", () => {
     expect(resizeGripOf(makeWindow().frame).style.cursor).toBe("nwse-resize");
     expect(resizeGripOf(makeBarLikeWindow().frame).style.cursor).toBe("ew-resize");
-  });
-
-  test("本体を隠した窓は高さを持たず、右下のつまみも隠す。出し直すと高さが戻る", () => {
-    const { frame } = makeWindow();
-    frame.place({ left: 100, top: 100, width: 400, height: 300 });
-
-    frame.body.hidden = true;
-    frame.place(frame.rect());
-    expect(frame.element.style.height).toBe("");
-    expect(resizeGripOf(frame).hidden).toBe(true);
-
-    frame.body.hidden = false;
-    frame.place(frame.rect());
-    expect(frame.element.style.height).toBe("300px");
-    expect(resizeGripOf(frame).hidden).toBe(false);
   });
 });
 
@@ -578,7 +566,7 @@ describe("重なり順とダブルクリック", () => {
   test("見出しのダブルクリックで onResetRequest を呼ぶ。見出しの中のボタンでは呼ばない", () => {
     const { frame, onResetRequest } = makeWindow();
     const button = document.createElement("button");
-    frame.headerActions?.append(button);
+    headerOf(frame).append(button);
 
     dblclick(button);
     expect(onResetRequest).not.toHaveBeenCalled();
@@ -591,5 +579,109 @@ describe("重なり順とダブルクリック", () => {
     const { grip, onResetRequest } = makeBarLikeWindow();
     dblclick(grip);
     expect(onResetRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ページの中の枠に入れる (setDocked)", () => {
+  test("setDocked(true) でページの流れの中の見た目になり、見出しと右下のつまみを隠す", () => {
+    const { frame } = makeWindow();
+    frame.place({ left: 100, top: 100, width: 400, height: 300 });
+
+    frame.setDocked(true);
+
+    expect(frame.element.style.position).toBe("static");
+    expect(frame.element.style.width).toBe("100%");
+    expect(frame.element.style.left).toBe("");
+    expect(frame.element.style.top).toBe("");
+    expect(frame.element.style.height).toBe("");
+    expect(frame.element.style.zIndex).toBe("auto");
+    // 出ている窓は出たまま (出し入れは setVisible が持つ)
+    expect(frame.element.style.display).toBe("flex");
+    expect(headerOf(frame).style.display).toBe("none");
+    expect(resizeGripOf(frame).hidden).toBe(true);
+  });
+
+  test("隠れている窓は、入れても隠れたまま", () => {
+    const { frame } = makeWindow();
+    frame.setVisible(false);
+    frame.setDocked(true);
+    expect(frame.element.hidden).toBe(true);
+    expect(frame.element.style.display).toBe("none");
+  });
+
+  test("ドック中の place は位置を当てず、求められた位置と大きさを覚える (rect はその値)", () => {
+    const { frame } = makeWindow();
+    frame.setDocked(true);
+
+    frame.place({ left: 10, top: 60, width: 500, height: 200 });
+
+    expect(frame.element.style.left).toBe("");
+    expect(frame.element.style.width).toBe("100%");
+    expect(frame.rect()).toEqual({ left: 10, top: 60, width: 500, height: 200 });
+  });
+
+  test("ドック中は window の resize でも refit でも詰めない", () => {
+    const { frame } = makeWindow();
+    frame.setDocked(true);
+    setViewport(300, 300);
+    window.dispatchEvent(new Event("resize"));
+    frame.refit();
+    expect(frame.element.style.left).toBe("");
+    expect(frame.element.style.position).toBe("static");
+  });
+
+  test("setDocked(false) で浮いた窓に戻り、覚えた位置と大きさから詰めて置き、いちばん上に出す", () => {
+    const other = makeWindow().frame;
+    const { frame } = makeWindow();
+    frame.setDocked(true);
+    // 上端は 60 (fitRect は YouTube のヘッダーの下 56px より上へ詰めるので、詰められない値で測る)
+    frame.place({ left: 10, top: 60, width: 500, height: 200 });
+    pointer(other.body, "pointerdown", 0, 0);
+
+    frame.setDocked(false);
+
+    expect(frame.element.style.position).toBe("fixed");
+    expect(styleOf(frame)).toEqual({ left: "10px", top: "60px", width: "500px", height: "200px" });
+    expect(headerOf(frame).style.display).toBe("flex");
+    expect(resizeGripOf(frame).hidden).toBe(false);
+    expect(Number(frame.element.style.zIndex)).toBeGreaterThan(Number(other.element.style.zIndex));
+  });
+
+  test("ドック中の窓は重なり順に加わらない (押しても bringToFront でも、ほかの浮いた窓の順を変えない)", () => {
+    const a = makeWindow().frame;
+    const b = makeWindow().frame;
+    const c = makeWindow().frame;
+    c.setDocked(true);
+    pointer(a.body, "pointerdown", 0, 0);
+    expect([a.element.style.zIndex, b.element.style.zIndex]).toEqual(["2001", "2000"]);
+
+    pointer(c.body, "pointerdown", 0, 0);
+    c.bringToFront();
+
+    expect([a.element.style.zIndex, b.element.style.zIndex]).toEqual(["2001", "2000"]);
+    expect(c.element.style.zIndex).toBe("auto");
+  });
+
+  test("入れても出しても、窓に当てた配色の変数 (--ytc-*) は残す (消えると浮いた窓の地と縁が透ける)", () => {
+    const { frame } = makeWindow();
+    // youtube.ts の applyPalette と同じく、窓の要素の inline の custom property に配色を書く
+    frame.element.style.setProperty("--ytc-panel", "#212121");
+    frame.element.style.setProperty("--ytc-border", "#5a5a5a");
+
+    frame.setDocked(true);
+    expect(frame.element.style.getPropertyValue("--ytc-panel")).toBe("#212121");
+
+    frame.setDocked(false);
+    expect(frame.element.style.getPropertyValue("--ytc-panel")).toBe("#212121");
+    expect(frame.element.style.getPropertyValue("--ytc-border")).toBe("#5a5a5a");
+    expect(frame.element.style.position).toBe("fixed");
+  });
+
+  test("同じ値で呼んでも何もしない (浮いた窓に setDocked(false) で、重なり順を変えない)", () => {
+    const a = makeWindow().frame;
+    const b = makeWindow().frame;
+    pointer(a.body, "pointerdown", 0, 0);
+    b.setDocked(false);
+    expect([a.element.style.zIndex, b.element.style.zIndex]).toEqual(["2001", "2000"]);
   });
 });

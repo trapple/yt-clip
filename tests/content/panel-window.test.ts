@@ -82,7 +82,6 @@ describe("createPanelWindow", () => {
     const target = makeWindow({ title: "設定" });
     expect(headerOf(target).textContent).toBe("設定");
     expect(target.element.querySelector("[data-role='collapse']")).toBeNull();
-    expect(target.frame.headerActions?.children.length).toBe(0);
   });
 
   test("setVisible で出し入れする", () => {

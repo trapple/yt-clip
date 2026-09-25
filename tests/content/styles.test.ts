@@ -152,6 +152,25 @@ describe("フロートの窓", () => {
     expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("width:16px");
     expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("height:16px");
   });
+
+  test("ドック中はページの流れの中 (static)・幅いっぱい・影なし・角丸 8px・z-index auto。display は持たない", () => {
+    const docked = FLOATING_WINDOW_STYLE.docked;
+    for (const rule of [
+      "position:static",
+      "width:100%",
+      "box-shadow:none",
+      "border-radius:8px",
+      "z-index:auto",
+      "background:var(--ytc-panel)",
+    ]) {
+      expect(docked).toContain(rule);
+    }
+    expect(docked).not.toContain("display");
+  });
+
+  test("見出しの右側の部品の箱は持たない (置く部品が無い)", () => {
+    expect("headerActions" in FLOATING_WINDOW_STYLE).toBe(false);
+  });
 });
 
 describe("バーの窓", () => {

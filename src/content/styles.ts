@@ -207,7 +207,7 @@ export const PANEL_WINDOW_STYLE = {
 /**
  * フロートの窓の枠 (`floating-window.ts`)。バーの窓・区間・テロップの窓・設定の窓で同じものを使う。
  *
- * **`root` と `resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
+ * **`root`・`docked`・`resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
  * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の display が
  * 勝って出たままになる。位置・大きさ・重なり順も `floating-window.ts` が決める
  */
@@ -215,14 +215,17 @@ export const FLOATING_WINDOW_STYLE = {
   /** 下のページが透けると読めないので、不透明な地と影を付ける */
   root: `position:fixed;flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
   /**
+   * ページの中の枠に入っている間 (窓の分割の spec C2.8)。**ページの流れの中** (static) で枠の幅いっぱい。
+   * ページに埋まるので影は付けず、角丸は枠に合わせて小さくする。z-index は効かないので auto
+   */
+  docked: `position:static;flex-direction:column;box-sizing:border-box;width:100%;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:8px;box-shadow:none;z-index:auto;font-family:${FONT};font-size:13px;`,
+  /**
    * 見出し。空いたところを掴んで動かす。文字を選べると、掴んだつもりで選択が始まる。
    * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
    */
   header:
     "display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:move;user-select:none;touch-action:none;",
   title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
-  /** 見出しの右側の部品の箱。ボタンの上では窓を動かさないので、掴めそうなカーソルを出さない */
-  headerActions: "display:flex;align-items:center;gap:4px;cursor:default;",
   /**
    * 右下の角のつまみ (16px 四方。spec A.1)。カーソルは窓の向き (幅だけ / 幅と高さ) で
    * `floating-window.ts` が足す
