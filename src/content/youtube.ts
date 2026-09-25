@@ -32,7 +32,7 @@ import {
   type RecorderHandle,
 } from "@/content/recorder";
 import { createSegmentList, type SegmentList } from "@/content/segment-list";
-import { createDockManager } from "@/content/dock";
+import { createDockManager, type DockManager } from "@/content/dock";
 import {
   createFloatingWindow,
   type DragPoint,
@@ -44,11 +44,13 @@ import {
   createPanelWindow,
   initialListRect,
   initialSettingsRect,
+  type PanelWindow,
 } from "@/content/panel-window";
 import { createTelopList, type TelopList } from "@/content/telop-list";
-import { createTelopPreview } from "@/content/telop-preview";
+import { createTelopPreview, type TelopPreview } from "@/content/telop-preview";
 import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
 import { YT_SELECTORS } from "@/content/selectors";
+import { createSwitchDriver } from "@/content/switch-driver";
 import {
   TelopRenderError,
   assertTelopRenderable,
@@ -59,6 +61,7 @@ import {
   WINDOW_IDS,
   WINDOW_LAYOUT_VERSION,
   acceptsDock,
+  currentViewport,
   initialBarRect,
   initialDocks,
   loadWindowLayout,
@@ -151,8 +154,12 @@ let selectedIndex = -1;
 let mode: ClipMode = "simple";
 let segmentList: SegmentList | null = null;
 let telopList: TelopList | null = null;
-/** プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため) */
-const telopPreview = createTelopPreview();
+/**
+ * プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため)。
+ * **オンの間だけある** (マスタースイッチの spec §2.1): start() が作り、stop() が destroy する (canvas・video の seeked・
+ * rVFC・ResizeObserver を外す)。`!` の意味は下の listWindow と同じ
+ */
+let telopPreview!: TelopPreview;
 /**
  * 覚えた位置 (chrome.storage.local) の読み込みが済んだか。**済むまで 3 つの窓を出さない**
  * (spec A.2)。最初の位置に出してから覚えた位置へ跳ぶ絵にしない。読めなかったときも済んだ
@@ -178,72 +185,90 @@ const floatLayout: Partial<Record<WindowId, WindowRect>> = {};
 /**
  * 区間・テロップの窓。区間の一覧とテロップの一覧を入れる (窓の分割の spec C1.1)。
  *
- * **1 つを使い回す。** 窓の位置を持つので、バーを作り直すたびに作り直さない。中身の入れ替えは
- * `buildBar`、body への付け直しは `mount`、出すかの判定は `refreshWindows` が行う
+ * **オンの間は 1 つを使い回す。** 窓の位置を持つので、バーを作り直すたびに作り直さない。中身の入れ替えは
+ * `buildBar`、body への付け直しは `mount`、出すかの判定は `refreshWindows` が行う。
+ *
+ * **オンの間だけある** (マスタースイッチの spec §2.1)。start() の createWindows が作り、stop() が destroy する。
+ * `!` は「start() が必ず先に作る」の意味: 触る経路 (mount・refreshWindows・listener) はすべて start() の中か、start() が
+ * 張った listener から呼ばれる。stop() の後に古い参照へ触る非同期の続きは isCurrentRun で断つ (判断メモ 6・7)
  */
-const listWindow = createPanelWindow({
-  id: LIST_WINDOW_ID,
-  title: WINDOW_TITLES.list,
-  onUserMove: (rect) => rememberWindowRect("list", rect),
-  onResetRequest: () => resetWindow("list"),
-  // 見出しのドラッグの落とし先の当たり判定 (C2.3)。枠に引き取られたら onUserMove は来ない
-  onDragPoint: (phase, point) => dockManager.drag("list", phase, point) !== null,
-});
-// 窓は body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
-applyPalette(listWindow.element, isDarkTheme());
+let listWindow!: PanelWindow;
 /**
  * 設定の窓。設定パネル (`settings-panel.ts`) を入れ、⚙ で開閉する (C1.2)。**閉じるボタン (×) は
  * 置かない** (右側パネルの spec で不採用にしたのと同じ。閉じ方を ⚙ の 1 つにする)。使い回すのは
- * 区間・テロップの窓と同じ理由
+ * 区間・テロップの窓と同じ理由。オンの間だけあるのも同じ
  */
-const settingsWindow = createPanelWindow({
-  id: SETTINGS_WINDOW_ID,
-  title: WINDOW_TITLES.settings,
-  onUserMove: (rect) => rememberWindowRect("settings", rect),
-  onResetRequest: () => resetWindow("settings"),
-  onDragPoint: (phase, point) => dockManager.drag("settings", phase, point) !== null,
-});
-applyPalette(settingsWindow.element, isDarkTheme());
+let settingsWindow!: PanelWindow;
 /**
  * バーの窓。拡大バーと操作の行 (中身の根 #yt-clip-bar) を入れる。
  *
- * **1 つを使い回す** (spec A.3)。モードを変えてバーを作り直しても窓は作り直さないので、
+ * **オンの間は 1 つを使い回す** (spec A.3)。モードを変えてバーを作り直しても窓は作り直さないので、
  * 位置と大きさは変わらない。見出しの行は作らず、操作の行の左端のつまみ (⠿) で動かす
- * (見出しの行ぶん高くなると、1440x795 でプレイヤーの下端を覆うため。spec A.1)
+ * (見出しの行ぶん高くなると、1440x795 でプレイヤーの下端を覆うため。spec A.1)。オンの間だけあるのも同じ
  */
-const barWindow = createFloatingWindow({
-  id: BAR_WINDOW_ID,
-  resize: "width",
-  minWidth: BAR_MIN_WIDTH_PX,
-  onUserMove: (rect) => rememberWindowRect("bar", rect),
-  onResetRequest: () => resetWindow("bar"),
-  onDragPoint: (phase, point) => dockManager.drag("bar", phase, point) !== null,
-  // 枠に入ったバーは ⠿ を 8px 動かすと引き出す (バーだけの枠にはタブが無く、⠿ が唯一の掴む場所。C2.4)
-  onUndockRequest: (point, grab) => {
-    dockManager.undock("bar");
-    placeUnderPointer("bar", point, grab);
-  },
-});
-// バーの窓も body の直下にあり、ページの配色は継がれない
-applyPalette(barWindow.element, isDarkTheme());
+let barWindow!: FloatingWindow;
 /**
  * ページの中のドック枠 2 か所 (プレイヤーの下・おすすめ動画の上) とタブ (窓の分割の spec C2)。
- * **枠の中だけを持つ**: 窓を出す条件は refreshWindows、浮いた窓の位置は placeInitial / placeUnderPointer が決める
+ * **枠の中だけを持つ**: 窓を出す条件は refreshWindows、浮いた窓の位置は placeInitial / placeUnderPointer が決める。
+ * オンの間だけあるのも同じ (枠は #below / #secondary-inner に差さるので、オフのページには残さない)
  */
-const dockManager = createDockManager({
-  windows: { bar: barWindow, list: listWindow.frame, settings: settingsWindow.frame },
-  titles: WINDOW_TITLES,
-  // 最初の配置 (ドック。window-layout.ts の INITIAL_DOCKS)。ダブルクリックの戻し先
-  initial: initialDocks(),
-  accepts: acceptsDock,
-  // タブから引き出した窓を指の下に置く。バーはタブの中の位置ではなく ⠿ の位置で置く (C2.4)
-  onUndock: (id, point, grab) => placeUnderPointer(id, point, id === "bar" ? null : grab),
-  onTabDoubleClick: (id) => resetWindow(id),
-  onEvacuate: (id) => placeInitial(id),
-  onChange: () => persistWindowLayout(),
-});
-// 枠は #below / #secondary-inner の中にあるが、YouTube の CSS 変数には頼らない (配色は自前で持つ)
-for (const slot of Object.values(dockManager.elements)) applyPalette(slot, isDarkTheme());
+let dockManager!: DockManager;
+
+/**
+ * 3 つの窓とドック枠を作る (start() の最初)。**import 時には作らない**: createFloatingWindow は window の resize を張り、
+ * ドック枠は mount で YouTube の要素に差さる。オフで読み込まれたページにはどれも残さない (マスタースイッチの spec §1)
+ */
+function createWindows(): void {
+  listWindow = createPanelWindow({
+    id: LIST_WINDOW_ID,
+    title: WINDOW_TITLES.list,
+    onUserMove: (rect) => rememberWindowRect("list", rect),
+    onResetRequest: () => resetWindow("list"),
+    // 見出しのドラッグの落とし先の当たり判定 (C2.3)。枠に引き取られたら onUserMove は来ない。
+    // オフの後 (ドラッグ中に片付けて lostpointercapture が届いた) に破棄済みの枠を当てない判断は
+    // dockManager.drag 自身が持つ (dock.ts の destroy。3 つとも同じ)
+    onDragPoint: (phase, point) => dockManager.drag("list", phase, point) !== null,
+  });
+  // 窓は body の直下でバーの外にある。バーの配色は継がれないので自分で持つ
+  applyPalette(listWindow.element, isDarkTheme());
+  settingsWindow = createPanelWindow({
+    id: SETTINGS_WINDOW_ID,
+    title: WINDOW_TITLES.settings,
+    onUserMove: (rect) => rememberWindowRect("settings", rect),
+    onResetRequest: () => resetWindow("settings"),
+    onDragPoint: (phase, point) => dockManager.drag("settings", phase, point) !== null,
+  });
+  applyPalette(settingsWindow.element, isDarkTheme());
+  barWindow = createFloatingWindow({
+    id: BAR_WINDOW_ID,
+    resize: "width",
+    minWidth: BAR_MIN_WIDTH_PX,
+    onUserMove: (rect) => rememberWindowRect("bar", rect),
+    onResetRequest: () => resetWindow("bar"),
+    onDragPoint: (phase, point) => dockManager.drag("bar", phase, point) !== null,
+    // 枠に入ったバーは ⠿ を 8px 動かすと引き出す (バーだけの枠にはタブが無く、⠿ が唯一の掴む場所。C2.4)
+    onUndockRequest: (point, grab) => {
+      dockManager.undock("bar");
+      placeUnderPointer("bar", point, grab);
+    },
+  });
+  // バーの窓も body の直下にあり、ページの配色は継がれない
+  applyPalette(barWindow.element, isDarkTheme());
+  dockManager = createDockManager({
+    windows: { bar: barWindow, list: listWindow.frame, settings: settingsWindow.frame },
+    titles: WINDOW_TITLES,
+    // 最初の配置 (ドック。window-layout.ts の INITIAL_DOCKS)。ダブルクリックの戻し先
+    initial: initialDocks(),
+    accepts: acceptsDock,
+    // タブから引き出した窓を指の下に置く。バーはタブの中の位置ではなく ⠿ の位置で置く (C2.4)
+    onUndock: (id, point, grab) => placeUnderPointer(id, point, id === "bar" ? null : grab),
+    onTabDoubleClick: (id) => resetWindow(id),
+    onEvacuate: (id) => placeInitial(id),
+    onChange: () => persistWindowLayout(),
+  });
+  // 枠は #below / #secondary-inner の中にあるが、YouTube の CSS 変数には頼らない (配色は自前で持つ)
+  for (const slot of Object.values(dockManager.elements)) applyPalette(slot, isDarkTheme());
+}
 /** 設定パネル。⚙ の開閉と、設定の窓を出すかの判定の両方が読む。`buildBar` が作る */
 let settingsPanel: SettingsPanel | null = null;
 /**
@@ -298,6 +323,8 @@ let rangeBar: RangeBar | null = null;
 let telopTrack: TelopTrack | null = null;
 /** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
 let playheadWatched = false;
+/** 再生位置のループの rAF の handle。止めるのは stop() (オフの間に rAF を残さない。spec §1) */
+let playheadFrame = 0;
 /**
  * 1 クリップの最大長 (秒)。設定から読む。
  *
@@ -308,6 +335,39 @@ let playheadWatched = false;
  */
 let maxClipSec = DEFAULT_MAX_CLIP_SEC;
 let handle: RecorderHandle | null = null;
+
+/** start() から stop() までの間か (マスタースイッチの spec §2.1)。二度の start()・走っていない stop() を見分ける */
+let running = false;
+/**
+ * start() と stop() のたびに進める回の番号。**非同期の続き (storage の読み・service worker の応答・seek の完了) は、
+ * 始めたときの番号と今の番号が同じときだけ画面と動画に触る** (isCurrentRun)。オフにした後や、オフ → オンで作り直した後に
+ * 古い続きが届いて、片付けた窓を描き直す・帯を差す・再生を始める・監視を張る、をしない (オフの間は 0。spec §1。判断メモ 7)
+ */
+let runId = 0;
+
+/** 続きを始めたときの番号 id が、今走っている回のものか */
+function isCurrentRun(id: number): boolean {
+  return running && id === runId;
+}
+
+/**
+ * このタブで録画の準備・録画・書き出しが走っているか (マスタースイッチの spec §4.1)。**立っている間はオフでも stop を
+ * 待つ** (driver の canStop)。
+ *
+ * **状態機械の busy ではない**: busy は応答で受け取った写しで、録画していない別の YouTube タブでも真になる。そのタブには
+ * state/changed が届かない (router は録画対象のタブにしか同報しない) ので、busy でオフを待たせると永久に片付かない。
+ *
+ * 立てる / 下ろすのは state/changed を受けたとき (届いた = このタブが録画対象。busy の間は立つ)。ほかに下ろすのは、
+ * オフの中止 (cancelForSwitch) の応答が busy でないときと、録画の結末 (notifyOutcome) を送り終えたとき。応答
+ * (send・content/loaded) では変えない (録画していないタブにも返る)。handle だけでは prepareRecording の seek 中を拾えない
+ */
+let capturing = false;
+/**
+ * `capturing` が偽 → 真に立った回数 (= このタブで始まった録画の数)。オフのための中止の応答が、送った後に始まった
+ * **別の録画** より古いかを見分ける (cancelForSwitch。判断メモ 33)。受けた state/changed の数では数えない: 同じ録画の中の
+ * seeking → recording の進みでも応答を捨ててしまい、ready の同報が届かなければ永久に待つ
+ */
+let captureRun = 0;
 
 /**
  * 状態機械へイベントを送る。
@@ -320,9 +380,12 @@ function send(
   event: ClipEvent,
   accepted?: (state: ClipState) => boolean,
 ): void {
+  // 応答が届くまでにオフにした・作り直したら、画面に触らない (isCurrentRun の doc)
+  const id = runId;
   void chrome.runtime
     .sendMessage({ type: "clip/event", event } satisfies Message)
     .then((response: MessageResponse | undefined) => {
+      if (!isCurrentRun(id)) return;
       if (response === undefined) {
         setStatus("拡張から応答がありませんでした");
         return;
@@ -337,6 +400,7 @@ function send(
       );
     })
     .catch((error: unknown) => {
+      if (!isCurrentRun(id)) return;
       setStatus(`操作を送信できませんでした: ${String(error)}`);
     });
 }
@@ -348,17 +412,48 @@ function send(
  * 無効化で送れなかったとき、黙って捨てると service worker は `encoding` のまま、
  * popup は `actions: []` で操作不能になる。ユーザーに見せたうえで、小さい
  * `FAIL` を送って状態を抜けさせる。
+ *
+ * **送り終えたら resolve する** (届いても、届かずに FAIL を送り出した後でも。reject しない)。録画の結末を送り終えた
+ * 時点を notifyOutcome が知るため
  */
-function notify(message: Message): void {
-  void chrome.runtime.sendMessage(message).catch((error: unknown) => {
-    setStatus(`拡張への送信に失敗しました: ${String(error)}`);
-    // 成果物を渡せていない以上、録画が中断されたのと結果は同じ
-    send({ type: "FAIL", reason: "recording-aborted" });
-  });
+function notify(message: Message): Promise<void> {
+  return chrome.runtime.sendMessage(message).then(
+    () => undefined,
+    (error: unknown) => {
+      setStatus(`拡張への送信に失敗しました: ${String(error)}`);
+      // 成果物を渡せていない以上、録画が中断されたのと結果は同じ
+      send({ type: "FAIL", reason: "recording-aborted" });
+    },
+  );
+}
+
+/**
+ * 録画の結末 (recorder/done・recorder/failed) を送る。**送り終えたら、このタブの録画は終わり** (spec §4.1)。オフを
+ * 待っていたなら、ここで片付けてよい。state/changed (preview / failed) は待たない: service worker が応答を返さないときに
+ * 永久に待たないため。届かなかったときは notify が FAIL を送り出した後に片付ける (FAIL の応答は待たない。判断メモ 4)
+ */
+function notifyOutcome(message: Message): void {
+  void notify(message).then(endCapture);
+}
+
+/** このタブの録画が終わった。オフを待っていたなら、ここで stop() が走る */
+function endCapture(): void {
+  capturing = false;
+  driver.reconcile();
+}
+
+/**
+ * バーの中身 (中身の根とその中の部品) を id で引く。**バーの窓の中を探し、文書につながっているかは見ない** (spa-inject ③)。
+ * 動画ページ以外では窓をページから外し、差す先 (#below) が一時的に外れるとバーは外れた枠の中に残る。document から
+ * 引くとその間は「バーが無い」ことになり、出す判断 (refreshWindows) と作り直しの判断 (mount) が食い違い、届いた状態も
+ * 描かれない。窓はオンの間 1 つを使い回すので、窓の中を見れば足りる
+ */
+function barPart(id: string): HTMLElement | null {
+  return barWindow.body.querySelector<HTMLElement>(`#${id}`);
 }
 
 function setStatus(text: string): void {
-  const status = document.getElementById(`${BAR_ID}-status`);
+  const status = barPart(`${BAR_ID}-status`);
   if (status !== null) {
     status.textContent = text;
     // 1 行に省略して出すので、全文はマウスを乗せたときに読めるようにする
@@ -575,7 +670,7 @@ function applyMode(next: ClipMode): void {
   const settingsWasOpen = settingsPanel?.element.hidden === false;
   // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
   // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
-  document.getElementById(BAR_ID)?.remove();
+  barPart(BAR_ID)?.remove();
   mount();
   // 開いていたなら、⚙ と同じ経路 (開く → refreshWindows → 前に出す)
   // で新しい設定パネルを開き直す。保存済みの値は toggle の fill が入れ直すので、
@@ -667,20 +762,24 @@ function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
   send({ type: "UPDATE_TELOP", index, telop: next });
 }
 
-/** 文言の確定。改行はそのまま持つ */
-function onTelopText(index: number, text: string): void {
+/**
+ * 文言の確定。改行はそのまま持つ。**送らなかったら false** (一覧はその入力欄を下書きとして
+ * 残し、次の描き直しで前の文言に戻さない)
+ */
+function onTelopText(index: number, text: string): boolean {
   const telop = currentTelops[index];
-  if (telop === undefined || !canEditTelops()) return;
-  if (telop.text === text) return;
+  if (telop === undefined || !canEditTelops()) return false;
+  if (telop.text === text) return true;
   // 状態機械は上限を超えた文言を UI のバグとして拒む。送る前に止めて理由を出す。
   // 入力欄は消さない (削って直してもらう)
   if (text.length > MAX_TELOP_TEXT_LENGTH) {
     setStatus(
       `テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`,
     );
-    return;
+    return false;
   }
   send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
+  return true;
 }
 
 /** そのテロップの頭から再生する。範囲再生の監視は解く (押した場所からの再生が止まる) */
@@ -876,14 +975,20 @@ async function onSeekPlay(sec: number): Promise<void> {
  * その手順はここ 1 箇所に置く
  */
 async function seekAndPlay(sec: number): Promise<HTMLVideoElement | null> {
+  const id = runId;
   try {
     // getVideo() を try の外に置くと、同期的な throw が Promise の拒否になり、
     // 呼び出し元の `void ...` で握り潰されてボタンが無反応に見える
     const video = getVideo();
     await seekTo(video, sec);
+    // seek を待つ間にオフにしたら、再生を始めない。null を返すので、呼び出し側 (playRange) も範囲の監視 (rVFC) を
+    // 張らない (オフの間は video に触らない。spec §1)。始めてしまった seek は止められない
+    if (!isCurrentRun(id)) return null;
     await startPlayback(video);
+    if (!isCurrentRun(id)) return null;
     return video;
   } catch (error) {
+    if (!isCurrentRun(id)) return null;
     setStatus(`再生できませんでした: ${String(error)}`);
     return null;
   }
@@ -930,7 +1035,9 @@ function clearOverlay(): void {
 
 /** 帯を今の範囲に合わせ直す。範囲が無い・別の動画を見ているなら消す */
 function refreshOverlay(): void {
-  if (currentSegments.length === 0 || rangeVideoId !== currentVideoId()) {
+  // 動画ページ以外では差さない (範囲を作った動画が分からない写しでも。spa-inject)
+  const videoId = currentVideoId();
+  if (currentSegments.length === 0 || videoId === null || rangeVideoId !== videoId) {
     clearOverlay();
     return;
   }
@@ -960,7 +1067,9 @@ function refreshTelopPreview(): void {
     if (!(error instanceof ElementNotFoundError)) throw error;
     video = null;
   }
-  const visible = mode === "edit" && rangeVideoId === currentVideoId();
+  // 動画ページ以外では canvas を差さない (spa-inject)
+  const videoId = currentVideoId();
+  const visible = mode === "edit" && videoId !== null && rangeVideoId === videoId;
   telopPreview.update(video, visible ? currentTelops : [], telopStyle);
 }
 
@@ -991,7 +1100,7 @@ function makeButton(
  * 出さない方が「いま何ができるか」がそのまま画面に出る
  */
 function renderActions(kind: ClipState["kind"]): void {
-  const box = document.getElementById(ACTIONS_ID);
+  const box = barPart(ACTIONS_ID);
   if (box === null) return;
 
   box.replaceChildren(
@@ -1043,7 +1152,7 @@ function windowOf(id: WindowId): FloatingWindow {
  * 測る (隠れている窓は 0 になる。そのため出した直後に取り直す: refreshWindows)
  */
 function initialWindowRect(id: WindowId): WindowRect | null {
-  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const viewport = currentViewport();
   if (id === "list") return initialListRect(viewport);
   // 区間・テロップの窓の**最初の位置**から下へずらす。一覧を動かしていても、その位置には付いていかない
   if (id === "settings") return initialSettingsRect(viewport);
@@ -1100,7 +1209,7 @@ function placeUnderPointer(id: WindowId, point: DragPoint, grab: DragPoint | nul
     barWindow.place({ left: point.x - offset.x, top: point.y - offset.y, width });
     return;
   }
-  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const viewport = currentViewport();
   const width = remembered?.width ?? initialListRect(viewport).width;
   const tabX = Math.min(Math.max(grab?.x ?? 0, 0), width);
   const left = point.x - tabX;
@@ -1114,15 +1223,20 @@ function placeUnderPointer(id: WindowId, point: DragPoint, grab: DragPoint | nul
 
 /** バーの窓の中の ⠿ の中心 (窓の左上から)。⠿ が無ければ窓の左上 */
 function barGripCenter(): DragPoint {
-  const grip = document.getElementById(BAR_ID)?.querySelector("[data-role='grip']");
+  const grip = barPart(BAR_ID)?.querySelector("[data-role='grip']");
   if (grip == null) return { x: 0, y: 0 };
   const frame = barWindow.element.getBoundingClientRect();
   const box = grip.getBoundingClientRect();
   return { x: box.left - frame.left + box.width / 2, y: box.top - frame.top + box.height / 2 };
 }
 
-/** ドック枠を差す先 (C2.1)。右の枠は #secondary-inner、無ければ #secondary */
+/**
+ * ドック枠を差す先 (C2.1)。右の枠は #secondary-inner、無ければ #secondary。
+ * **動画ページ以外では差す先が無いものとして渡す** (dock.ts の attach が枠をページから外す)。YouTube は動画ページから
+ * ホームへ移っても隠れた #below / #secondary-inner を残すので、要素の有無ではなく URL で決める (C2.7 の spa-inject の追記)
+ */
 function dockAnchors(): Record<DockSlotId, Element | null> {
+  if (currentVideoId() === null) return { below: null, side: null };
   let side: Element | null = null;
   for (const selector of YT_SELECTORS.dockSide) {
     side = document.querySelector(selector);
@@ -1139,8 +1253,13 @@ function currentWindowLayout(): WindowLayout {
   return { version: WINDOW_LAYOUT_VERSION, float: { ...floatLayout }, docks: dockManager.state() };
 }
 
-/** 覚える配置を組ごと保存する */
+/**
+ * 覚える配置を組ごと保存する。**走っている間だけ効く** (保存の唯一の口)。ドラッグ中にオフにすると、外れた掴む場所へ
+ * lostpointercapture が届いて onUserMove や dock の onChange がここへ来る。オフでは floatLayout を空にしてあるので、
+ * 保存すると他の窓の覚えた位置を消す
+ */
 function persistWindowLayout(): void {
+  if (!running) return;
   void saveWindowLayout(currentWindowLayout()).catch((error: unknown) => {
     // 覚えられないだけで、今の画面の窓は置いた場所にある。次に開くと前に覚えた配置で出る
     console.warn(`窓の位置を保存できませんでした: ${String(error)}`);
@@ -1149,6 +1268,10 @@ function persistWindowLayout(): void {
 
 /** ユーザーが窓を動かした・大きさを変えた (指を離した時点で 1 回)。次に開いたときも同じ位置に出す */
 function rememberWindowRect(id: WindowId, rect: WindowRect): void {
+  // **走っている間だけ効く。** ドラッグ中にオフにすると、外れた掴む場所へ lostpointercapture が届いて onUserMove が
+  // ここへ来る。先へ進むと、退避中の窓は undock で body へ出し直され、片付けた窓がオフのページに戻る。
+  // オフでは floatLayout も空にしてあるので書かない (persistWindowLayout の guard だけでは undock を止められない)
+  if (!running) return;
   floatLayout[id] = { ...rect };
   // 退避中 (入っている枠が使えない間の浮いた窓) の窓を動かしたら、その時点で浮いた窓になる (枠の記憶からも外す。
   // C2.1)。外すと onChange で組ごと保存されるので、ここでは保存しない
@@ -1176,8 +1299,9 @@ function resetWindow(id: WindowId): void {
  * 3 つの窓 (バーの窓・区間・テロップの窓・設定の窓) を出すか隠すかを決める。**`setVisible` を
  * 呼ぶのはここだけ** (右側パネルの spec §4 を 3 つの窓へ広げた。窓の分割の spec C1.2)。
  *
- * どれも隠すのは、覚えた位置を読み込む前 / 全画面 / 動画ページ以外。そのうえで、バーは中身の根
- * (BAR_ID) がある間、区間・テロップの窓は一覧のどちらかが見えている間 (一覧は中身が無いと自分で
+ * どれも隠すのは、覚えた位置を読み込む前 / 全画面 / 動画ページ以外 (動画ページ以外ではページからも外す。
+ * leaveVideoPage)。そのうえで、バーは中身の根 (BAR_ID) がバーの窓の中にある間 (文書につながっているかは見ない。
+ * barPart)、区間・テロップの窓は一覧のどちらかが見えている間 (一覧は中身が無いと自分で
  * 隠れる)、設定の窓は ⚙ で開いている間 (設定パネルの `hidden` が偽) だけ出す
  */
 function refreshWindows(): void {
@@ -1190,13 +1314,18 @@ function refreshWindows(): void {
   // 動画の上に残りうるので、全画面では出さない
   const fullscreen = document.fullscreenElement != null;
   const onVideoPage = currentVideoId() !== null;
+  if (!onVideoPage) {
+    leaveVideoPage();
+    return;
+  }
   // 覚えた位置を読む前に出すと、最初の位置に出てから覚えた位置へ跳ぶ絵になる (spec A.2)
-  const canShow = layoutReady && !fullscreen && onVideoPage;
+  const canShow = layoutReady && !fullscreen;
 
   const barWasHidden = barWindow.element.hidden;
   const listWasHidden = listWindow.element.hidden;
   const settingsWasHidden = settingsWindow.element.hidden;
-  barWindow.setVisible(canShow && document.getElementById(BAR_ID) !== null);
+  // 中身があるかで見る (文書につながっているかは見ない。barPart)
+  barWindow.setVisible(canShow && barPart(BAR_ID) !== null);
   listWindow.setVisible(canShow && listShown);
   settingsWindow.setVisible(canShow && settingsOpen);
   // 出す条件が変わったら、枠のタブ・枠の出し入れ・退避を合わせる (C2.2 / C2.7)。**出した直後の取り直しより先に:**
@@ -1208,6 +1337,36 @@ function refreshWindows(): void {
   if (barWasHidden && !barWindow.element.hidden) placeInitial("bar");
   if (listWasHidden && !listWindow.element.hidden) placeInitial("list");
   if (settingsWasHidden && !settingsWindow.element.hidden) placeInitial("settings");
+}
+
+/**
+ * 動画ページ以外へ移った (または動画ページ以外で読み込まれた)。**ページに何も差さない** (C2.7 の spa-inject の追記):
+ * 3 つの窓を隠してページから外し、ドック枠も外す (dockAnchors が null を渡す)。窓・枠の中身・覚えた位置・記憶はメモリに
+ * 残り、動画ページへ戻ると mount (と onPageMutated の付け直し) が差し直す。**sync は呼ばない**: 使えない枠の窓を
+ * body へ退避させてしまう。再生位置のループも止める (ホームで毎フレーム回さない。戻れば mount が張り直す)。
+ * シークバーの帯とプレビューの canvas は、それぞれの refresh が動画ページ以外では外す
+ */
+function leaveVideoPage(): void {
+  barWindow.setVisible(false);
+  listWindow.setVisible(false);
+  settingsWindow.setVisible(false);
+  dockManager.attach(dockAnchors());
+  for (const id of WINDOW_IDS) windowOf(id).element.remove();
+  stopPlayheadWatch();
+}
+
+/**
+ * 浮いた窓を body の直下に付け直す。**使える枠に入っている窓は枠の中のまま** (枠ごと差し直すのは attach)。
+ * #below の中だと YouTube の再描画で外れ、body の子を差し替えられると窓だけが外れる。動画ページ以外から戻ったとき
+ * (leaveVideoPage が外した) もここで戻す
+ */
+function attachWindowsToBody(): void {
+  for (const id of WINDOW_IDS) {
+    const slot = dockManager.slotOf(id);
+    if (slot !== null && dockManager.isUsable(slot)) continue;
+    const frame = windowOf(id).element;
+    if (frame.parentElement !== document.body) document.body.append(frame);
+  }
 }
 
 /**
@@ -1458,6 +1617,8 @@ async function prepareRecording(
   startSec: number,
   expectedVideoId: string,
 ): Promise<void> {
+  // seek を待つ間にオフにして中止が通ったら、SEEK_DONE を送らない (オフの間は何も送らない。spec §1)
+  const id = runId;
   try {
     // 前の準備の残りで合成しない。以下のどの経路で抜けても、録画に使う
     // テロップは下で決め直したものか null になる
@@ -1480,7 +1641,9 @@ async function prepareRecording(
     // **テロップの有無で録画の経路を決め、描けるかをここで確かめる。**
     // `beginRecording` で気付くと、router が理由を問わず recording-aborted に
     // 落とすので専用の文言が出ない。見た目もここで固定する (録画中に変えても効かない)
-    if (hasRenderableTelops(currentTelops, currentSegments)) {
+    // **エディットモードのときだけ合成する。** シンプルモードでは一覧もプレビューも
+    // 出ないので、状態にテロップが残っていても焼き込むと画面に無い文字がクリップに入る
+    if (mode === "edit" && hasRenderableTelops(currentTelops, currentSegments)) {
       // 隠れたまま始めると、最初のフレームから映像が止まる。**描けるかより先に
       // 見る。** 隠れた窓では動画がデコードされず videoWidth が 0 になり
       // (テロップ spec §9.1)、先に「動画の大きさがまだ分かりません」が出て
@@ -1530,10 +1693,12 @@ async function prepareRecording(
 
     video.pause();
     await seekTo(video, startSec);
+    if (!isCurrentRun(id)) return;
 
     send({ type: "SEEK_DONE" });
     setStatus(`${qualityNote}録画の準備をしています…`);
   } catch (error) {
+    if (!isCurrentRun(id)) return;
     if (error instanceof DrmProtectedError) {
       send({ type: "FAIL", reason: "drm-protected" });
       setStatus(error.message);
@@ -1555,6 +1720,8 @@ async function prepareRecording(
 
 /** service worker からの指示で録画を始める */
 async function beginRecording(): Promise<void> {
+  // 録画の準備 (startRecording) を待つ間にオフにしたかを見る (isCurrentRun)
+  const id = runId;
   // 録画が始まらなかったときに合成を残さないよう、try の外で持つ
   let videoOverride: Compositor | undefined;
   try {
@@ -1592,14 +1759,23 @@ async function beginRecording(): Promise<void> {
       videoOverride,
       onUnexpectedStop: (error) => {
         handle = null;
-        notify({ type: "recorder/failed", reason: error.message });
+        notifyOutcome({ type: "recorder/failed", reason: error.message });
       },
     });
-    notify({ type: "recorder/started" });
+    // 録画の準備を待っている間に片付いた (オフにして中止が通った)。始まった録画はここで捨てる。残すと、オフのページで
+    // MediaRecorder と captureStream が回り続ける (spec §1)。合成は録画の解放に繋がっているので一緒に止まる
+    if (!isCurrentRun(id)) {
+      abortRecording();
+      return;
+    }
+    void notify({ type: "recorder/started" });
   } catch (error) {
     // release は二度呼んでも安全 (startRecording の中で解放済みのことがある)
     videoOverride?.release();
-    notify({ type: "recorder/failed", reason: String(error) });
+    // 録画の準備を待っている間に片付いた (オフにして中止が通った)。状態機械はもう ready に戻っているので、失敗を伝えて
+    // failed に落とさない。オフのページから送らない (spec §1)
+    if (!isCurrentRun(id)) return;
+    notifyOutcome({ type: "recorder/failed", reason: String(error) });
   }
 }
 
@@ -1611,11 +1787,15 @@ async function beginRecording(): Promise<void> {
  * MP4 の結合が要る
  */
 async function runRecording(segments: ClipRange[]): Promise<void> {
+  const id = runId;
   try {
     const video = getVideo();
     await startPlayback(video);
+    // 再生を待つ間にオフにして中止が通ったら、OUT の監視 (rVFC) をオフのページに張らない
+    if (!isCurrentRun(id)) return;
     watchSegmentEnd(video, segments, 0);
   } catch (error) {
+    if (!isCurrentRun(id)) return;
     send({ type: "FAIL", reason: "playback-failed" });
     setStatus(`再生を開始できませんでした: ${String(error)}`);
   }
@@ -1673,13 +1853,19 @@ async function advanceToSegment(
   }
 
   const recorder = handle;
+  // 継ぎ目の seek と再生を待つ間にオフにして中止が通ったら、続きを走らせない (isCurrentRun)
+  const id = runId;
   try {
     recorder.pause();
     video.pause();
     setStatus(`${index + 1} / ${segments.length} 区間目へ移動中…`);
 
     await seekTo(video, segment.startSec);
+    // オフのページで再生を始めない・waitForFreshFrame の rVFC を張らない (spec §1)。下の handle の確かめは
+    // waitForFreshFrame の後なので、それより前で断つ
+    if (!isCurrentRun(id)) return;
     await startPlayback(video);
+    if (!isCurrentRun(id)) return;
     await waitForFreshFrame(video);
 
     // **待っている間に録画が捨てられていないか確かめる。** 中止や失敗で
@@ -1700,6 +1886,8 @@ async function advanceToSegment(
     recorder.resume();
     watchSegmentEnd(video, segments, index);
   } catch (error) {
+    // オフにした後の seek の失敗 (時間切れ) を service worker へ送らない (オフの間は 0 件。spec §1)
+    if (!isCurrentRun(id)) return;
     send({ type: "FAIL", reason: "seek-failed" });
     setStatus(`${FAILURE_MESSAGES["seek-failed"]}: ${String(error)}`);
   }
@@ -1708,7 +1896,7 @@ async function advanceToSegment(
 /** 録画を止めて結果を送る。拡張の IndexedDB は content script から触れない */
 async function finishRecording(): Promise<void> {
   if (handle === null) {
-    notify({ type: "recorder/failed", reason: "録画が開始されていません" });
+    notifyOutcome({ type: "recorder/failed", reason: "録画が開始されていません" });
     return;
   }
 
@@ -1737,13 +1925,13 @@ async function finishRecording(): Promise<void> {
       }
     }
 
-    notify({
+    notifyOutcome({
       type: "recorder/done",
       base64: encodeBase64(bytes),
       mimeType: blob.type,
     });
   } catch (error) {
-    notify({ type: "recorder/failed", reason: String(error) });
+    notifyOutcome({ type: "recorder/failed", reason: String(error) });
   }
 }
 
@@ -1920,9 +2108,19 @@ function watchPlayhead(): void {
       // ここで投げると監視が止まり、以降ずっと更新されなくなる
       rangeBar?.setPlayhead(null);
     }
-    requestAnimationFrame(step);
+    playheadFrame = requestAnimationFrame(step);
   };
-  requestAnimationFrame(step);
+  playheadFrame = requestAnimationFrame(step);
+}
+
+/**
+ * 再生位置のループを止める (stop())。今までは止める口が無かった (content script はページと一緒に消えるだけだった)。
+ * 次の start() の mount が張り直す
+ */
+function stopPlayheadWatch(): void {
+  if (playheadFrame !== 0) cancelAnimationFrame(playheadFrame);
+  playheadFrame = 0;
+  playheadWatched = false;
 }
 
 /**
@@ -1938,8 +2136,8 @@ function placeUnmovedWindows(): void {
 
 /** 大きさを見ているプレイヤー。**SPA 遷移や再描画で要素が替わる**ので、mount のたびに確かめる */
 let observedPlayer: Element | null = null;
-/** プレイヤーの大きさの変化 (シアターモードの切り替えなど) を拾う */
-const playerObserver = new ResizeObserver(() => placeUnmovedWindows());
+/** プレイヤーの大きさの変化 (シアターモードの切り替えなど) を拾う。オンの間だけある (start() が作り、stop() が外す) */
+let playerObserver!: ResizeObserver;
 
 function watchPlayerSize(): void {
   const player = document.querySelector(YT_SELECTORS.player);
@@ -1950,20 +2148,25 @@ function watchPlayerSize(): void {
 }
 
 function mount(): void {
+  // 動画ページ以外ではページに何も差さない (C2.7 の spa-inject の追記)。バーも組み立てない (タイトルもプレイヤーも無い)
+  if (currentVideoId() === null) {
+    refreshWindows();
+    return;
+  }
   // ドック枠を差す先に付け直す (C2.7)。YouTube が子を作り直すと枠ごと外れる。使えるかが変わったら
   // (1 列表示になった・戻った・差す先が消えた) 窓を出し直す (退避 / 枠へ戻す)。**バーの有無より先に見る**
   if (dockManager.attach(dockAnchors())) refreshWindows();
-  // 浮いた窓は body の直下に置く (#below の中だと YouTube の再描画で外れる)。**バーの有無より先に見る。**
-  // body の子を差し替えられると窓だけが外れる。**使える枠に入っている窓は枠の中のまま** (枠ごと差し直すのは attach)
-  for (const id of WINDOW_IDS) {
-    const slot = dockManager.slotOf(id);
-    if (slot !== null && dockManager.isUsable(slot)) continue;
-    const frame = windowOf(id).element;
-    if (frame.parentElement !== document.body) document.body.append(frame);
-  }
+  // 浮いた窓を body の直下に置く。**バーの有無より先に見る**
+  attachWindowsToBody();
   // **バーの有無より先に見る。** バーを作り直さなくても、プレイヤーの要素だけが替わることがある
   watchPlayerSize();
-  if (document.getElementById(BAR_ID) !== null) return;
+  // 再生位置の監視も同じ。動画ページ以外へ移ると leaveVideoPage が止めるので、戻ったとき (バーは残っている) に張り直す
+  if (!playheadWatched) {
+    playheadWatched = true;
+    watchPlayhead();
+  }
+  // 出す判断 (refreshWindows) と同じく、窓の中に中身があるかで見る (barPart)
+  if (barPart(BAR_ID) !== null) return;
 
   // #below に置くのはドック枠だけ (C2.1。15 行上の dockManager.attach が先頭に差している)。
   // 中身の根 (BAR_ID) は置かない。「動画ページのページができたか」の目印としては引き続き #below を見る
@@ -1988,13 +2191,6 @@ function mount(): void {
 
   // 窓の中身だけを入れ替える。窓は作り直さないので、位置も大きさも変わらない (spec A.3)
   barWindow.body.replaceChildren(bar);
-
-  // 監視は 1 度だけ張る。mount は DOM 変化のたびに呼ばれるので、
-  // ここで毎回張ると同じ更新が何本も走る
-  if (!playheadWatched) {
-    playheadWatched = true;
-    watchPlayhead();
-  }
 
   // 作り直したバーは空で無効の状態。確定済みの範囲があれば載せ直す
   rangeBar?.setEnabled(canAdjustRange());
@@ -2026,7 +2222,14 @@ function mount(): void {
  * 直列 queue の中で応答を待つため、応答が遅れると以降のメッセージが 1 つも
  * 処理されなくなり、拡張を再読み込みするまで復帰できない。
  */
-chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) => {
+function onRuntimeMessage(
+  message: Message,
+  _sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+): void {
+  // 外し損ねたときの防御 (マスタースイッチの spec §8)。stop() が listener を外すので普段は来ない。来ても、片付けた
+  // 窓・帯・canvas を描き直さない
+  if (!running) return;
   if (message.type === "recorder/start") {
     sendResponse();
     void beginRecording();
@@ -2040,7 +2243,18 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
   if (message.type !== "state/changed") return;
   sendResponse();
 
-  const state = message.state;
+  // state/changed は録画対象のタブにしか届かない (router は captureTabId にだけ同報する)。busy の間は、このタブで
+  // 録画の準備・録画・書き出しが走っている (capturing の doc。判断メモ 13)
+  const nextCapturing = BUSY_KINDS.has(message.state.kind);
+  if (nextCapturing && !capturing) captureRun += 1;
+  capturing = nextCapturing;
+  handleStateChanged(message.state);
+  // 状態を処理し終えた。オフを待っていたなら、ここで片付けてよくなったかもしれない (spec §4.1)
+  driver.reconcile();
+}
+
+/** 状態の通知を画面と録画に反映する (onRuntimeMessage の state/changed) */
+function handleStateChanged(state: ClipState): void {
   applyStateToDisplay(state);
 
   // ready を離れたら範囲再生の監視は用済み。残すと、旧 OUT 位置を通過した
@@ -2070,7 +2284,50 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
   if (state.kind === "recording") {
     void runRecording(state.segments);
   }
-});
+}
+
+/**
+ * オフにしたが、このタブで録画が走っているので stop を待たされた (driver が待ちに入るたびに 1 回呼ぶ。spec §4.1)。
+ *
+ * - seeking / recording: 中止 (CANCEL_RECORDING) を送る。バーの「■ 中止」と同じ経路で、区間とテロップは残り ready に戻る
+ * - encoding: 何もしない。**書き出しが終わるまで待つ**: ここで録画を捨てると recorder/done が送られず、service worker が
+ *   encoding で固まる。書き出しの結末を送り終えたら notifyOutcome が reconcile する
+ */
+function onStopDeferred(): void {
+  if (lastKind !== "seeking" && lastKind !== "recording") return;
+  cancelForSwitch();
+}
+
+/**
+ * オフのための中止を送る。**応答の状態が busy でなければ、state/changed を待たずに片付ける** (判断メモ 1): router の同報は
+ * 送りっぱなしで、届かなかったときに永久に待たないため。state/changed (ready) が先に届けば、そちらで片付く。
+ * 中止が拒まれた (既に encoding へ進んでいた) ときは応答が busy のままなので、書き出しの結末を待つ。
+ * 送れなかった (拡張が読み込み直されて受け手が居ない) ときは、待っても結末は届かないので片付ける
+ */
+function cancelForSwitch(): void {
+  const id = runId;
+  const run = captureRun;
+  /**
+   * この応答が古くなったか (判断メモ 33)。オフ → オンで作り直した後か、送った後に別の録画が始まった (オフを待つ間に
+   * オンへ戻して録り直した) なら、新しい録画の状態が正なので応答で旗を下ろさない。同じ録画の中の seeking → recording
+   * の進みでは捨てない (応答の口は同報が失われても片付くためにある。判断メモ 1)
+   */
+  const stale = (): boolean => !isCurrentRun(id) || captureRun !== run;
+  void chrome.runtime
+    .sendMessage({
+      type: "clip/event",
+      event: { type: "CANCEL_RECORDING" },
+    } satisfies Message)
+    .then((response: MessageResponse | undefined) => {
+      if (stale()) return;
+      if (response !== undefined && !BUSY_KINDS.has(response.state.kind)) endCapture();
+    })
+    .catch((error: unknown) => {
+      if (stale()) return;
+      setStatus(`操作を送信できませんでした: ${String(error)}`);
+      endCapture();
+    });
+}
 
 /**
  * 読み込み時に状態機械へ知らせ、返ってきた状態に画面を合わせる。
@@ -2087,9 +2344,12 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
  * content script はこれを送らない限り状態を 1 度も受け取れない。
  */
 function recoverFromState(): void {
+  // 応答が届くまでにオフにしたら画面に触らない (isCurrentRun の doc)
+  const id = runId;
   void chrome.runtime
     .sendMessage({ type: "content/loaded" } satisfies Message)
     .then((response: MessageResponse | undefined) => {
+      if (!isCurrentRun(id)) return;
       if (response === undefined) {
         setStatus("拡張から応答がありませんでした");
         return;
@@ -2101,6 +2361,8 @@ function recoverFromState(): void {
       }
     })
     .catch((error: unknown) => {
+      // オフにした後の失敗はコンソールにも出さない (オフの間の出力は 0 行。spec §1)
+      if (!isCurrentRun(id)) return;
       // 拡張の再読み込み直後などは受け手が居ない。状態を取り戻せないだけで、
       // 次の state/changed で追いつくため、ここで操作を止める必要はない
       console.warn(`状態を取得できませんでした: ${String(error)}`);
@@ -2120,13 +2382,17 @@ function applyTelopSettings(settings: Settings): void {
  * ましで、上限の食い違いも起きない (全員が既定値を見る)
  */
 function loadInitialSettings(): void {
+  // 読み終えるまでにオフにしたら、バーを作り直さない (applyMode は mount を呼ぶ)
+  const id = runId;
   void loadSettings()
     .then((settings) => {
+      if (!isCurrentRun(id)) return;
       maxClipSec = settings.maxClipSec;
       applyTelopSettings(settings);
       applyMode(settings.mode);
     })
     .catch((error: unknown) => {
+      if (!isCurrentRun(id)) return;
       console.warn(`設定を読めませんでした: ${String(error)}`);
     });
 }
@@ -2140,8 +2406,11 @@ function loadInitialSettings(): void {
  * 空を返す。spec A.2)
  */
 function loadInitialLayout(): void {
+  // 読み終えるまでにオフにしたら、窓を置かない・出さない (layoutReady を立てると refreshWindows が窓を出す)
+  const id = runId;
   void loadWindowLayout()
     .then((layout) => {
+      if (!isCurrentRun(id)) return;
       // 枠の中身を先に入れる。窓を枠へ置くのは下の refreshWindows の sync (出す条件が決まってから)。
       // **読み込みは保存しない** (load は onChange を呼ばない。C1.3)
       dockManager.load(layout.docks);
@@ -2157,38 +2426,53 @@ function loadInitialLayout(): void {
       }
     })
     .catch((error: unknown) => {
+      if (!isCurrentRun(id)) return;
       // 窓を置けないのは想定外。それでも出さないままにはしない (spec A.2)
       console.warn(`覚えた窓の位置を使えませんでした: ${String(error)}`);
     })
     .finally(() => {
+      if (!isCurrentRun(id)) return;
       layoutReady = true;
       refreshWindows();
     });
 }
 
-// 設定は**別のタブで変えられる**。保存ボタンに繋ぐだけでは、開いたままの
-// タブが古い上限のまま残り、そのタブでだけ録画の長さが違うことになる。
-//
-// **通知が新しい値を持っているので読み直さない。** ここで loadSettings すると、
-// 設定を 1 回保存するたびに、開いている YouTube タブの数だけ storage を
-// 往復することになる (書いた当のタブでも発火する)
-chrome.storage.onChanged.addListener((changes, areaName) => {
+/**
+ * 設定は**別のタブで変えられる**。保存ボタンに繋ぐだけでは、開いたままの
+ * タブが古い上限のまま残り、そのタブでだけ録画の長さが違うことになる。
+ *
+ * **通知が新しい値を持っているので読み直さない。** ここで loadSettings すると、
+ * 設定を 1 回保存するたびに、開いている YouTube タブの数だけ storage を
+ * 往復することになる (書いた当のタブでも発火する)。
+ * オンの間だけ張る (start() が張り、stop() が外す)。スイッチの見張り (switch-driver) とは別の listener
+ */
+function onSettingsChanged(
+  changes: Record<string, chrome.storage.StorageChange>,
+  areaName: string,
+): void {
   const change = areaName === "sync" ? changes[SETTINGS_KEY] : undefined;
   if (change === undefined) return;
   const settings = mergeSettings(change.newValue);
   maxClipSec = settings.maxClipSec;
   applyTelopSettings(settings);
   applyMode(settings.mode);
-});
+}
 
-/** 直前に見ていた URL。SPA 遷移の検出に使う */
+/** 直前に見ていた URL。SPA 遷移の検出に使う。start() が読み直す */
 let lastHref = location.href;
+/**
+ * 直前に見ていた URL が動画ページか。DOM の変化のたびに URL を解かないための写し (lastHref と一緒に書く)。
+ * ホームや検索結果では body の変化が多いので、URL が変わっていなければ先頭で抜ける
+ */
+let lastHrefIsVideoPage = false;
 
-// テーマの切り替えに追従する。YouTube は <html dark> を付け外しするだけで
-// 画面を作り直さないため、DOM 変化の監視では拾えない
-const themeObserver = new MutationObserver(() => {
+/**
+ * テーマの切り替えに追従する。YouTube は <html dark> を付け外しするだけで
+ * 画面を作り直さないため、DOM 変化の監視では拾えない
+ */
+function onThemeChanged(): void {
   const dark = isDarkTheme();
-  const bar = document.getElementById(BAR_ID);
+  const bar = barPart(BAR_ID);
   if (bar !== null) applyPalette(bar, dark);
   // 3 つの窓は body の直下にある。ページの配色は継がれない
   applyPalette(barWindow.element, dark);
@@ -2196,23 +2480,19 @@ const themeObserver = new MutationObserver(() => {
   applyPalette(settingsWindow.element, dark);
   // ドック枠 (タブの列と目印) も自前の配色
   for (const slot of Object.values(dockManager.elements)) applyPalette(slot, dark);
-});
-themeObserver.observe(document.documentElement, {
-  attributes: true,
-  attributeFilter: ["dark"],
-});
+}
 
-// 全画面の間は 3 つの窓を隠す。body 直下の fixed 要素は全画面の動画の上に残りうる
-document.addEventListener("fullscreenchange", refreshWindows);
+/** テーマ (<html dark>) の監視。オンの間だけある */
+let themeObserver!: MutationObserver;
 
-// ブラウザの大きさが変わったら、動かしていない窓の最初の位置を取り直す (spec A.2)。
-// 動かした窓は置いた場所のまま (画面の外へ出る分は窓の枠が自分で詰める)
-window.addEventListener("resize", placeUnmovedWindows);
-
-// YouTube は SPA 遷移するため DOM 変化を監視して再マウントする
-const observer = new MutationObserver(() => {
+/** YouTube は SPA 遷移するため DOM 変化を監視して再マウントする */
+function onPageMutated(): void {
   if (location.href !== lastHref) {
     lastHref = location.href;
+    lastHrefIsVideoPage = currentVideoId() !== null;
+    // 動画ページへ戻ったら、外していた窓を先に body へ戻す。下の refreshLists が窓を出した直後に最初の位置を
+    // 取り直す (placeInitial) ので、文書に無い窓 (寸法 0) を測らせない
+    if (lastHrefIsVideoPage) attachWindowsToBody();
     // 別の動画へ移ったら、範囲も帯もこの画面のものではなくなる。帯を残すと
     // 旧動画の位置に青い帯が出たままになり、ハンドルを動かせてしまうと
     // 見えていない動画の範囲を書き換えることになる
@@ -2220,13 +2500,144 @@ const observer = new MutationObserver(() => {
     refreshOverlay();
     refreshTelopPreview();
     // 一覧も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
-    // 動画ページ以外へ移ったら、3 つの窓ごと隠れる (refreshWindows)
+    // 動画ページ以外へ移ったら、3 つの窓もドック枠もページから外れる (refreshWindows → leaveVideoPage)
     refreshLists();
+  } else if (!lastHrefIsVideoPage) {
+    // 動画ページ以外で URL が変わっていない。外すものは移ったときに外してある (ホームの DOM の変化で毎回何もしない)
+    return;
   }
   mount();
+}
+
+/** body の子孫の監視 (SPA 遷移と再描画)。オンの間だけある */
+let pageObserver!: MutationObserver;
+
+/**
+ * モジュールの状態を最初の値に戻す (stop() の最後。spec §2.2)。**状態機械が正で、ここにあるのは写し**なので、戻しても
+ * 失うものは無い (次の start() の content/loaded の応答と、覚えた配置の読み直しで取り戻す)。
+ *
+ * **設定から読んだ値 (mode / maxClipSec / telopStyle) は戻さない** (判断メモ 8)。start() の loadInitialSettings が読み直す
+ * ので値は同じになる。mode を simple に戻すと、読み直しの applyMode が「モードが変わった」としてバーを作り直し、
+ * content/loaded の応答が先に届いて区間を持っていると RESET_MARKS で区間を捨てる
+ */
+function resetModuleState(): void {
+  currentSegments = [];
+  currentTelops = [];
+  recordingTelops = null;
+  selectedIndex = -1;
+  segmentList = null;
+  telopList = null;
+  settingsPanel = null;
+  rangeBar = null;
+  telopTrack = null;
+  layoutReady = false;
+  // 覚えた配置の写し。start() の loadInitialLayout が読み直す (オフの間に別のタブで動かした位置も拾う)
+  for (const id of WINDOW_IDS) delete floatLayout[id];
+  lastKind = "idle";
+  pendingMode = null;
+  selectLastOnNextState = false;
+  revealLastTelopOnNextState = false;
+  removedIndexOnNextState = null;
+  rangeVideoId = null;
+  busy = false;
+  rangeEditable = false;
+  cancelWatch = null;
+  cancelPreview = null;
+  handle = null;
+  observedPlayer = null;
+  capturing = false;
+  captureRun = 0;
+}
+
+/**
+ * オンにする (マスタースイッチの spec §2.3 の逆順)。今まで import 時に行っていた処理を、そのままここで行う:
+ * 窓とドック枠と監視を作る → mount() → 設定の読み込み → 覚えた配置の読み込み → content/loaded (状態の取り戻し)。
+ * **読み込み直さずにオンへ戻せる** (spec §2.4): content/loaded はタブのリロードと同じ経路で、応答の状態で範囲・帯・一覧が
+ * 戻る。覚えた配置の読み込みが済むまで窓を出さない (spec A.2) のも今までと同じ。
+ * 呼ぶのは switch driver だけ (テストのために export する。判断メモ 15)。二度呼ぶのは配線の誤り
+ */
+export function start(): void {
+  if (running) throw new Error("[yt-clip] start() を二度呼びました (配線の誤り)");
+  running = true;
+  runId += 1;
+  createWindows();
+  telopPreview = createTelopPreview();
+  playerObserver = new ResizeObserver(() => placeUnmovedWindows());
+  // 状態の通知と設定の変更。stop() が先に外す (以後の通知で、片付けた要素を触りに行かない)
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  chrome.storage.onChanged.addListener(onSettingsChanged);
+  lastHref = location.href;
+  lastHrefIsVideoPage = currentVideoId() !== null;
+  themeObserver = new MutationObserver(onThemeChanged);
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["dark"],
+  });
+  // 全画面の間は 3 つの窓を隠す。body 直下の fixed 要素は全画面の動画の上に残りうる
+  document.addEventListener("fullscreenchange", refreshWindows);
+  // ブラウザの大きさが変わったら、動かしていない窓の最初の位置を取り直す (spec A.2)。
+  // 動かした窓は置いた場所のまま (画面の外へ出る分は窓の枠が自分で詰める)
+  window.addEventListener("resize", placeUnmovedWindows);
+  pageObserver = new MutationObserver(onPageMutated);
+  pageObserver.observe(document.body, { childList: true, subtree: true });
+  mount();
+  loadInitialSettings();
+  loadInitialLayout();
+  recoverFromState();
+}
+
+/**
+ * オフにする (マスタースイッチの spec §2.2 / §2.3)。ページに足したもの・張った listener と監視・走っているループを
+ * すべて外し、モジュールの状態を最初の値に戻す。**覚えた配置 (local の windowLayout) と設定 (sync の settings) は消さない**
+ * (オフ → オンで窓は前と同じ位置・同じ枠に出る)。スイッチを見張る listener は switch driver が持つので残る。
+ * 呼ぶのは switch driver だけ。走っていないのに呼ぶのは配線の誤り
+ */
+export function stop(): void {
+  if (!running) throw new Error("[yt-clip] 走っていないのに stop() を呼びました (配線の誤り)");
+  // 先に下ろす。この後に届く非同期の続き (storage の読み・応答・seek の完了) は isCurrentRun で何もしない (判断メモ 12)
+  running = false;
+  runId += 1;
+  // 1. 範囲再生の監視・録画の監視・録画。このタブで録画が走っていないことは driver の canStop が保証する
+  //    (spec §4.1)。ここで止まるのは範囲再生の監視だけのはず
+  cancelPreviewWatch();
+  cancelWatch?.();
+  cancelWatch = null;
+  abortRecording();
+  // 2. 通知の listener を先に外す (以後の通知で、片付けた要素を触りに行かない)
+  chrome.runtime.onMessage.removeListener(onRuntimeMessage);
+  chrome.storage.onChanged.removeListener(onSettingsChanged);
+  // 3. 監視と listener とループ
+  pageObserver.disconnect();
+  themeObserver.disconnect();
+  playerObserver.disconnect();
+  document.removeEventListener("fullscreenchange", refreshWindows);
+  window.removeEventListener("resize", placeUnmovedWindows);
+  stopPlayheadWatch();
+  // 4. YouTube の要素の中に差したもの: プレイヤーの上の canvas (video の seeked・rVFC・ResizeObserver も) とシークバーの帯
+  telopPreview.destroy();
+  clearOverlay();
+  // 5. ドック枠 (中の窓ごと外れる) → 拡大バーと帯の段 (rAF と捕捉) → 3 つの窓 (resize の listener)。**枠を窓より先に**:
+  //    ドック中の窓は枠の根の中にあり、窓の destroy は自分の要素しか外さない
+  dockManager.destroy();
+  rangeBar?.destroy();
+  telopTrack?.destroy();
+  barWindow.destroy();
+  listWindow.destroy();
+  settingsWindow.destroy();
+  // 6. 写しを最初の値に戻す
+  resetModuleState();
+}
+
+/**
+ * オン / オフに合わせて start() / stop() を呼ぶ (マスタースイッチの spec §2.1)。**import 時にするのはこれだけ**:
+ * chrome.storage.local を 1 回読み、onChanged を 1 本張る (どちらもページからは見えない)。オンなら読んだ後に start() が
+ * 走り、オフなら何も呼ばない。
+ * **このタブで録画が走っている間は stop を待つ** (canStop。spec §4.1)。待たされたら中止を送るか書き出しを待ち
+ * (onStopDeferred)、終わったところ (状態の通知の末尾・中止の応答・録画の結末の送り終わり) で reconcile する
+ */
+const driver = createSwitchDriver({
+  start,
+  stop,
+  canStop: () => !capturing,
+  onStopDeferred,
 });
-observer.observe(document.body, { childList: true, subtree: true });
-mount();
-loadInitialSettings();
-loadInitialLayout();
-recoverFromState();

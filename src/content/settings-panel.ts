@@ -104,7 +104,14 @@ export function createSettingsPanel(
   const deps: PanelDeps = { ...defaultDeps, ...overrides };
   const element = document.createElement("div");
   element.style.cssText = PANEL_STYLE.root;
-  element.hidden = true;
+  // 出し入れは hidden と style.display の両方で行う。根は flex で並べるので display を持ち、
+  // inline の display は UA の [hidden] に勝つ (floating-window.ts と同じ作法)。hidden は
+  // 外から「出ているか」を読むために残す
+  function setOpen(open: boolean): void {
+    element.hidden = !open;
+    element.style.display = open ? "flex" : "none";
+  }
+  setOpen(false);
 
   // 項目・入力欄・説明を組で持つ。鍵で引き直す形にすると、必ず存在するものに
   // 対して undefined チェックが要るうえ、項目が増えるたびに Map が 1 本増える
@@ -203,7 +210,7 @@ export function createSettingsPanel(
   return {
     element,
     toggle(): void {
-      element.hidden = !element.hidden;
+      setOpen(element.hidden);
       result.textContent = "";
       // 開くたびに読み直す。別のタブで変えた設定を古いまま上書きしない
       if (!element.hidden) void fill();

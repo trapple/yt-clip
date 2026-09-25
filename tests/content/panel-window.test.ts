@@ -9,6 +9,7 @@ import {
   type PanelWindow,
   type PanelWindowOptions,
 } from "@/content/panel-window";
+import { stubClientSize } from "../helpers/viewport";
 
 /** jsdom はレイアウトを持たず、どの要素の寸法も 0 を返す。位置を決め打ちする */
 function rectAt(top: number, height: number): DOMRect {
@@ -55,6 +56,7 @@ function pointer(target: Element, type: string, x: number, y: number): void {
 }
 
 beforeAll(() => {
+  stubClientSize();
   // jsdom は Pointer Capture を持たない (窓の枠のドラッグが呼ぶ)
   Element.prototype.setPointerCapture = (): void => undefined;
   Element.prototype.releasePointerCapture = (): void => undefined;

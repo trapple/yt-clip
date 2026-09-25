@@ -92,6 +92,20 @@ describe("createSettingsPanel", () => {
     expect(panel.element.hidden).toBe(true);
   });
 
+  test("閉じている間は inline の display も none にする", () => {
+    // 根は display:flex を inline で持つので、hidden だけだと UA の [hidden] に勝って出たままになる。
+    // jsdom は UA の [hidden] を計算しないので style.display で測る
+    const { deps } = makeDeps();
+    const panel = createSettingsPanel(deps);
+    expect(panel.element.style.display).toBe("none");
+
+    panel.toggle();
+    expect(panel.element.style.display).toBe("flex");
+
+    panel.toggle();
+    expect(panel.element.style.display).toBe("none");
+  });
+
   test("保存すると正規化された値が書き込まれる", async () => {
     const { saved, deps } = makeDeps();
     const panel = createSettingsPanel(deps);

@@ -4,7 +4,7 @@ import { totalSec } from "@/shared/timeline";
 import { FAILURE_MESSAGES, type ClipRange, type ClipState } from "@/shared/types";
 
 /**
- * popup が出すもの。**操作は持たない。**
+ * popup が出す状態の表示。**状態の操作は持たない** (持つ操作はオン / オフのスイッチだけ。describeSwitch)。
  *
  * 操作はページ内バーへ移した。popup を残しているのは、YouTube 以外のタブに
  * いるときに状態を見る場所が無くなるため。X の投稿画面で添付に失敗した
@@ -128,4 +128,50 @@ export function describeState(state: ClipState): PopupView {
         recordingSec: null,
       };
   }
+}
+
+/**
+ * popup のスイッチまわりの見た目 (マスタースイッチの spec §6.1)。
+ *
+ * **押せるか (disabled) を持たない。** オンに戻す場所は popup だけなので、拒む状態が 1 つでもあると拡張を戻せなくなる
+ * (オフ + busy は、書き出しを待つ間に録画対象のタブを読み込み直すと作れる)。スイッチの見た目は保存された値だけで決める。
+ * 端末の注意 (「この端末だけに効く」) は状態に依らないので popup.html に固定で書く (判断メモ 2)
+ */
+export type SwitchView = {
+  /** スイッチの見た目 = 保存された値 */
+  checked: boolean;
+  /** オフの間に、状態の文言の代わりに出す 1 行。オンなら null */
+  hint: string | null;
+  /** 状態の文言と進捗バーを出すか。オフの間は出さない (「録画できました」と出ていてページには何も無い、を避ける) */
+  showState: boolean;
+  /** オフで録画済みのクリップを抱えているときに添える 1 行 (成果物を失ったと誤解させない)。それ以外は null */
+  note: string | null;
+};
+
+/** 録画済みのクリップを抱えた状態。オフにしても状態機械とクリップは残る */
+const CLIP_KINDS: ReadonlySet<ClipState["kind"]> = new Set(["preview", "posted", "degraded"]);
+
+/**
+ * オフの間の 1 行。録画対象のタブが片付けを待っている間 (spec §4.1) は、何を待っているかを出す。
+ * state は状態を取得できなかったときは null
+ */
+function offHint(state: ClipState | null): string {
+  if (state?.kind === "seeking" || state?.kind === "recording") {
+    return "オフにします。録画を中止しています…";
+  }
+  if (state?.kind === "encoding") return "オフにします。書き出しが済んだら止まります…";
+  return "オフです。YouTube と X のページには何も出ません";
+}
+
+export function describeSwitch(enabled: boolean, state: ClipState | null): SwitchView {
+  if (enabled) return { checked: true, hint: null, showState: true, note: null };
+  return {
+    checked: false,
+    hint: offHint(state),
+    showState: false,
+    note:
+      state !== null && CLIP_KINDS.has(state.kind)
+        ? "録画したクリップは残っています (オンに戻すと続きから)"
+        : null,
+  };
 }

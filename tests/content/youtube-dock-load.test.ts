@@ -2,6 +2,7 @@
 // @vitest-environment-options { "url": "https://www.youtube.com/watch?v=video-a" }
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
+import { stubClientSize } from "../helpers/viewport";
 import type { Message } from "@/shared/messages";
 import type { ClipState } from "@/shared/types";
 
@@ -112,6 +113,7 @@ let beforeLoad = { slotsShown: [] as boolean[], windowsHidden: [] as boolean[] }
 
 beforeAll(async () => {
   buildPage();
+  stubClientSize();
   // 差す先に幅を持たせる (jsdom はレイアウトを持たず、幅 0 の枠は使えない扱いになる)
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
     this: Element,
@@ -138,7 +140,10 @@ beforeAll(async () => {
         set: async (): Promise<void> => undefined,
       },
       local: {
-        get: async (): Promise<Record<string, unknown>> => {
+        get: async (key?: string): Promise<Record<string, unknown>> => {
+          // オン / オフ (無い = オン) は門を通さない。止めると start() も止まり、「読み込むまでは枠も窓も出さない」を
+          // 確かめる前に窓そのものが無い
+          if (key === "enabled") return {};
           await layoutGate;
           return { windowLayout: LAYOUT_AT_LOAD };
         },
@@ -146,13 +151,14 @@ beforeAll(async () => {
           layoutWrites.push(items.windowLayout);
         },
       },
-      onChanged: { addListener: (): void => undefined },
+      onChanged: { addListener: (): void => undefined, removeListener: (): void => undefined },
     },
     runtime: {
       onMessage: {
         addListener: (fn: typeof onMessage): void => {
           onMessage = fn;
         },
+        removeListener: (): void => undefined,
       },
       sendMessage: async (): Promise<{ state: ClipState }> => ({ state: READY }),
     },

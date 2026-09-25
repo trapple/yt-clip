@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { Message } from "@/shared/messages";
 import {
   SelectorMissingError,
   attachFile,
@@ -298,6 +299,124 @@ describe("attachPayload", () => {
     await attachPayload(payload);
 
     expect(readBlocks(editor)).toBe(payload.text);
+  });
+
+  describe("オン / オフ (start / stop。マスタースイッチの spec §5)", () => {
+    type RuntimeListener = (
+      message: Message,
+      sender: unknown,
+      sendResponse: (response?: unknown) => void,
+    ) => void;
+    let runtimeListeners: RuntimeListener[] = [];
+    let sendMessage = vi.fn(async (_message: Message) => undefined);
+
+    /**
+     * chrome を stub してから x.ts を読み直す (vitest はモジュールを覚えているので resetModules で捨てる)。
+     * 保存されたオン / オフは enabled
+     */
+    async function loadX(enabled: boolean): Promise<typeof import("@/content/x")> {
+      runtimeListeners = [];
+      sendMessage = vi.fn(async (_message: Message) => undefined);
+      vi.stubGlobal("chrome", {
+        runtime: {
+          sendMessage,
+          onMessage: {
+            addListener: (fn: RuntimeListener): void => {
+              runtimeListeners.push(fn);
+            },
+            removeListener: (fn: RuntimeListener): void => {
+              runtimeListeners = runtimeListeners.filter((listener) => listener !== fn);
+            },
+          },
+        },
+        storage: {
+          local: { get: async (): Promise<Record<string, unknown>> => ({ enabled }) },
+          onChanged: { addListener: (): void => undefined, removeListener: (): void => undefined },
+        },
+      });
+      vi.resetModules();
+      return import("@/content/x");
+    }
+
+    async function flushTimers(): Promise<void> {
+      for (let round = 0; round < 6; round += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    beforeEach(() => {
+      history.pushState({}, "", "/compose/post");
+    });
+
+    afterEach(() => {
+      history.pushState({}, "", "/");
+    });
+
+    test("オフのまま読み込むと x/ready を送らず、listener も張らない (import 時には何もしない)", async () => {
+      await loadX(false);
+      await flushTimers();
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(runtimeListeners).toHaveLength(0);
+    });
+
+    test("オンで読み込むと、/compose/ なら x/ready を送り listener を張る", async () => {
+      await loadX(true);
+      await flushTimers();
+      expect(sendMessage).toHaveBeenCalledWith({ type: "x/ready" });
+      expect(runtimeListeners).toHaveLength(1);
+    });
+
+    test("start は /compose/ でなければ x/ready を送らない", async () => {
+      const x = await loadX(false);
+      await flushTimers();
+      history.pushState({}, "", "/home");
+      x.start();
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(runtimeListeners).toHaveLength(1);
+      x.stop();
+    });
+
+    test("stop で listener が外れ、外し損ねた listener に x/payload が届いても何もしない", async () => {
+      const x = await loadX(false);
+      await flushTimers();
+      x.start();
+      const listener = runtimeListeners[0];
+      x.stop();
+      expect(runtimeListeners).toHaveLength(0);
+
+      const editor = buildComposePage("");
+      const respond = vi.fn();
+      listener?.({ type: "x/payload", ...payload }, {}, respond);
+      await flushTimers();
+      expect(respond).not.toHaveBeenCalled();
+      expect(readBlocks(editor)).toBe("");
+    });
+
+    test("進行中の attachPayload は stop 後も完了して x/attached を送る (半端な本文を残さない)", async () => {
+      const x = await loadX(false);
+      await flushTimers();
+      x.start();
+      sendMessage.mockClear();
+      const editor = buildComposePage("");
+
+      runtimeListeners[0]?.({ type: "x/payload", ...payload }, {}, () => undefined);
+      x.stop();
+
+      await vi.waitFor(
+        () => expect(sendMessage).toHaveBeenCalledWith({ type: "x/attached" }),
+        { timeout: 5_000 },
+      );
+      expect(readBlocks(editor)).toBe(payload.text);
+    });
+
+    test("start を二度呼ぶ・走っていないのに stop を呼ぶのは配線の誤りなので throw", async () => {
+      const x = await loadX(false);
+      await flushTimers();
+      expect(() => x.stop()).toThrow("走っていない");
+      x.start();
+      expect(() => x.start()).toThrow("二度");
+      x.stop();
+    });
   });
 });
 

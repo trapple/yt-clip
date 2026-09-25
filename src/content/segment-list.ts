@@ -42,7 +42,14 @@ export function createSegmentList(
 ): SegmentList {
   const element = document.createElement("div");
   element.style.cssText = SEGMENT_STYLE.root;
-  element.hidden = true;
+  // 出し入れは hidden と style.display の両方で行う。根は flex で並べるので display を持ち、
+  // inline の display は UA の [hidden] に勝つ (floating-window.ts と同じ作法)。hidden は
+  // 外から「出ているか」を読むために残す
+  function setShown(shown: boolean): void {
+    element.hidden = !shown;
+    element.style.display = shown ? "flex" : "none";
+  }
+  setShown(false);
 
   const rows = document.createElement("div");
   rows.style.cssText = SEGMENT_STYLE.root;
@@ -87,7 +94,7 @@ export function createSegmentList(
     update(segments, selectedIndex, maxClipSec): void {
       // 区間が無いときは箱ごと消す。空の枠だけが残ると、何かを見落として
       // いるように見える
-      element.hidden = segments.length === 0;
+      setShown(segments.length > 0);
 
       rows.replaceChildren(
         ...segments.map((segment, index) => {

@@ -18,8 +18,11 @@ export type TelopListCallbacks = {
   /** そのテロップの頭から再生する */
   onPlay(index: number): void;
   onRemove(index: number): void;
-  /** 文言が確定した (フォーカスが外れた) */
-  onText(index: number, text: string): void;
+  /**
+   * 文言が確定した (フォーカスが外れた)。**送らなかったら false** (上限を超えたなど。理由は
+   * 呼び出し側が出す)。false の入力欄は送っていない下書きとして、次の描き直しで上書きしない
+   */
+  onText(index: number, text: string): boolean;
 };
 
 export type TelopList = {
@@ -35,6 +38,15 @@ type Row = {
   label: HTMLElement;
   outside: HTMLElement;
   textarea: HTMLTextAreaElement;
+  /** 最後に描いたときの状態の文言 */
+  stateText: string;
+  /**
+   * 送っていない下書きがあるとき、送らなかった時点の状態の文言。無ければ null。
+   * 状態の文言がこれと同じ間は入力欄を上書きしない (打った文字を黙って消さない)。
+   * 状態の側で文言が変わったら (別の経路で書き換えられた・前の行が消えて別のテロップの行になった)、
+   * 下書きは捨てて状態に合わせる
+   */
+  unsentBase: string | null;
 };
 
 function telopLabel(telop: Telop, index: number): string {
@@ -44,7 +56,14 @@ function telopLabel(telop: Telop, index: number): string {
 export function createTelopList(callbacks: TelopListCallbacks): TelopList {
   const element = document.createElement("div");
   element.style.cssText = TELOP_STYLE.root;
-  element.hidden = true;
+  // 出し入れは hidden と style.display の両方で行う。根は flex で並べるので display を持ち、
+  // inline の display は UA の [hidden] に勝つ (floating-window.ts と同じ作法)。hidden は
+  // 外から「出ているか」を読むために残す
+  function setShown(shown: boolean): void {
+    element.hidden = !shown;
+    element.style.display = shown ? "flex" : "none";
+  }
+  setShown(false);
 
   let enabled = true;
 
@@ -134,14 +153,15 @@ export function createTelopList(callbacks: TelopListCallbacks): TelopList {
     // 1 文字ごとに送ると、そのたびにクリップが外れて状態通知が飛ぶ
     textarea.addEventListener("change", () => {
       if (!enabled) return;
-      callbacks.onText(index, textarea.value);
+      row.unsentBase = callbacks.onText(index, textarea.value) ? null : row.stateText;
     });
     // YouTube のショートカットは入力欄の中では効かない作りだが、**念のため止める。**
     // 打つ文字が多く、YouTube 側の判定が変わったときの被害が大きい
     textarea.addEventListener("keydown", (event) => event.stopPropagation());
 
     root.append(head, textarea);
-    return { root, label, outside, textarea };
+    const row: Row = { root, label, outside, textarea, stateText: "", unsentBase: null };
+    return row;
   }
 
   return {
@@ -149,7 +169,7 @@ export function createTelopList(callbacks: TelopListCallbacks): TelopList {
 
     update(telops, segments): void {
       // 区間が無いときは箱ごと消す (テロップは区間に焼き込むもの)
-      element.hidden = segments.length === 0;
+      setShown(segments.length > 0);
 
       while (rows.length > telops.length) {
         rows.pop()?.root.remove();
@@ -169,11 +189,14 @@ export function createTelopList(callbacks: TelopListCallbacks): TelopList {
         row.outside.textContent = overlapsSegments(telop, segments)
           ? ""
           : "(区間外)";
+        row.stateText = telop.text;
         // **フォーカス中の入力欄は value も触らない。** 書き換えると打ちかけの
         // 文字が消え、しかもその後 blur しても change が発火しない
-        if (document.activeElement !== row.textarea) {
-          row.textarea.value = telop.text;
-        }
+        if (document.activeElement === row.textarea) return;
+        // 送っていない下書き (上限を超えたなど) も触らない。状態の文言が変わったときだけ捨てる
+        if (row.unsentBase !== null && row.unsentBase === telop.text) return;
+        row.unsentBase = null;
+        row.textarea.value = telop.text;
       });
     },
 

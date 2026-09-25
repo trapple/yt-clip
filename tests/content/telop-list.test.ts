@@ -15,7 +15,10 @@ function makeCallbacks() {
     onSetEnd: (i) => calls.push(`end:${i}`),
     onPlay: (i) => calls.push(`play:${i}`),
     onRemove: (i) => calls.push(`remove:${i}`),
-    onText: (i, text) => calls.push(`text:${i}:${text}`),
+    onText: (i, text) => {
+      calls.push(`text:${i}:${text}`);
+      return true;
+    },
   };
   return { calls, callbacks };
 }
@@ -35,6 +38,18 @@ describe("createTelopList", () => {
     const list = createTelopList(makeCallbacks().callbacks);
     list.update([], []);
     expect(list.element.hidden).toBe(true);
+  });
+
+  test("隠すときは inline の display も none にする", () => {
+    // 根は display:flex を inline で持つので、hidden だけだと UA の [hidden] に勝って出たままになる。
+    // jsdom は UA の [hidden] を計算しないので style.display で測る
+    const list = createTelopList(makeCallbacks().callbacks);
+    list.update([], []);
+    expect(list.element.style.display).toBe("none");
+    list.update([], SEGMENTS);
+    expect(list.element.style.display).toBe("flex");
+    list.update([], []);
+    expect(list.element.style.display).toBe("none");
   });
 
   test("区間があればテロップが無くても出す (＋ テロップを押せるように)", () => {
@@ -106,6 +121,50 @@ describe("createTelopList", () => {
     // 表示 (時刻) は更新される
     expect(rows(list)[0]?.textContent).toContain("0:12");
     list.element.remove();
+  });
+
+  test("送らなかった (onText が false) 入力欄は、フォーカスが無くても次の描き直しで上書きしない", () => {
+    // 上限を超えた文言は youtube.ts が理由を出して送らない。前の文言に戻すと打った文字が黙って消える
+    const { callbacks } = makeCallbacks();
+    const list = createTelopList({ ...callbacks, onText: () => false });
+    list.update([HELLO], SEGMENTS);
+    const textarea = rows(list)[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+    textarea.value = "長すぎる下書き";
+    textarea.dispatchEvent(new Event("change"));
+
+    list.update([{ ...HELLO, startSec: 12 }], SEGMENTS);
+
+    expect(textarea.value).toBe("長すぎる下書き");
+  });
+
+  test("送らなかった下書きも、状態の側で文言が変わったら状態に合わせる", () => {
+    // 別の経路で書き換えられた・前の行が消えて別のテロップの行になった
+    const { callbacks } = makeCallbacks();
+    const list = createTelopList({ ...callbacks, onText: () => false });
+    list.update([HELLO], SEGMENTS);
+    const textarea = rows(list)[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+    textarea.value = "長すぎる下書き";
+    textarea.dispatchEvent(new Event("change"));
+
+    list.update([OUTSIDE], SEGMENTS);
+
+    expect(textarea.value).toBe("外");
+  });
+
+  test("送れたら (onText が true) 次の描き直しは状態の値に合わせる", () => {
+    const list = createTelopList(makeCallbacks().callbacks);
+    list.update([HELLO], SEGMENTS);
+    const textarea = rows(list)[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+    textarea.value = "送った";
+    textarea.dispatchEvent(new Event("change"));
+
+    // 状態機械が受けた文言で戻ってくる前の通知 (まだ前の文言) でも、下書きとしては持たない
+    list.update([HELLO], SEGMENTS);
+
+    expect(textarea.value).toBe("こんにちは");
   });
 
   test("フォーカスしていない入力欄は状態の値に合わせる", () => {

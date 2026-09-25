@@ -1,5 +1,10 @@
 import { FLOATING_WINDOW_STYLE } from "@/content/styles";
-import { fitRect, type GripBox, type WindowRect } from "@/content/window-layout";
+import {
+  currentViewport,
+  fitRect,
+  type GripBox,
+  type WindowRect,
+} from "@/content/window-layout";
 
 export type { WindowRect } from "@/content/window-layout";
 
@@ -223,7 +228,7 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     // 幅だけの窓は高さを持たない (覚えた位置に高さが混ざっていても使わない)。高さは中身で決まる
     const source: WindowRect =
       options.resize === "width" ? { left: rect.left, top: rect.top, width: rect.width } : rect;
-    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const viewport = currentViewport();
     const fitted = fitRect(source, viewport, gripBox(), {
       minWidth: options.minWidth,
       minHeight: options.minHeight,
@@ -375,12 +380,16 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
       finish();
       // 枠に入ったまま押して離しただけ (引き出すほど動かさなかった)。何も変えない
       if (pendingUndock) return;
-      requested = current;
+      // 押して離しただけ (クリックやダブルクリックの 1 回目) は動かしていない。引き出した窓は動かした
+      // ことにする (undocked の doc)
+      const moved = undocked || !sameRect(start, current);
+      // **動かしていないときは requested を書き換えない。** 画面が狭くて詰めている窓の current は詰めた後の
+      // 位置なので、クリックしただけで置いた場所がそこに変わり、画面を戻しても置いた場所へ戻らなくなる
+      if (moved) requested = current;
       // 落とし先の枠に引き取られた。浮いた窓の位置は変えない (C2.3)
       if (reporting && report("end", last)) return;
-      // 押して離しただけ (クリックやダブルクリックの 1 回目) は知らせない。知らせると
-      // 「動かした窓」になり、最初の位置を取り直さなくなる。引き出した窓は知らせる (undocked の doc)
-      if (!undocked && sameRect(start, current)) return;
+      // 動かしていなければ知らせない。知らせると「動かした窓」になり、最初の位置を取り直さなくなる
+      if (!moved) return;
       options.onUserMove({ ...current });
     };
 

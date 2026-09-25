@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { makeVideoMeta } from "../helpers/fixtures";
-import { describeState } from "@/popup/view";
+import { describeState, describeSwitch } from "@/popup/view";
 import type { ClipRange, ClipState } from "@/shared/types";
 
 const meta = makeVideoMeta();
@@ -197,5 +197,78 @@ describe("複数区間の表示", () => {
       mimeType: "video/mp4",
     });
     expect(view.message).toContain("23秒");
+  });
+});
+
+describe("オン / オフのスイッチ (describeSwitch)", () => {
+  const clip = { clipId: "c", mimeType: "video/mp4" };
+  /** 状態機械のすべての種類 */
+  const ALL_STATES: ClipState[] = [
+    { kind: "idle" },
+    { kind: "ready", segments, telops: [], meta },
+    { kind: "seeking", segments, telops: [], meta },
+    { kind: "recording", segments, telops: [], meta },
+    { kind: "encoding", segments, telops: [], meta },
+    { kind: "preview", segments, telops: [], meta, ...clip },
+    { kind: "posted", segments, telops: [], meta, ...clip },
+    { kind: "composing", segments, telops: [], meta, ...clip },
+    { kind: "degraded", segments, telops: [], meta, ...clip, reason: "x-attach-failed" },
+    { kind: "failed", reason: "internal-error", segments, telops: [], meta },
+  ];
+  const OFF = "オフです。YouTube と X のページには何も出ません";
+  const CANCELLING = "オフにします。録画を中止しています…";
+  const WAITING_ENCODE = "オフにします。書き出しが済んだら止まります…";
+  const CLIP_KEPT = "録画したクリップは残っています (オンに戻すと続きから)";
+
+  test("オンでは状態を出し、代わりの文言も添える 1 行も出さない", () => {
+    for (const state of ALL_STATES) {
+      expect(describeSwitch(true, state)).toEqual({
+        checked: true,
+        hint: null,
+        showState: true,
+        note: null,
+      });
+    }
+  });
+
+  test("オフでは状態を出さず「オフです。…」", () => {
+    for (const kind of ["idle", "ready", "composing", "failed"] as const) {
+      const state = ALL_STATES.find((candidate) => candidate.kind === kind);
+      const view = describeSwitch(false, state ?? null);
+      expect(view.showState).toBe(false);
+      expect(view.hint).toBe(OFF);
+    }
+  });
+
+  test("オフ + seeking / recording は「録画を中止しています…」、オフ + encoding は「書き出しが済んだら止まります…」", () => {
+    expect(describeSwitch(false, { kind: "seeking", segments, telops: [], meta }).hint).toBe(CANCELLING);
+    expect(describeSwitch(false, { kind: "recording", segments, telops: [], meta }).hint).toBe(CANCELLING);
+    expect(describeSwitch(false, { kind: "encoding", segments, telops: [], meta }).hint).toBe(WAITING_ENCODE);
+  });
+
+  test("オフ + preview / posted / degraded はクリップが残っている旨を添える。ready / idle では添えない", () => {
+    for (const kind of ["preview", "posted", "degraded"] as const) {
+      const state = ALL_STATES.find((candidate) => candidate.kind === kind) ?? null;
+      expect(describeSwitch(false, state).note).toBe(CLIP_KEPT);
+    }
+    for (const kind of ["ready", "idle"] as const) {
+      const state = ALL_STATES.find((candidate) => candidate.kind === kind) ?? null;
+      expect(describeSwitch(false, state).note).toBeNull();
+    }
+  });
+
+  test("状態を取得できていなくても (null) スイッチを出せる", () => {
+    expect(describeSwitch(false, null)).toEqual({ checked: false, hint: OFF, showState: false, note: null });
+    expect(describeSwitch(true, null)).toEqual({ checked: true, hint: null, showState: true, note: null });
+  });
+
+  test("押せるかを持たない (disabled が無い)。checked は enabled だけで決まる (全状態 × オン / オフ。オフ + busy でも戻せる)", () => {
+    for (const state of [...ALL_STATES, null]) {
+      for (const enabled of [true, false]) {
+        const view = describeSwitch(enabled, state);
+        expect(Object.keys(view).sort()).toEqual(["checked", "hint", "note", "showState"]);
+        expect(view.checked).toBe(enabled);
+      }
+    }
   });
 });

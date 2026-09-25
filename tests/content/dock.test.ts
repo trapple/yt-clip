@@ -428,6 +428,21 @@ describe("差し直しと退避", () => {
     expect(onEvacuate).toHaveBeenCalledWith("list");
   });
 
+  // spa-inject: 動画ページ以外では youtube.ts が差す先を null で渡す。YouTube は隠れた動画ページ (#below) を残すので、
+  // 差したままにするとホームに枠が残る。差す先が戻れば先頭に差し直す
+  test("差す先が無い枠は、ページから外す (差す先が戻れば差し直す)", () => {
+    const { manager, below, side } = setup();
+    const root = manager.elements.side;
+    expect(root.parentElement).toBe(side);
+
+    manager.attach({ below, side: null });
+    expect(root.isConnected).toBe(false);
+    expect(manager.elements.below.parentElement).toBe(below);
+
+    manager.attach({ below, side });
+    expect(side.firstElementChild).toBe(root);
+  });
+
   test("load は onChange を呼ばずに枠の中身を入れ、sync で置く", () => {
     const { manager, windows, onChange } = setup();
 
@@ -748,5 +763,35 @@ describe("タブからの引き出し中の DOM (Task 4・5 のレビューか�
     expect(windows.bar.element.parentElement).toBe(document.body);
     expect(windows.bar.element.querySelector("[data-role='grip']")).toBe(grip);
     expect(grip.isConnected).toBe(true);
+  });
+});
+
+describe("destroy (マスタースイッチのオフ)", () => {
+  test("ドラッグの最中 (目印を出している) でも、2 つの枠の根ごと目印・タブの列・入っている窓を外す", () => {
+    const { manager, windows } = setup();
+    manager.dock("list", "side");
+    // 設定の窓のドラッグを始める。空の下の枠に 40px の目印が出る
+    manager.drag("settings", "start", AWAY);
+    expect(markerOf("below").style.display).not.toBe("none");
+
+    manager.destroy();
+
+    expect(document.querySelectorAll('[id^="yt-clip-dock-"], [data-role^="dock-"]').length).toBe(0);
+    // ドック中の窓は枠の根と一緒に外れる (youtube.ts の stop は枠を窓より先に destroy する)
+    expect(windows.list.element.isConnected).toBe(false);
+  });
+
+  test("destroy の後に届く drag (lostpointercapture が非同期で来る) は何もせず、当たらなかったときの値 (null) を返す", () => {
+    const { manager, onChange } = setup();
+    // 帯に当たる直前まで動かす (「落とし先 (drag)」の当たる例と同じ点)
+    manager.drag("list", "start", AWAY);
+    manager.drag("list", "move", SIDE_BAND);
+    manager.destroy();
+    const changes = onChange.mock.calls.length;
+
+    // youtube.ts の stop() は同期で終わるので、lostpointercapture が届く頃には枠も窓も無い。
+    // 破棄済みの枠には当てない (dock も onChange もしない)
+    expect(manager.drag("list", "end", SIDE_BAND)).toBeNull();
+    expect(onChange).toHaveBeenCalledTimes(changes);
   });
 });

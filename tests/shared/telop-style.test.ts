@@ -21,6 +21,16 @@ describe("expandFontFamily", () => {
   test("前後の空白は落とす", () => {
     expect(expandFontFamily("  Klee One ")).toBe('"Klee One", sans-serif');
   });
+
+  test("カンマは区切りとして、名前ごとに引用符で囲む", () => {
+    // 全体を 1 組の引用符で囲むと "Arial, Meiryo" という 1 つの名前として探され、どちらも使われない
+    expect(expandFontFamily("Arial, Meiryo")).toBe('"Arial", "Meiryo", sans-serif');
+  });
+
+  test("空の名前は捨てる", () => {
+    expect(expandFontFamily("Arial,, Meiryo ,")).toBe('"Arial", "Meiryo", sans-serif');
+    expect(expandFontFamily(" , ")).toBe("sans-serif");
+  });
 });
 
 describe("telopStyleOf", () => {

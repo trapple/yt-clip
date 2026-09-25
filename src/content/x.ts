@@ -1,5 +1,6 @@
 import { baseMimeType } from "@/content/codec";
 import { X_SELECTORS } from "@/content/selectors";
+import { createSwitchDriver } from "@/content/switch-driver";
 import { decodeBase64 } from "@/shared/base64";
 import type { Message } from "@/shared/messages";
 
@@ -255,10 +256,6 @@ function notify(message: Message): void {
   });
 }
 
-// content script は常に chrome 拡張コンテキストで読み込まれるため実行時は必ず true になるが、
-// 単体テスト (jsdom) は chrome グローバルを持たないため import 時点の副作用が
-// ReferenceError で落ちる。テストのために振る舞いを変えるのではなく、
-// 拡張コンテキスト外で読み込まれた場合に安全側へ倒すガードとして扱う。
 /**
  * 受け取った本文と動画を投稿画面へ載せる。
  *
@@ -293,26 +290,61 @@ export async function attachPayload(message: {
   }
 }
 
-if (typeof chrome !== "undefined") {
+/** start() から stop() までの間か (マスタースイッチの spec §5) */
+let running = false;
 
-  /**
-   * **同期で `sendResponse()` を返すこと。** 応答しないと送り手の Promise は
-   * `The message port closed before a response was received.` で reject し、
-   * 受け取って添付を進めていることが「投稿タブが居ない」と区別できなくなる
-   * (service worker がダウンロード誘導へ退避してしまう)。
-   * `return true` にして添付の完了後に応答するのも不可 — 送り手は直列 queue の
-   * 中で待つため、その間 router 全体が止まる。添付の結果は `x/attached` /
-   * `x/failed` で別途知らせる。
-   */
-  chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) => {
-    if (message.type !== "x/payload") return;
-    sendResponse();
+/**
+ * **同期で `sendResponse()` を返すこと。** 応答しないと送り手の Promise は
+ * `The message port closed before a response was received.` で reject し、
+ * 受け取って添付を進めていることが「投稿タブが居ない」と区別できなくなる
+ * (service worker がダウンロード誘導へ退避してしまう)。
+ * `return true` にして添付の完了後に応答するのも不可 — 送り手は直列 queue の
+ * 中で待つため、その間 router 全体が止まる。添付の結果は `x/attached` /
+ * `x/failed` で別途知らせる。
+ */
+function onRuntimeMessage(
+  message: Message,
+  _sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+): void {
+  // 外し損ねたときの防御。stop() が外すので普段は来ない。オフなのに投稿画面へ本文と動画を入れない
+  if (!running) return;
+  if (message.type !== "x/payload") return;
+  sendResponse();
 
-    void attachPayload(message);
-  });
+  void attachPayload(message);
+}
 
-  // 投稿画面が開かれたことを service worker に知らせる
+/**
+ * オンにする (マスタースイッチの spec §5)。payload を受ける listener を張り、投稿画面なら開かれたことを service worker に
+ * 知らせる。**オフの間は x/ready を送らない**: router が投稿を待っていても添付は始まらず、30 秒で「X にもう一度投稿」に落ちる
+ * (オフなのに投稿画面に本文と動画が入る方がスイッチの意味に反する)。オンに戻したときに /compose/ を開いたままなら送り直す
+ * (router は composing でないか送り済みなら無視する。二重送信の保護は今のまま)。
+ * 呼ぶのは switch driver だけ (テストのために export する)。二度呼ぶのは配線の誤り
+ */
+export function start(): void {
+  if (running) throw new Error("[yt-clip] start() を二度呼びました (配線の誤り)");
+  running = true;
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
   if (location.pathname.startsWith("/compose/")) {
     notify({ type: "x/ready" });
   }
+}
+
+/**
+ * オフにする。listener を外すだけ (X のページの DOM には何も足していない)。**進行中の attachPayload は止めない**:
+ * 途中でやめると半端な本文が投稿欄に残る。上限は要素待ち 10 秒 × 2 + paste の描画待ち 2 秒 × 2 で有限。終われば
+ * x/attached / x/failed を送ってよい (router は composing でなければ拒む)。走っていないのに呼ぶのは配線の誤り
+ */
+export function stop(): void {
+  if (!running) throw new Error("[yt-clip] 走っていないのに stop() を呼びました (配線の誤り)");
+  running = false;
+  chrome.runtime.onMessage.removeListener(onRuntimeMessage);
+}
+
+// content script は常に chrome 拡張コンテキストで読み込まれるため実行時は必ず true になるが、単体テスト (jsdom) は
+// chrome グローバルを持たないため、import 時の読みが ReferenceError で落ちる。拡張コンテキスト外で読み込まれた場合に
+// 安全側へ倒すガードとして扱う。**import 時にするのは、オン / オフを読んで見張ることだけ** (オンなら読んだ後に start)
+if (typeof chrome !== "undefined") {
+  createSwitchDriver({ start, stop });
 }

@@ -3,6 +3,8 @@
 import { Blob as NodeBlob } from "node:buffer";
 import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
 import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
+import { ourElements } from "../helpers/our-elements";
+import { stubClientSize } from "../helpers/viewport";
 import { decodeBase64 } from "@/shared/base64";
 
 /** 録画結果として流す、最小限の断片化 MP4 */
@@ -86,6 +88,16 @@ let video: FakeVideo;
 async function flush(): Promise<void> {
   for (let round = 0; round < 6; round += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+/**
+ * マイクロタスクだけを流す (setTimeout は進めない)。保存されたオン / オフの読みは返り、service worker 役の応答
+ * (setTimeout の後) はまだ返らない
+ */
+async function settleMicrotasks(): Promise<void> {
+  for (let round = 0; round < 20; round += 1) {
+    await Promise.resolve();
   }
 }
 
@@ -251,12 +263,25 @@ type StorageListener = (
 
 /** chrome.storage.sync が返す設定。テストごとに差し替える */
 let storedSettings: Record<string, unknown> = {};
-let storageListener: StorageListener | null = null;
+/**
+ * chrome.storage.onChanged に張られた listener。オンの間は 2 本 (設定の sync を見る youtube.ts と、スイッチを見る
+ * switch-driver)、オフの間はスイッチの 1 本だけ
+ */
+let storageListeners: StorageListener[] = [];
 
 /** 別のタブで設定が変わったことを届ける */
 function changeSettings(next: Record<string, unknown>): void {
   storedSettings = next;
-  storageListener?.({ settings: { newValue: next } }, "sync");
+  for (const listener of [...storageListeners]) listener({ settings: { newValue: next } }, "sync");
+}
+
+/** chrome.storage.local の enabled (マスタースイッチ)。undefined = キーが無い = オン */
+let storedEnabled: unknown = undefined;
+
+/** popup でオン / オフを切り替えたことを届ける (chrome.storage.local の enabled の onChanged) */
+function setEnabled(value: boolean): void {
+  storedEnabled = value;
+  for (const listener of [...storageListeners]) listener({ enabled: { newValue: value } }, "local");
 }
 
 /** chrome.storage.local の windowLayout (覚えた窓の位置)。読み込み時の値は beforeAll で入れる */
@@ -381,9 +406,14 @@ function installGlobals(): void {
           Promise.resolve({ settings: storedSettings }),
         set: (): Promise<void> => Promise.resolve(),
       },
-      // 窓の位置 (window-layout.ts)。読み込み時の 1 回は layoutGate が離されるまで返さない
+      // 窓の位置 (window-layout.ts) とオン / オフ (master-switch.ts)。窓の位置の読み込み時の 1 回は layoutGate が
+      // 離されるまで返さない。**オン / オフは門を通さない**: 止めると start() も止まり、「覚えた位置を読み込む前は
+      // 窓を出さない」を確かめる前に窓そのものが無い
       local: {
-        get: async (): Promise<Record<string, unknown>> => {
+        get: async (key?: string): Promise<Record<string, unknown>> => {
+          if (key === "enabled") {
+            return storedEnabled === undefined ? {} : { enabled: storedEnabled };
+          }
           await layoutGate;
           return storedLayout === undefined ? {} : { windowLayout: storedLayout };
         },
@@ -392,10 +422,13 @@ function installGlobals(): void {
           layoutWrites.push(items.windowLayout);
         },
       },
-      // 別のタブで設定を変えられたときに拾う経路
+      // 別のタブで設定を変えられたときと、オン / オフを切り替えたときに拾う経路
       onChanged: {
         addListener: (fn: StorageListener): void => {
-          storageListener = fn;
+          storageListeners.push(fn);
+        },
+        removeListener: (fn: StorageListener): void => {
+          storageListeners = storageListeners.filter((listener) => listener !== fn);
         },
       },
     },
@@ -403,6 +436,10 @@ function installGlobals(): void {
       onMessage: {
         addListener: (fn: TabListener): void => {
           onMessage = fn;
+        },
+        // オフにすると外す (stop)。外した後は deliver が届けない
+        removeListener: (fn: TabListener): void => {
+          if (onMessage === fn) onMessage = null;
         },
       },
       sendMessage: async (message: Message): Promise<{ state: ClipState }> => {
@@ -718,14 +755,17 @@ let windowsAfterLayout = {
 beforeAll(async () => {
   buildPage();
   installGlobals();
+  stubClientSize();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
   swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
   // 前に動かした窓の位置を覚えている場面を再現する
   storedLayout = LAYOUT_AT_LOAD;
 
-  // chrome を用意してから読み込む。import 時に listener と observer を張る
+  // chrome を用意してから読み込む。import 時にはページに触らず、保存されたオン / オフ (無い = オン) を読んだ後に
+  // start() が listener と observer を張る。読みはマイクロタスクで返るので流して待つ (応答はまだ返らない)
   await import("@/content/youtube");
+  await settleMicrotasks();
   // **応答が返る前**の状態を捕まえる。実機でも service worker は遷移した
   // ときにしか通知しないので、マウント直後は何も受け取っていない
   pointerEventsAtLoad = rangeBarElement().style.pointerEvents;
@@ -2189,6 +2229,24 @@ describe("テロップ付きの録画", () => {
     expect(recordsCapturedVideo()).toBe(true);
   });
 
+  test("シンプルモードでは状態にテロップが残っていても今の経路のまま", async () => {
+    // シンプルモードではテロップの一覧もプレビューも出ない。見えないテロップを
+    // 焼き込むと、画面に無い文字がクリップに入る (テロップ spec §6「シンプルモードの録画は一切変わらない」)
+    const { track } = installCanvas();
+    changeSettings({ mode: "simple" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    command("recorder/start");
+    await flush();
+
+    expect(recordsCapturedVideo()).toBe(true);
+    const stream = startedRecorder().stream as { getVideoTracks(): unknown[] };
+    expect(stream.getVideoTracks()).not.toContain(track);
+  });
+
   test("canvas に描けなければ録画を始めずに telop-render-failed で落とす", async () => {
     // テロップなしで録って続行すると、実時間を払った後で気付くことになる
     installCanvas({ tainted: true });
@@ -2404,6 +2462,21 @@ describe("テロップの一覧", () => {
       index: 0,
       telop: { ...TELOP, text: "あ".repeat(500) },
     });
+  });
+
+  test("500 文字を超えて送らなかった文言は、次の状態通知でも前の文言に戻さない", async () => {
+    // フォーカスが外れた後の描き直しで telop.text を書くと、打った文字が黙って消える
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+    textarea.value = "あ".repeat(501);
+    textarea.dispatchEvent(new Event("change"));
+
+    // 別の操作 (開始を今に など) の状態通知。文言は前のまま
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [{ ...TELOP, startSec: 12 }] });
+    await flush();
+
+    expect(textarea.value).toBe("あ".repeat(501));
   });
 
   test("テロップが残っていると最後の 1 区間は消せない", async () => {
@@ -2891,7 +2964,7 @@ describe("区間・テロップの窓と設定の窓", () => {
     expect(listElement().hidden).toBe(false);
   });
 
-  test("動画ページ以外では区間・テロップの窓も設定の窓も出さない", async () => {
+  test("動画ページ以外では区間・テロップの窓も設定の窓も出さない (ページから外す)", async () => {
     await showEdit();
     clickButton("⚙");
     expect(listElement().hidden).toBe(false);
@@ -2901,8 +2974,10 @@ describe("区間・テロップの窓と設定の窓", () => {
     document.body.append(document.createElement("div"));
     await flush();
 
-    expect(listElement().hidden).toBe(true);
-    expect(settingsWindowElement().hidden).toBe(true);
+    // 隠すだけでなく、ページに何も残さない (spa-inject。dockable-windows の spec C2.7)
+    expect(document.getElementById("yt-clip-list")).toBeNull();
+    expect(document.getElementById("yt-clip-settings")).toBeNull();
+    expect(ourElements()).toBe(0);
   });
 
   test("テーマを切り替えると 2 つの窓の配色も変わる", async () => {
@@ -3149,6 +3224,19 @@ describe("フロートの窓", () => {
       width: "400px",
       height: "",
     });
+  });
+
+  test("スクロールバーが画面の幅を食っていたら、区間・テロップの窓の右端はスクロールバーの左から 16px", () => {
+    // innerWidth はスクロールバーを含む。それで置くと右端の縁と見出しがスクロールバーの下に潜る
+    stubClientSize({ width: 15 });
+    try {
+      dblclick(listHeader());
+      expect(document.documentElement.clientWidth).toBe(window.innerWidth - 15);
+      expect(listElement().style.left).toBe(`${document.documentElement.clientWidth - 416}px`);
+    } finally {
+      stubClientSize();
+      dblclick(listHeader());
+    }
   });
 
   test("設定の窓の最初の位置は、区間・テロップの窓から下へ 32px だけずらす (left は同じ)", () => {
@@ -3403,14 +3491,14 @@ describe("フロートの窓", () => {
     expect(windowsHidden()).toEqual([false, false, false]);
   });
 
-  test("動画ページ以外では 3 つとも隠す。戻れば出す", async () => {
+  test("動画ページ以外では 3 つともページから外す。戻れば出す", async () => {
     await showList();
     clickButton("⚙");
 
     history.pushState({}, "", "/");
     document.body.append(document.createElement("div"));
     await flush();
-    expect(windowsHidden()).toEqual([true, true, true]);
+    expect(ourElements()).toBe(0);
 
     history.pushState({}, "", "/watch?v=video-a");
     document.body.append(document.createElement("div"));
@@ -3834,6 +3922,25 @@ describe("ドック枠とタブ", () => {
     expect(tabLabels("side")).toEqual(["区間・テロップ"]);
   });
 
+  // spa-inject ③: 出す条件を「文書につながっているか」(getElementById) で見ると、外れた #below の中でバーを隠した後に
+  // sync が body へ退避しても、mount の早抜けが出し直しを呼ばず、バーが body にあるのに隠れたまま残る
+  test("バーの入った下の枠の差す先 (#below) が外れても、退避したバーの窓は隠れたまま残らない。戻れば枠に戻る", async () => {
+    const below = document.getElementById("below");
+    if (below === null) throw new Error("#below がありません");
+    const parent = below.parentElement;
+    if (parent === null) throw new Error("#below の親がありません");
+
+    below.remove();
+    await flush();
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(barWindowElement().hidden).toBe(false);
+
+    parent.prepend(below);
+    await flush();
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(barWindowElement().hidden).toBe(false);
+  });
+
   test("タブを 8px 以上ドラッグすると枠から出て指の下に付いて動き、離した位置を覚える", async () => {
     const tab = tabElement("side", "list");
 
@@ -4130,5 +4237,463 @@ describe("ドック枠とタブ", () => {
 
     expect(activeLabel("side")).toBe("区間・テロップ");
     expect(listBody().scrollTop).toBe(0);
+  });
+});
+
+describe("オン / オフ (マスタースイッチ)", () => {
+  /** テロップ付きの ready。エディットモードならプレビューの canvas が video の親に付く */
+  const READY_WITH_TELOP: ClipState = {
+    kind: "ready",
+    segments: [RANGE],
+    telops: [{ startSec: 11, endSec: 13, text: "テロップ" }],
+    meta: META_A,
+  };
+
+  // 前の describe (「ドック枠とタブ」) の枠の中身を持ち越さない (判断メモ 34)。jsdom では差す先の幅が 0 なので枠は
+  // 使えず、3 つとも浮いた窓 (退避) で出る。「フロートの窓」と同じ作法
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
+    await flush();
+  });
+
+  afterEach(async () => {
+    // モジュールは 1 回だけ読み込んで使い回しているので、次のテストのためにオンへ戻す
+    if (storedEnabled === false) {
+      setEnabled(true);
+      await flush();
+    }
+  });
+
+  test("オフにすると窓・ドック枠・シークバーの帯・プレビューの canvas が消え、YouTube の要素の中に何も残らない", async () => {
+    changeSettings({ mode: "edit" });
+    emit(READY_WITH_TELOP);
+    await flush();
+    // 前提: 帯と canvas と枠が出ている
+    expect(overlay()).not.toBeNull();
+    expect(document.getElementById("yt-clip-telop-preview")).not.toBeNull();
+    expect(document.getElementById("yt-clip-dock-below")).not.toBeNull();
+
+    setEnabled(false);
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(document.querySelector(".ytp-progress-bar")?.childElementCount).toBe(0);
+    expect(video.element.parentElement?.querySelector("canvas") ?? null).toBeNull();
+    expect(document.getElementById("below")?.childElementCount).toBe(0);
+    expect(document.getElementById("secondary-inner")?.childElementCount).toBe(0);
+  });
+
+  test("オフにすると observer・document と window の listener・再生位置の rAF・onMessage と設定の onChanged を外す (スイッチの見張りは残す)", async () => {
+    const mutationDisconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
+    const resizeDisconnect = vi.spyOn(ResizeObserver.prototype, "disconnect");
+    const documentRemove = vi.spyOn(document, "removeEventListener");
+    const windowRemove = vi.spyOn(window, "removeEventListener");
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame");
+    try {
+      expect(onMessage).not.toBeNull();
+      expect(storageListeners).toHaveLength(2);
+
+      setEnabled(false);
+      await flush();
+
+      // body の子孫の監視とテーマ (<html dark>) の監視
+      expect(mutationDisconnect.mock.calls.length).toBeGreaterThanOrEqual(2);
+      // プレイヤーの大きさの監視 (とプレビューの canvas の追従)
+      expect(resizeDisconnect).toHaveBeenCalled();
+      expect(documentRemove).toHaveBeenCalledWith("fullscreenchange", expect.any(Function));
+      expect(windowRemove).toHaveBeenCalledWith("resize", expect.any(Function));
+      // 再生位置を拡大バーへ流すループ
+      expect(cancelFrame).toHaveBeenCalled();
+      expect(onMessage).toBeNull();
+      // 残るのはスイッチの見張り (switch-driver) の 1 本だけ
+      expect(storageListeners).toHaveLength(1);
+    } finally {
+      mutationDisconnect.mockRestore();
+      resizeDisconnect.mockRestore();
+      documentRemove.mockRestore();
+      windowRemove.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+
+  test("外し損ねた onMessage に、オフの間に state/changed が届いても何も描かない", async () => {
+    const listener = onMessage;
+    setEnabled(false);
+    await flush();
+
+    listener?.(
+      { type: "state/changed", state: { kind: "ready", segments: [RANGE], telops: [], meta: META_A } },
+      {},
+      () => undefined,
+    );
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(overlay()).toBeNull();
+  });
+
+  test("オフの間に設定が変わっても (sync の onChanged) 何もしない", async () => {
+    setEnabled(false);
+    await flush();
+    sent = [];
+
+    changeSettings({ mode: "edit" });
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  test("オンに戻すと、読み込み直さずに窓が出て content/loaded を送り、応答の状態で範囲と帯が戻る", async () => {
+    setEnabled(false);
+    await flush();
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+    sent = [];
+
+    setEnabled(true);
+    await flush();
+
+    expect(sent).toContainEqual({ type: "content/loaded" });
+    expect(statusText()).toBe("0:10 〜 0:20 (10秒)");
+    expect(overlay()).not.toBeNull();
+    expect(barWindowElement().hidden).toBe(false);
+    expect(onMessage).not.toBeNull();
+    expect(storageListeners).toHaveLength(2);
+  });
+
+  test("オフ → オンで覚えた配置を読み直し、動かした窓は同じ位置に出る", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    drag(listHeader(), -100, 20);
+    await flush();
+    const moved = styleRect(listElement());
+
+    setEnabled(false);
+    await flush();
+    setEnabled(true);
+    await flush();
+
+    // 区間があるので区間・テロップの窓が出る (content/loaded の応答の ready で)
+    expect(listElement().hidden).toBe(false);
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual(moved);
+  });
+
+  test("浮いた窓をドラッグしている最中にオフにすると、外れた見出しに lostpointercapture が届いても配置を保存しない (他の窓の覚えた位置が残る)", async () => {
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    // バーの位置を覚えさせる (オフで消えてはいけない他の窓の記憶)
+    drag(barGrip(), 30, -20);
+    await flush();
+    const remembered = storedLayout;
+    expect(remembered).toMatchObject({ float: { bar: expect.any(Object) } });
+    layoutWrites = [];
+
+    // 区間・テロップの窓を掴んで動かしている最中にオフにする。destroy が見出しを外すと、Chrome は外れた要素へ
+    // lostpointercapture を配る (jsdom では手で配る)
+    const header = listHeader();
+    pointer(header, "pointerdown", 100, 100);
+    pointer(header, "pointermove", 60, 140);
+    setEnabled(false);
+    await flush();
+    header.dispatchEvent(new Event("lostpointercapture"));
+    await flush();
+
+    expect(layoutWrites).toEqual([]);
+    expect(storedLayout).toEqual(remembered);
+  });
+
+  test("退避中の窓をドラッグしている最中にオフにすると、lostpointercapture が届いても片付けた窓をページへ戻さない", async () => {
+    // beforeEach で 3 つとも退避中 (枠に入っているが枠が使えない)。退避中の窓を動かすと undock で body へ
+    // 出し直す (C2.1) ので、オフの後にそれが走ると片付けた窓がオフのページに戻る
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    const element = listElement();
+    layoutWrites = [];
+
+    const header = listHeader();
+    pointer(header, "pointerdown", 100, 100);
+    pointer(header, "pointermove", 60, 140);
+    setEnabled(false);
+    await flush();
+    header.dispatchEvent(new Event("lostpointercapture"));
+    await flush();
+
+    expect(element.isConnected).toBe(false);
+    expect(ourElements()).toBe(0);
+    expect(layoutWrites).toEqual([]);
+  });
+
+  test("オンにした直後にオフにすると、遅れて届いた応答と覚えた配置の読みで窓も帯も出さない", async () => {
+    setEnabled(false);
+    await flush();
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+
+    setEnabled(true);
+    // content/loaded の応答 (setTimeout の後) と覚えた配置の読みが返る前に切る
+    setEnabled(false);
+    await flush();
+
+    expect(ourElements()).toBe(0);
+  });
+
+  test("範囲の再生を押した直後にオフにすると、再生も範囲の監視 (rVFC) も始めない", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    const play = vi.spyOn(video.element, "play");
+    try {
+      clickButton("▶ 範囲を見る");
+      // seek の完了 (setTimeout の後) を待たずに切る
+      setEnabled(false);
+      await flush();
+
+      expect(play).not.toHaveBeenCalled();
+      expect(video.pendingFrames()).toBe(0);
+    } finally {
+      play.mockRestore();
+    }
+  });
+
+  test("start() を二度呼ぶ・走っていないのに stop() を呼ぶのは配線の誤りなので throw", async () => {
+    const content = await import("@/content/youtube");
+    expect(() => content.start()).toThrow("二度");
+
+    setEnabled(false);
+    await flush();
+    expect(() => content.stop()).toThrow("走っていない");
+  });
+});
+
+describe("録画中・書き出し中のオフ (マスタースイッチの spec §4.1)", () => {
+  // 前の describe の枠の中身を持ち越さない (判断メモ 34)
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    dblclick(settingsHeader());
+    await flush();
+  });
+
+  afterEach(async () => {
+    // 次のテストのためにオンへ戻す (モジュールは 1 回だけ読み込んで使い回している)
+    if (storedEnabled === false) {
+      setEnabled(true);
+      await flush();
+    }
+  });
+
+  /** このタブで録画を始め、recording まで進める (実機の順序: seeking → recorder/start → recording) */
+  async function startRecordingInThisTab(): Promise<void> {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  test("録画中 (recording) にオフにすると CANCEL_RECORDING を送り、その応答 (ready) で片付く。録画も OUT の監視も止まる", async () => {
+    await startRecordingInThisTab();
+    const recorder = startedRecorder();
+    sent = [];
+
+    setEnabled(false);
+    // 応答が返るまでは片付けない (ページのバーは今までどおり)
+    expect(ourElements()).toBeGreaterThan(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([{ type: "CANCEL_RECORDING" }]);
+    expect(swState.kind).toBe("ready");
+    expect(ourElements()).toBe(0);
+    expect(recorder.state).toBe("inactive");
+    expect(video.pendingFrames()).toBe(0);
+  });
+
+  test("録画の準備中 (seeking) にオフにしても CANCEL_RECORDING を送って片付く", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    setEnabled(false);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+  });
+
+  test("準備中 (seeking) にオフにした後、中止の応答より先に同じ録画の recording が届いても、応答 (ready) で片付く (ready の同報を待たない)", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    // 中止を送る (応答は setTimeout の後に返る)。その間に router の queue で先に進んだ recording の同報が届いた
+    setEnabled(false);
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    // ready の同報は失われた (emit しない)。頼れるのは中止の応答だけ
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+    // 次のテストのために、状態機械を中止が通った後の状態に揃える (オンに戻すと content/loaded の応答で読まれる)
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+  });
+
+  test("オフを待つ間にオンへ戻して録り直した後に古い中止の応答 (ready) が届いても、新しい録画の旗を下ろさない (判断メモ 33)", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    // 中止を送り、応答が返る前にオンへ戻して、別の録画を始める (ready → seeking で capturing が立ち直す)
+    setEnabled(false);
+    setEnabled(true);
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    sent = [];
+
+    // 新しい録画はまだ準備中。古い応答で旗が下りていれば、ここでその場で片付いてしまう
+    setEnabled(false);
+    expect(ourElements()).toBeGreaterThan(0);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+  });
+
+  test("準備中にオフにして片付いた後に録画の開始 (startRecording) が失敗しても、recorder/failed を送らない", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    const original = (video.element as unknown as { captureStream: () => unknown }).captureStream;
+    Object.assign(video.element, {
+      captureStream: () => {
+        throw new Error("captureStream に失敗しました");
+      },
+    });
+    try {
+      sent = [];
+      // startRecording は次の microtask で reject する。その前に (同期に) 片付けを済ませ、reject を片付けた後に届かせる。
+      // capturing が偽なのでオフはその場で stop する (中止の応答で ready に戻して片付けた後と同じ、走っていない回)
+      command("recorder/start");
+      setEnabled(false);
+      expect(ourElements()).toBe(0);
+      await flush();
+
+      expect(sent.some((message) => message.type === "recorder/failed")).toBe(false);
+      expect(swState.kind).toBe("ready");
+    } finally {
+      Object.assign(video.element, { captureStream: original });
+    }
+  });
+
+  test("複数区間の継ぎ目でオフにすると、片付けた後に seek が済んでも再生も rVFC も始めず、FAIL も送らない", async () => {
+    const TWO: ClipRange[] = [
+      { startSec: 83, endSec: 98 },
+      { startSec: 242, endSec: 250 },
+    ];
+    changeSettings({ mode: "edit" });
+    emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    const recorder = startedRecorder();
+    const play = vi.spyOn(video.element, "play");
+    try {
+      sent = [];
+      // **オフを先に押す** (判断メモ 31): 中止の応答 (setTimeout) を先に積み、その後に 1 区間目の終わりを踏ませて継ぎ目の
+      // seek (seeked も setTimeout) を始める。応答 → stop → seek の完了、の順になる
+      setEnabled(false);
+      video.advanceFrame(98);
+      await flush();
+
+      expect(ourElements()).toBe(0);
+      expect(play).not.toHaveBeenCalled();
+      expect(video.pendingFrames()).toBe(0);
+      expect(clipEvents()).toEqual([{ type: "CANCEL_RECORDING" }]);
+      expect(recorder.state).toBe("inactive");
+    } finally {
+      play.mockRestore();
+    }
+  });
+
+  test("書き出し中 (encoding) にオフにすると中止は送らずに待ち、recorder/done を送り終えてから片付く", async () => {
+    await startRecordingInThisTab();
+    video.advanceFrame(20.1);
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    sent = [];
+
+    setEnabled(false);
+    await flush();
+    // 中止を送らない (encoding で止めると service worker が encoding で固まる)。窓もまだある
+    expect(clipEvents()).toEqual([]);
+    expect(barWindowElement().isConnected).toBe(true);
+
+    command("recorder/stop");
+    await flush();
+    await flush();
+
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+    expect(ourElements()).toBe(0);
+  });
+
+  test("プレビュー (preview) でオフにするとその場で片付き、RESET_MARKS も FAIL も送らない (クリップは状態機械に残る)", async () => {
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      segments: [RANGE],
+      telops: [],
+      meta: META_A,
+      mimeType: "video/mp4",
+    });
+    await flush();
+    sent = [];
+
+    setEnabled(false);
+    expect(ourElements()).toBe(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(swState.kind).toBe("preview");
+  });
+
+  test("録画していないタブ (応答で busy を受け取っただけ) はその場で片付き、CANCEL_RECORDING を送らない。オフ + busy でもオンに戻せる", async () => {
+    setEnabled(false);
+    await flush();
+    // 別のタブで録画中。このタブには state/changed は届かず、content/loaded の応答でだけ busy を知る
+    swState = { kind: "recording", segments: [RANGE], telops: [], meta: META_A };
+    sent = [];
+
+    setEnabled(true);
+    await flush();
+    // オフ + busy でもオンに戻せる (start が content/loaded を送る)
+    expect(sent).toContainEqual({ type: "content/loaded" });
+    expect(ourElements()).toBeGreaterThan(0);
+    sent = [];
+
+    setEnabled(false);
+    expect(ourElements()).toBe(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(swState.kind).toBe("recording");
+  });
+
+  test("書き出しを待っている間にオンへ戻したら stop しない (書き出しの結果はそのまま送る)", async () => {
+    await startRecordingInThisTab();
+    video.advanceFrame(20.1);
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+
+    setEnabled(false);
+    await flush();
+    setEnabled(true);
+    await flush();
+    command("recorder/stop");
+    await flush();
+    await flush();
+
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+    expect(barWindowElement().isConnected).toBe(true);
+    expect(onMessage).not.toBeNull();
   });
 });
