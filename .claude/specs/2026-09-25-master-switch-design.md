@@ -492,3 +492,9 @@ E2E (`e2e/smoke.spec.ts`。録画しないので `npm run e2e` に入れる) と
 - [実機] 2026-09-25 npm run e2e の smoke 7 項目と check:telop 32 項目が通過。バッジはブラウザの再起動をまたいで残った (ユーザーが手で確認)。E2E の service worker の数える listener は測る間に止まらなかった
 - [実装] 権限を足していない (manifest.config.ts は変えていない。バッジの setBadge* は action を持つ拡張なら権限なしで使えた)
 - [実装] plan の判断メモ 1〜4 で、残りの Recommendations 4 件を扱った (中止の応答と state/changed の両方で片付ける / hint は区切り線の下の 1 行・端末の注意は popup.html に固定 / 抜け道は README と manual-check に / notify の then・catch の両方の後で reconcile)
+- [不具合修正 spa-inject] YouTube の content script の `matches` を `https://www.youtube.com/watch*` から `https://www.youtube.com/*`
+  へ広げた (ホーム・検索結果・チャンネルから SPA で動画へ入ると、ドキュメントの読み込みが起きず content script が入らなかった)。
+  **権限は増えない** (`host_permissions` は元から `https://www.youtube.com/*`)。§7 の「`manifest.config.ts` は変えない」は
+  権限についての記述で、`matches` の変更はこれに反しない。§1 の「残るもの」(モジュールの評価・storage の読み 1 回・onChanged 1 本) は
+  YouTube の全ページで起きるようになる。オンでも**動画ページ以外ではページに何も差さない** (枠と窓を外す。dockable-windows の
+  spec C2.7)。body の監視 (MutationObserver) はオンの間は動画ページ以外でも張るが、URL が変わっていなければコールバックの先頭で抜ける
