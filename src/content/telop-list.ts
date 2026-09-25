@@ -44,7 +44,14 @@ function telopLabel(telop: Telop, index: number): string {
 export function createTelopList(callbacks: TelopListCallbacks): TelopList {
   const element = document.createElement("div");
   element.style.cssText = TELOP_STYLE.root;
-  element.hidden = true;
+  // 出し入れは hidden と style.display の両方で行う。根は flex で並べるので display を持ち、
+  // inline の display は UA の [hidden] に勝つ (floating-window.ts と同じ作法)。hidden は
+  // 外から「出ているか」を読むために残す
+  function setShown(shown: boolean): void {
+    element.hidden = !shown;
+    element.style.display = shown ? "flex" : "none";
+  }
+  setShown(false);
 
   let enabled = true;
 
@@ -149,7 +156,7 @@ export function createTelopList(callbacks: TelopListCallbacks): TelopList {
 
     update(telops, segments): void {
       // 区間が無いときは箱ごと消す (テロップは区間に焼き込むもの)
-      element.hidden = segments.length === 0;
+      setShown(segments.length > 0);
 
       while (rows.length > telops.length) {
         rows.pop()?.root.remove();

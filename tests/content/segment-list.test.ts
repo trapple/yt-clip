@@ -104,6 +104,17 @@ describe("区間の一覧", () => {
     expect(list.element.hidden).toBe(true);
   });
 
+  test("隠すときは inline の display も none にする", () => {
+    // 根は display:flex を inline で持つので、hidden だけだと UA の [hidden] に勝って出たままになる。
+    // jsdom は UA の [hidden] を計算しないので style.display で測る
+    const { list } = makeList();
+    expect(list.element.style.display).toBe("none");
+    list.update(segments, 0, 60);
+    expect(list.element.style.display).toBe("flex");
+    list.update([], -1, 60);
+    expect(list.element.style.display).toBe("none");
+  });
+
   test("録画中は操作を受け付けない", () => {
     const { list, calls } = makeList();
     list.update(segments, 0, 60);

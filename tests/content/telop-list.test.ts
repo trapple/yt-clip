@@ -37,6 +37,18 @@ describe("createTelopList", () => {
     expect(list.element.hidden).toBe(true);
   });
 
+  test("隠すときは inline の display も none にする", () => {
+    // 根は display:flex を inline で持つので、hidden だけだと UA の [hidden] に勝って出たままになる。
+    // jsdom は UA の [hidden] を計算しないので style.display で測る
+    const list = createTelopList(makeCallbacks().callbacks);
+    list.update([], []);
+    expect(list.element.style.display).toBe("none");
+    list.update([], SEGMENTS);
+    expect(list.element.style.display).toBe("flex");
+    list.update([], []);
+    expect(list.element.style.display).toBe("none");
+  });
+
   test("区間があればテロップが無くても出す (＋ テロップを押せるように)", () => {
     const list = createTelopList(makeCallbacks().callbacks);
     list.update([], SEGMENTS);

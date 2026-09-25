@@ -1244,6 +1244,10 @@ function persistWindowLayout(): void {
 
 /** ユーザーが窓を動かした・大きさを変えた (指を離した時点で 1 回)。次に開いたときも同じ位置に出す */
 function rememberWindowRect(id: WindowId, rect: WindowRect): void {
+  // **走っている間だけ効く。** ドラッグ中にオフにすると、外れた掴む場所へ lostpointercapture が届いて onUserMove が
+  // ここへ来る。先へ進むと、退避中の窓は undock で body へ出し直され、片付けた窓がオフのページに戻る。
+  // オフでは floatLayout も空にしてあるので書かない (persistWindowLayout の guard だけでは undock を止められない)
+  if (!running) return;
   floatLayout[id] = { ...rect };
   // 退避中 (入っている枠が使えない間の浮いた窓) の窓を動かしたら、その時点で浮いた窓になる (枠の記憶からも外す。
   // C2.1)。外すと onChange で組ごと保存されるので、ここでは保存しない
@@ -1577,7 +1581,9 @@ async function prepareRecording(
     // **テロップの有無で録画の経路を決め、描けるかをここで確かめる。**
     // `beginRecording` で気付くと、router が理由を問わず recording-aborted に
     // 落とすので専用の文言が出ない。見た目もここで固定する (録画中に変えても効かない)
-    if (hasRenderableTelops(currentTelops, currentSegments)) {
+    // **エディットモードのときだけ合成する。** シンプルモードでは一覧もプレビューも
+    // 出ないので、状態にテロップが残っていても焼き込むと画面に無い文字がクリップに入る
+    if (mode === "edit" && hasRenderableTelops(currentTelops, currentSegments)) {
       // 隠れたまま始めると、最初のフレームから映像が止まる。**描けるかより先に
       // 見る。** 隠れた窓では動画がデコードされず videoWidth が 0 になり
       // (テロップ spec §9.1)、先に「動画の大きさがまだ分かりません」が出て

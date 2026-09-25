@@ -2227,6 +2227,24 @@ describe("テロップ付きの録画", () => {
     expect(recordsCapturedVideo()).toBe(true);
   });
 
+  test("シンプルモードでは状態にテロップが残っていても今の経路のまま", async () => {
+    // シンプルモードではテロップの一覧もプレビューも出ない。見えないテロップを
+    // 焼き込むと、画面に無い文字がクリップに入る (テロップ spec §6「シンプルモードの録画は一切変わらない」)
+    const { track } = installCanvas();
+    changeSettings({ mode: "simple" });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    command("recorder/start");
+    await flush();
+
+    expect(recordsCapturedVideo()).toBe(true);
+    const stream = startedRecorder().stream as { getVideoTracks(): unknown[] };
+    expect(stream.getVideoTracks()).not.toContain(track);
+  });
+
   test("canvas に描けなければ録画を始めずに telop-render-failed で落とす", async () => {
     // テロップなしで録って続行すると、実時間を払った後で気付くことになる
     installCanvas({ tainted: true });
@@ -4336,6 +4354,28 @@ describe("オン / オフ (マスタースイッチ)", () => {
 
     expect(layoutWrites).toEqual([]);
     expect(storedLayout).toEqual(remembered);
+  });
+
+  test("退避中の窓をドラッグしている最中にオフにすると、lostpointercapture が届いても片付けた窓をページへ戻さない", async () => {
+    // beforeEach で 3 つとも退避中 (枠に入っているが枠が使えない)。退避中の窓を動かすと undock で body へ
+    // 出し直す (C2.1) ので、オフの後にそれが走ると片付けた窓がオフのページに戻る
+    changeSettings({ mode: "edit" });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    const element = listElement();
+    layoutWrites = [];
+
+    const header = listHeader();
+    pointer(header, "pointerdown", 100, 100);
+    pointer(header, "pointermove", 60, 140);
+    setEnabled(false);
+    await flush();
+    header.dispatchEvent(new Event("lostpointercapture"));
+    await flush();
+
+    expect(element.isConnected).toBe(false);
+    expect(ourElements()).toBe(0);
+    expect(layoutWrites).toEqual([]);
   });
 
   test("オンにした直後にオフにすると、遅れて届いた応答と覚えた配置の読みで窓も帯も出さない", async () => {
