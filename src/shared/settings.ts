@@ -491,7 +491,8 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     control: { kind: "text" },
     hint: (context) => {
       if (context.channel === null) {
-        return "チャンネルを特定できないため設定できません";
+        // popup はいま開いているタブに問い合わせる (settings-in-popup spec §2)。どこで開けば設定できるかを出す
+        return "チャンネルを特定できないため設定できません (YouTube の動画を開いたタブで設定する)";
       }
       return `空白区切り。# は省略できます (${context.channel.name} のタグ)`;
     },

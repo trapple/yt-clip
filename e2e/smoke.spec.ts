@@ -229,7 +229,7 @@ test("IN を指定するとページ内で録画を始められる", async () =>
   // 操作はページ内で完結する。録画はここから始められる
   await expect(bar.getByRole("button", { name: "● 録画" })).toBeEnabled();
 
-  // popup が持つ操作はオン / オフのスイッチだけ (role は switch なので button には当たらない)。
+  // popup が持つ操作はオン / オフのスイッチ (role は switch なので button には当たらない) と設定の「保存」だけ。
   // 状態を映すのは、YouTube 以外のタブにいるときの逃げ道として残す
   const popup = await context.newPage();
   await popup.goto(
@@ -239,7 +239,7 @@ test("IN を指定するとページ内で録画を始められる", async () =>
   await expect(popup.locator("#message")).toHaveText(
     "0:05 〜 0:20 (15秒) を録画できます",
   );
-  await expect(popup.getByRole("button")).toHaveCount(0);
+  await expect(popup.getByRole("button")).toHaveText(["保存"]);
 
   // ここから先 (実際の録画) は自動化していない。録画は実時間かかるうえ、
   // 生成された動画の中身 (音声トラックの有無・解像度など) は目や耳で確認
@@ -385,7 +385,7 @@ test("オフ → オンで、浮かせて置いた窓は同じ位置に、枠に
   }
 });
 
-test("popup のスイッチを押すと 1 秒以内に YouTube のタブから拡張の要素が消え、もう一度押すと戻る。ボタンは持たない", async () => {
+test("popup のスイッチを押すと 1 秒以内に YouTube のタブから拡張の要素が消え、もう一度押すと戻る。ボタンは設定の保存だけ", async () => {
   // 前提を自分で作る: オン・覚えた窓の配置なし
   await writeEnabled(true);
   await (await getWorker()).evaluate(() => chrome.storage.local.remove("windowLayout"));
@@ -405,7 +405,9 @@ test("popup のスイッチを押すと 1 秒以内に YouTube のタブから�
     await expect(popup.locator("#message")).toHaveText(
       "オフです。YouTube と X のページには何も出ません",
     );
-    await expect(popup.getByRole("button")).toHaveCount(0);
+    // オフの間も設定は出ている (settings-in-popup spec §1)
+    await expect(popup.getByRole("button")).toHaveText(["保存"]);
+    await expect(popup.locator("#yt-clip-setting-mode")).toBeVisible();
 
     await toggle.click();
     await expect(toggle).toBeChecked();
@@ -418,6 +420,41 @@ test("popup のスイッチを押すと 1 秒以内に YouTube のタブから�
 });
 
 // **この項目はファイルの最後に置く** (ブラウザを起動し直す。context と extensionId を作り直す)
+test("設定は popup にあり、保存すると開いている YouTube のタブにすぐ効く。ページには ⚙ も設定の窓も無い", async () => {
+  // 前提を自分で作る: オン・シンプル
+  await writeEnabled(true);
+  await (await getWorker()).evaluate(() => chrome.storage.sync.remove("settings"));
+  const page = await context.newPage();
+  const popup = await context.newPage();
+  try {
+    await openVideo(page);
+    const bar = page.locator("#yt-clip-bar");
+    await expect(bar).toBeVisible({ timeout: 15_000 });
+    await expect(bar.getByRole("button", { name: "⚙" })).toHaveCount(0);
+    await expect(page.locator("#yt-clip-settings")).toHaveCount(0);
+
+    await popup.goto(`chrome-extension://${extensionId}/src/popup/popup.html`, {
+      timeout: 30_000,
+    });
+    // popup をタブで開いているので、前のタブは popup 自身 (YouTube ではない)。ハッシュタグ欄だけ入力できない
+    await expect(popup.locator("#yt-clip-setting-hashtags")).toBeDisabled();
+    const save = popup.getByRole("button", { name: "保存" });
+    await expect(save).toBeEnabled();
+    await popup.locator("#yt-clip-setting-mode").selectOption("edit");
+    // 保存できたら popup は閉じる (settings-in-popup spec §1)
+    const closed = popup.waitForEvent("close", { timeout: 10_000 });
+    await save.click();
+    await closed;
+
+    // 読み込み直さずにエディットモードのバーになる (sync の onChanged)
+    await expect(bar.getByRole("button", { name: "＋ 区間を追加" })).toBeVisible({ timeout: 5_000 });
+  } finally {
+    await (await getWorker()).evaluate(() => chrome.storage.sync.remove("settings"));
+    if (!popup.isClosed()) await popup.close();
+    await page.close();
+  }
+});
+
 test("オフのまま起動し直してもオフのまま。バッジも OFF で、動画ページに何も出ない", async () => {
   test.setTimeout(240_000);
   await writeEnabled(false);

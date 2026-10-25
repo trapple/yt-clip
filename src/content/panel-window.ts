@@ -10,7 +10,7 @@ import { MASTHEAD_HEIGHT_PX, TOP_GAP_PX, type Viewport } from "@/content/window-
 
 /**
  * 見出しのある「幅と高さ」の窓 (`.claude/specs/2026-09-25-dockable-windows-design.md` C1.4)。
- * 区間・テロップの窓と設定の窓の両方をこれで作る。**フロートの窓 (`floating-window.ts`) の上に作る。**
+ * 区間・テロップの窓をこれで作る。**フロートの窓 (`floating-window.ts`) の上に作る。**
  *
  * **中身の箱 (余白・スクロール) と scrollTo だけを持つ。** 窓の枠 (見出し・ドラッグ・大きさ・画面に
  * 詰める・重なり順) は floating-window.ts、何を入れるか・いつ出すか・どこへ置くかは youtube.ts が決める。
@@ -45,15 +45,6 @@ const WIDTH_PX = 400;
 const MIN_WIDTH_PX = 280;
 const MIN_HEIGHT_PX = 160;
 /**
- * 設定の窓を区間・テロップの窓からずらす量 (下へだけ。C1.3 のカスケード)。一覧の見出しの行 (32px) が
- * 設定の窓の上に残って見え、掴んで動かせる。完全に重ねない: ⚙ を押した瞬間に一覧が丸ごと隠れると、
- * 分けた意味 (両方を同時に見る) が薄い。**左右にはずらさない:** 1440x795 で一覧の left は 1024px、
- * プレイヤーの右端は 1012px (実測) なので、左へ 32px ずらすとプレイヤーに 20px 重なる。右へは画面の
- * 右端で詰められて同じ位置になる
- */
-export const SETTINGS_CASCADE_PX = 32;
-
-/**
  * 見出しの行の高さ (padding 8px × 2 + 文字の行。C1.3 の「見出しの行 (32px)」)。タブから引き出した窓を、指が
  * 見出しの中に来るよう置くのに使う (C2.4: 上端 = 指 − 見出しの高さの半分)
  */
@@ -61,10 +52,10 @@ export const PANEL_HEADER_HEIGHT_PX = 32;
 
 export type PanelWindow = {
   element: HTMLElement;
-  /** 中身の箱。区間・テロップの窓には区間の一覧とテロップの一覧、設定の窓には設定パネルを入れる */
+  /** 中身の箱。区間・テロップの窓には区間の一覧とテロップの一覧を入れる */
   body: HTMLElement;
   /**
-   * 出すか隠すか。**理由の計算は youtube.ts の 1 箇所に置く** (中身が無い / 設定を閉じている /
+   * 出すか隠すか。**理由の計算は youtube.ts の 1 箇所に置く** (中身が無い /
    * 全画面 / 動画ページ以外 / 覚えた配置の読み込み前、のどれかなら隠す)。窓は理由を知らない
    */
   setVisible(visible: boolean): void;
@@ -79,9 +70,9 @@ export type PanelWindow = {
 };
 
 export type PanelWindowOptions = {
-  /** 窓の id ("yt-clip-list" / "yt-clip-settings")。中身の箱の id は `${id}-body` */
+  /** 窓の id ("yt-clip-list")。中身の箱の id は `${id}-body` */
   id: string;
-  /** 見出しの文言 ("区間・テロップ" / "設定")。C2 ではそのままタブの文言になる */
+  /** 見出しの文言 ("区間・テロップ")。C2 ではそのままタブの文言になる */
   title: string;
   /** 見出しをドラッグして動かした・右下で大きさを変えた (指を離した時点で 1 回) */
   onUserMove?(rect: WindowRect): void;
@@ -101,16 +92,6 @@ export function initialListRect(viewport: Viewport): WindowRect {
     top: MASTHEAD_HEIGHT_PX + TOP_GAP_PX,
     width: WIDTH_PX,
   };
-}
-
-/**
- * 設定の窓の最初の位置 (C1.3)。区間・テロップの窓の**最初の位置**から下へ SETTINGS_CASCADE_PX。
- * 一覧を動かした後の位置には付いていかない: 付けると、一覧を動かすたびに動かしていない設定の窓も
- * 置き直す経路が要り、1440x795 でプレイヤーに重ならない保証も最初の位置どうしでしか成り立たない
- */
-export function initialSettingsRect(viewport: Viewport): WindowRect {
-  const list = initialListRect(viewport);
-  return { ...list, top: list.top + SETTINGS_CASCADE_PX };
 }
 
 /**

@@ -1,4 +1,3 @@
-import { PANEL_STYLE } from "@/content/styles";
 import {
   SETTINGS_FIELDS,
   loadSettings,
@@ -9,32 +8,66 @@ import {
 } from "@/shared/settings";
 
 /**
- * ⚙ で開く設定パネル。
+ * popup に常に出ている設定のフォーム (`.claude/specs/2026-10-04-settings-in-popup-design.md`)。
+ * 前はバーの ⚙ で開く設定の窓に入っていた。
  *
  * **項目ごとの分岐を持たない。** `SETTINGS_FIELDS` を並べるだけにしてあるので、
  * 設定を足すときはそちらに 1 要素足せばここに出る。
  */
-export type SettingsPanel = {
+export type SettingsForm = {
   element: HTMLElement;
-  /** 開閉を切り替える。開くときは保存済みの値を流し込む */
-  toggle(): void;
+  /**
+   * 保存済みの値と文脈を読み、入力欄へ流し込む。popup を開いたときに 1 回呼ぶ。
+   * **読み終えるまで「保存」は押せない** (空の入力欄のまま保存すると、既定値で上書きする)
+   */
+  fill(): Promise<void>;
 };
 
-export type PanelDeps = {
+export type FormDeps = {
   load(): Promise<Settings>;
   save(patch: Partial<Settings>): Promise<void>;
   /**
-   * いま開いている動画の文脈。**開くたびに読む。**
-   * SPA 遷移で別のチャンネルの動画に移っていることがある
+   * いま開いているタブの動画の文脈。**fill のたびに読み、保存はそのとき読んだ文脈で行う**
+   * (popup を開いている間はタブを移れないので、開くたびに読めば足りる。spec §2)
    */
-  getContext(): SettingsContext;
+  getContext(): Promise<SettingsContext>;
+  /**
+   * 書き込みが済んだ (popup はここで閉じる。spec §1)。**通らない項目があったとき・書けなかったときは呼ばない**
+   * (閉じずに理由を見せ、直してもう一度押せるようにする)
+   */
+  onSaved(): void;
 };
 
-const defaultDeps: PanelDeps = {
+const defaultDeps: FormDeps = {
   load: loadSettings,
   save: saveSettings,
-  getContext: () => ({ channel: null }),
+  getContext: () => Promise.resolve({ channel: null }),
+  onSaved: () => undefined,
 };
+
+/**
+ * popup の中の見た目。**popup の高さの上限 (Chrome は 600px) に収まるよう詰める**: 項目名と入力欄を横に並べ、
+ * 説明は入力欄の下に小さく出す。配色は --ytc-* (popup.ts が body に置く。ページ内の窓と同じ配色)
+ */
+const FORM_STYLE = {
+  root: "display:flex;flex-direction:column;gap:6px;",
+  field: "display:grid;grid-template-columns:132px minmax(0,1fr);column-gap:8px;row-gap:2px;align-items:center;",
+  label: "color:var(--ytc-text);font-size:12px;font-weight:500;",
+  input:
+    "appearance:none;box-sizing:border-box;width:100%;border:1px solid var(--ytc-border);border-radius:6px;height:26px;padding:0 8px;font:inherit;font-size:13px;background:transparent;color:var(--ytc-text);",
+  /** 色の入力欄は見本だけ。幅いっぱいに伸ばさない */
+  color:
+    "box-sizing:border-box;width:44px;height:26px;padding:2px;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;",
+  hint: "grid-column:1/-1;color:var(--ytc-text-sub);font-size:11px;line-height:1.4;",
+  /**
+   * 「保存」は popup の下端に貼り付ける (sticky)。状態の文言が長いなどで popup の上限を超えてスクロールしても、
+   * 押す場所を探させない
+   */
+  footer:
+    "position:sticky;bottom:0;display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:6px 0;background:var(--ytc-panel);",
+  result: "color:var(--ytc-text-sub);font-size:12px;",
+  save: "appearance:none;border:none;border-radius:14px;height:28px;padding:0 16px;font:inherit;font-weight:500;cursor:pointer;background:var(--ytc-accent);color:var(--ytc-on-accent);",
+} as const;
 
 /** 入力欄として振る舞う要素。`value` と `disabled` はどちらも持つ */
 export type FieldInput = HTMLInputElement | HTMLSelectElement;
@@ -52,7 +85,7 @@ export function createFieldInput(field: SettingsField): FieldInput {
   if (field.control.kind === "select") {
     const select = document.createElement("select");
     select.id = id;
-    select.style.cssText = PANEL_STYLE.input;
+    select.style.cssText = FORM_STYLE.input;
     select.append(
       ...field.control.options.map((option) => {
         const element = document.createElement("option");
@@ -67,7 +100,7 @@ export function createFieldInput(field: SettingsField): FieldInput {
   const input = document.createElement("input");
   input.id = id;
   input.type = field.control.kind === "color" ? "color" : "text";
-  input.style.cssText = PANEL_STYLE.input;
+  input.style.cssText = field.control.kind === "color" ? FORM_STYLE.color : FORM_STYLE.input;
   if (field.control.kind === "text" && field.control.suggestions !== undefined) {
     // 候補の箱は `createFieldExtras` が作る。id の決め方をここと揃える
     input.setAttribute("list", `${id}-suggestions`);
@@ -98,37 +131,29 @@ export function createFieldExtras(field: SettingsField): HTMLElement[] {
   return [datalist];
 }
 
-export function createSettingsPanel(
-  overrides: Partial<PanelDeps> = {},
-): SettingsPanel {
-  const deps: PanelDeps = { ...defaultDeps, ...overrides };
+export function createSettingsForm(
+  overrides: Partial<FormDeps> = {},
+): SettingsForm {
+  const deps: FormDeps = { ...defaultDeps, ...overrides };
   const element = document.createElement("div");
-  element.style.cssText = PANEL_STYLE.root;
-  // 出し入れは hidden と style.display の両方で行う。根は flex で並べるので display を持ち、
-  // inline の display は UA の [hidden] に勝つ (floating-window.ts と同じ作法)。hidden は
-  // 外から「出ているか」を読むために残す
-  function setOpen(open: boolean): void {
-    element.hidden = !open;
-    element.style.display = open ? "flex" : "none";
-  }
-  setOpen(false);
+  element.style.cssText = FORM_STYLE.root;
 
   // 項目・入力欄・説明を組で持つ。鍵で引き直す形にすると、必ず存在するものに
   // 対して undefined チェックが要るうえ、項目が増えるたびに Map が 1 本増える
   const rows = SETTINGS_FIELDS.map((field) => {
     const wrapper = document.createElement("div");
-    wrapper.style.cssText = PANEL_STYLE.field;
+    wrapper.style.cssText = FORM_STYLE.field;
 
     const label = document.createElement("label");
-    label.style.cssText = PANEL_STYLE.label;
+    label.style.cssText = FORM_STYLE.label;
     label.textContent = field.label;
     label.htmlFor = `yt-clip-setting-${field.key}`;
 
     const input = createFieldInput(field);
 
-    // 文言は文脈で変わる (どのチャンネルのタグか)。中身は開くときに入れる
+    // 文言は文脈で変わる (どのチャンネルのタグか)。中身は fill で入れる
     const hint = document.createElement("div");
-    hint.style.cssText = PANEL_STYLE.hint;
+    hint.style.cssText = FORM_STYLE.hint;
 
     wrapper.append(label, input, ...createFieldExtras(field), hint);
     element.append(wrapper);
@@ -136,47 +161,44 @@ export function createSettingsPanel(
   });
 
   const result = document.createElement("span");
-  result.style.cssText = PANEL_STYLE.result;
+  result.style.cssText = FORM_STYLE.result;
 
   const save = document.createElement("button");
   save.textContent = "保存";
   save.dataset.role = "save";
+  save.style.cssText = FORM_STYLE.save;
+  // 読み終えるまで押させない (fill)
+  save.disabled = true;
 
   const footer = document.createElement("div");
-  footer.style.cssText = PANEL_STYLE.footer;
+  footer.style.cssText = FORM_STYLE.footer;
   footer.append(result, save);
   element.append(footer);
 
-  /**
-   * 保存済みの値を入力欄へ流し込む。
-   *
-   * 読んだばかりの設定と文脈があれば渡すこと。**保存の直後に読み直すと、
-   * 1 回の保存で storage を何度も往復する**
-   */
-  async function fill(
-    loaded?: Settings,
-    loadedContext?: SettingsContext,
-  ): Promise<void> {
-    const settings = loaded ?? (await deps.load());
-    const context = loadedContext ?? deps.getContext();
+  /** fill で読んだ文脈。保存はこれで行う。読む前は null */
+  let context: SettingsContext | null = null;
 
+  /** 読んだ設定と文脈を入力欄へ流し込む */
+  function render(settings: Settings, current: SettingsContext): void {
     for (const { field, input, hint } of rows) {
       // **分岐するのは scope だけ。** key を見て分岐すると、項目を足すたびに
       // ここへ戻ってくることになる
-      const unavailable = field.scope === "channel" && context.channel === null;
+      const unavailable = field.scope === "channel" && current.channel === null;
       input.disabled = unavailable;
-      input.value = unavailable ? "" : field.toText(settings, context);
-      hint.textContent = field.hint(context);
+      input.value = unavailable ? "" : field.toText(settings, current);
+      hint.textContent = field.hint(current);
     }
   }
 
   save.addEventListener("click", () => {
+    // fill の前は disabled なので来ない。来たら配線のバグなので、黙って既定値を書く形で隠さない
+    if (context === null) throw new Error("設定を読む前に保存が押されました");
+    const current = context;
     void (async () => {
       try {
         // 差分の土台は**保存されている現在の設定**。チャンネル別の項目は
         // 他のチャンネル分を残したまま 1 件だけ差し替える必要がある
         const settings = await deps.load();
-        const context = deps.getContext();
 
         // 項目ごとの差分をまとめて 1 回で書く
         let patch: Partial<Settings> = {};
@@ -185,7 +207,7 @@ export function createSettingsPanel(
           // チャンネルを特定できない画面を開いただけでタグが消える
           if (input.disabled) continue;
 
-          const converted = field.fromText(input.value, settings, context);
+          const converted = field.fromText(input.value, settings, current);
           // **1 つでも通らなければ何も保存しない。** 一部だけ書き込むと、
           // エラーを見た利用者が「何が保存されて何が保存されなかったか」を
           // 画面から判断できない
@@ -197,25 +219,34 @@ export function createSettingsPanel(
         }
         await deps.save(patch);
         // 正規化した結果を出す。何が保存されたかを見せる。
-        // 読んだばかりのものを渡して、storage の往復とチャンネルの再取得を省く
-        await fill({ ...settings, ...patch }, context);
+        // 読んだばかりのものを渡して、storage の往復を省く
+        render({ ...settings, ...patch }, current);
         result.textContent = "保存しました";
       } catch (error) {
         // 保存できていないのに黙っていると、設定したつもりで投稿してしまう
         result.textContent = `保存できませんでした: ${String(error)}`;
+        return;
       }
+      // 書き込みが済んでから知らせる (popup は閉じると処理ごと止まる)。try の外に置く: 受け手の失敗を
+      // 「保存できませんでした」と取り違えない
+      deps.onSaved();
     })();
   });
 
   return {
     element,
-    toggle(): void {
-      setOpen(element.hidden);
+    async fill(): Promise<void> {
+      save.disabled = true;
       result.textContent = "";
-      // 開くたびに読み直す。別のタブで変えた設定を古いまま上書きしない
-      if (!element.hidden) void fill();
+      try {
+        const [settings, loaded] = await Promise.all([deps.load(), deps.getContext()]);
+        context = loaded;
+        render(settings, loaded);
+        save.disabled = false;
+      } catch (error) {
+        // 読めないまま保存させると、空の入力欄で上書きする。押させずに理由を出す
+        result.textContent = `設定を読めませんでした: ${String(error)}`;
+      }
     },
   };
 }
-
-export { PANEL_STYLE };

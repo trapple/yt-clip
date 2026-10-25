@@ -5,7 +5,7 @@ import { createFloatingWindow, type FloatingWindow } from "@/content/floating-wi
 import { acceptsDock, initialDocks, type DockSlotId, type WindowId } from "@/content/window-layout";
 
 /** タブの文言 (youtube.ts と同じ) */
-const TITLES = { bar: "バー", list: "区間・テロップ", settings: "設定" } as const;
+const TITLES = { bar: "バー", list: "区間・テロップ" } as const;
 /** 差す先の箱 (jsdom はレイアウトを持たない)。帯 (目印 40px / タブの列 28px) は枠の上端に置く */
 const BELOW = { left: 0, top: 600, width: 800 };
 const SIDE = { left: 840, top: 60, width: 400 };
@@ -65,7 +65,7 @@ type Setup = {
 
 let made: Setup | null = null;
 
-/** 差す先 2 つと窓 3 つ (浮いた窓で出ている) を作り、枠を差す */
+/** 差す先 2 つと窓 2 つ (浮いた窓で出ている) を作り、枠を差す */
 function setup(): Setup {
   const below = document.createElement("div");
   below.id = "below";
@@ -87,7 +87,7 @@ function setup(): Setup {
     frame.setVisible(true);
     return frame;
   };
-  const windows = { bar: make("bar"), list: make("list"), settings: make("settings") };
+  const windows = { bar: make("bar"), list: make("list") };
   const onChange = vi.fn();
   const onEvacuate = vi.fn();
   const onUndock = vi.fn();
@@ -140,7 +140,10 @@ function paneDisplay(frame: FloatingWindow): string {
   return pane.style.display;
 }
 
-/** 帯の中の点 (下の枠 / 右の枠)。目印 (40px) にもタブの列 (28px) にも入る高さ */
+/**
+ * 帯の中の点 (下の枠 / 右の枠)。目印 (40px) にもタブの列 (28px) にも入る高さ。
+ * 2 つのタブを並べられるのは下の枠だけ (右の枠にバーは入らない) なので、タブの並びは下の枠で見る
+ */
 const BELOW_BAND = { x: 100, y: 610 };
 const SIDE_BAND = { x: 900, y: 70 };
 /** どの帯からも離れた点 */
@@ -208,15 +211,15 @@ describe("入れる・出す・前に出す", () => {
   test("2 つ入れるとタブの列が出て、後から入れた方が前。前のタブの窓だけを出す (窓の出し入れは変えない)", () => {
     const { manager, windows } = setup();
 
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("bar", "below");
+    manager.dock("list", "below");
 
-    expect(tabRowOf("side").style.display).toBe("flex");
-    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
-    expect(activeLabel("side")).toBe("設定");
-    expect(paneDisplay(windows.list)).toBe("none");
-    expect(paneDisplay(windows.settings)).toBe("block");
-    expect(windows.list.element.hidden).toBe(false);
+    expect(tabRowOf("below").style.display).toBe("flex");
+    expect(tabLabels("below")).toEqual(["バー", "区間・テロップ"]);
+    expect(activeLabel("below")).toBe("区間・テロップ");
+    expect(paneDisplay(windows.bar)).toBe("none");
+    expect(paneDisplay(windows.list)).toBe("block");
+    expect(windows.bar.element.hidden).toBe(false);
   });
 
   test("バーだけの枠はタブの列を出さない。区間・テロップの窓だけの枠は出す (掴む場所が要る)", () => {
@@ -239,40 +242,43 @@ describe("入れる・出す・前に出す", () => {
 
   test("activate で前のタブを替え、onChange で知らせる。枠に入っていない窓では何もしない", () => {
     const { manager, windows, onChange } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("bar", "below");
+    manager.dock("list", "below");
     onChange.mockClear();
 
-    manager.activate("list");
-
-    expect(activeLabel("side")).toBe("区間・テロップ");
-    expect(paneDisplay(windows.list)).toBe("block");
-    expect(paneDisplay(windows.settings)).toBe("none");
-    expect(onChange).toHaveBeenLastCalledWith({ side: { tabs: ["list", "settings"], active: "list" } });
-
-    onChange.mockClear();
     manager.activate("bar");
+
+    expect(activeLabel("below")).toBe("バー");
+    expect(paneDisplay(windows.bar)).toBe("block");
+    expect(paneDisplay(windows.list)).toBe("none");
+    expect(onChange).toHaveBeenLastCalledWith({ below: { tabs: ["bar", "list"], active: "bar" } });
+
+    // 区間・テロップを枠から出し、枠に入っていない窓 (区間・テロップ) と既に前のタブ (バー) を activate
+    manager.undock("list");
+    onChange.mockClear();
     manager.activate("list");
+    manager.activate("bar");
     expect(onChange).not.toHaveBeenCalled();
   });
 
   test("隠れた窓のタブは出さず、前のタブが隠れたら見えているタブの先頭を出す。覚えた前のタブは変えず、保存も求めない", () => {
     const { manager, windows, onChange } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    // バーを前に出し、そのバーを隠す (区間・テロップのタブが残るので、タブの列は出たまま)
+    manager.dock("list", "below");
+    manager.dock("bar", "below");
     onChange.mockClear();
 
-    windows.settings.setVisible(false);
+    windows.bar.setVisible(false);
     manager.sync();
 
-    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(tabLabels("below")).toEqual(["区間・テロップ"]);
     expect(paneDisplay(windows.list)).toBe("block");
-    expect(manager.state().side?.active).toBe("settings");
+    expect(manager.state().below?.active).toBe("bar");
     expect(onChange).not.toHaveBeenCalled();
 
-    windows.settings.setVisible(true);
+    windows.bar.setVisible(true);
     manager.sync();
-    expect(activeLabel("side")).toBe("設定");
+    expect(activeLabel("below")).toBe("バー");
   });
 
   test("見えている窓が 1 つも無い枠は、枠ごと隠す (空のタブの列でおすすめ動画を押し下げない)", () => {
@@ -287,17 +293,17 @@ describe("入れる・出す・前に出す", () => {
 
   test("undock で枠から出して body へ戻し、浮いた窓の見た目に戻す。元の枠は残りの窓で描き直す", () => {
     const { manager, windows, onChange } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("list", "below");
+    manager.dock("bar", "below");
 
-    manager.undock("settings");
+    manager.undock("bar");
 
-    expect(windows.settings.element.parentElement).toBe(document.body);
-    expect(windows.settings.element.style.position).toBe("fixed");
-    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(windows.bar.element.parentElement).toBe(document.body);
+    expect(windows.bar.element.style.position).toBe("fixed");
+    expect(tabLabels("below")).toEqual(["区間・テロップ"]);
     expect(paneDisplay(windows.list)).toBe("block");
-    expect(manager.slotOf("settings")).toBeNull();
-    expect(onChange).toHaveBeenLastCalledWith({ side: { tabs: ["list"] } });
+    expect(manager.slotOf("bar")).toBeNull();
+    expect(onChange).toHaveBeenLastCalledWith({ below: { tabs: ["list"] } });
   });
 
   test("別の枠へ入れ直すと、元の枠から外れて入れた枠の末尾に付く", () => {
@@ -314,44 +320,45 @@ describe("入れる・出す・前に出す", () => {
 
   test("restore は最初の配置の枠へ、最初の配置の並びの位置に入れて前に出す (浮いた窓も、別の枠の窓も)", () => {
     const { manager, windows, onChange } = setup();
-    manager.dock("settings", "side");
     manager.dock("list", "below");
 
+    // 別の枠の窓 (下の枠の区間・テロップ) を右の枠へ
     manager.restore("list");
 
-    // 区間・テロップ → 設定 の順 (末尾に付けない)
-    expect(manager.state()).toEqual({ side: { tabs: ["list", "settings"], active: "list" } });
+    expect(manager.state()).toEqual({ side: { tabs: ["list"], active: "list" } });
     expect(windows.list.element.closest("#yt-clip-dock-side")).not.toBeNull();
     expect(slotRoot("below").style.display).toBe("none");
-    expect(onChange).toHaveBeenLastCalledWith({ side: { tabs: ["list", "settings"], active: "list" } });
+    expect(onChange).toHaveBeenLastCalledWith({ side: { tabs: ["list"], active: "list" } });
 
+    // 浮いた窓 (バー) を下の枠へ。区間・テロップがいても、バー → 区間・テロップ の順 (末尾に付けない)
+    manager.dock("list", "below");
     manager.restore("bar");
-    expect(manager.state().below).toEqual({ tabs: ["bar"], active: "bar" });
+    expect(manager.state().below).toEqual({ tabs: ["bar", "list"], active: "bar" });
   });
 
   test("既に最初の配置の枠にあるが並びが違う窓を restore すると、最初の並び順の位置へ移り、前に出る", () => {
     const { manager, onChange } = setup();
-    // 落とし直しで末尾に付いた並び (設定 → 区間・テロップ)
-    manager.dock("settings", "side");
-    manager.dock("list", "side");
+    // 落とし直しで末尾に付いた並び (区間・テロップ → バー)
+    manager.dock("list", "below");
+    manager.dock("bar", "below");
     onChange.mockClear();
 
-    manager.restore("list");
+    manager.restore("bar");
 
-    expect(manager.state()).toEqual({ side: { tabs: ["list", "settings"], active: "list" } });
-    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
+    expect(manager.state()).toEqual({ below: { tabs: ["bar", "list"], active: "bar" } });
+    expect(tabLabels("below")).toEqual(["バー", "区間・テロップ"]);
     expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   test("restore で、既に最初の配置の枠の最初の並びにある窓は、並びを保ったまま前に出す (保存も求める)", () => {
     const { manager, onChange } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("bar", "below");
+    manager.dock("list", "below");
     onChange.mockClear();
 
-    manager.restore("list");
+    manager.restore("bar");
 
-    expect(manager.state()).toEqual({ side: { tabs: ["list", "settings"], active: "list" } });
+    expect(manager.state()).toEqual({ below: { tabs: ["bar", "list"], active: "bar" } });
     expect(onChange).toHaveBeenCalledTimes(1);
   });
 
@@ -370,7 +377,7 @@ describe("入れる・出す・前に出す", () => {
     const { manager } = setup();
     manager.dock("list", "side");
     const copy = manager.state();
-    copy.side?.tabs.push("settings");
+    copy.side?.tabs.push("bar");
     expect(manager.state()).toEqual({ side: { tabs: ["list"], active: "list" } });
   });
 });
@@ -446,20 +453,18 @@ describe("差し直しと退避", () => {
   test("load は onChange を呼ばずに枠の中身を入れ、sync で置く", () => {
     const { manager, windows, onChange } = setup();
 
-    manager.load({ below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "list" } });
+    // 前のタブは末尾 (後から入れた方) でないほうにして、覚えた前のタブで出すことを見る
+    manager.load({ below: { tabs: ["bar", "list"], active: "bar" } });
     expect(onChange).not.toHaveBeenCalled();
     expect(windows.list.element.parentElement).toBe(document.body);
 
     manager.sync();
 
     expect(windows.bar.element.closest("#yt-clip-dock-below")).not.toBeNull();
-    expect(windows.list.element.closest("#yt-clip-dock-side")).not.toBeNull();
-    expect(tabLabels("side")).toEqual(["区間・テロップ", "設定"]);
-    expect(activeLabel("side")).toBe("区間・テロップ");
-    expect(manager.state()).toEqual({
-      below: { tabs: ["bar"] },
-      side: { tabs: ["list", "settings"], active: "list" },
-    });
+    expect(windows.list.element.closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(tabLabels("below")).toEqual(["バー", "区間・テロップ"]);
+    expect(activeLabel("below")).toBe("バー");
+    expect(manager.state()).toEqual({ below: { tabs: ["bar", "list"], active: "bar" } });
     expect(onChange).not.toHaveBeenCalled();
   });
 });
@@ -479,11 +484,12 @@ describe("落とし先 (drag)", () => {
 
   test("枠の中身 (置き場) の上や、帯の外で離しても入れない", () => {
     const { manager } = setup();
-    manager.dock("settings", "side");
+    // バーだけの枠。帯は先頭の目印 (上端 600・高さ 40) で、その下は置き場
+    manager.dock("bar", "below");
 
     manager.drag("list", "start", AWAY);
-    manager.drag("list", "move", { x: 900, y: 200 });
-    expect(manager.drag("list", "end", { x: 900, y: 200 })).toBeNull();
+    manager.drag("list", "move", { x: 100, y: 700 });
+    expect(manager.drag("list", "end", { x: 100, y: 700 })).toBeNull();
 
     manager.drag("list", "start", AWAY);
     expect(manager.drag("list", "end", { x: 500, y: 400 })).toBeNull();
@@ -545,13 +551,13 @@ describe("落とし先 (drag)", () => {
 
   test("タブの列がある枠は、タブの列そのものが帯になる (目印は出さない)", () => {
     const { manager } = setup();
-    manager.dock("settings", "side");
+    manager.dock("list", "below");
 
-    manager.drag("list", "start", AWAY);
+    manager.drag("bar", "start", AWAY);
 
-    expect(bandOf("side")).toBe(tabRowOf("side"));
-    expect(markerOf("side").style.display).toBe("none");
-    manager.drag("list", "end", AWAY);
+    expect(bandOf("below")).toBe(tabRowOf("below"));
+    expect(markerOf("below").style.display).toBe("none");
+    manager.drag("bar", "end", AWAY);
   });
 
   test("指が中にある帯は塗り (data-drop-hover)、離すと帯も塗りも消す", () => {
@@ -594,34 +600,34 @@ describe("落とし先 (drag)", () => {
 describe("タブ", () => {
   test("押して 8px 未満で離すと、そのタブを前に出す", () => {
     const { manager, onUndock } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("list", "below");
+    manager.dock("bar", "below");
 
-    const tab = tabOf("side", "list");
-    pointer(tab, "pointerdown", 860, 70);
-    pointer(tab, "pointermove", 863, 70);
-    pointer(tab, "pointerup", 863, 70);
+    const tab = tabOf("below", "list");
+    pointer(tab, "pointerdown", 20, 610);
+    pointer(tab, "pointermove", 23, 610);
+    pointer(tab, "pointerup", 23, 610);
 
-    expect(activeLabel("side")).toBe("区間・テロップ");
+    expect(activeLabel("below")).toBe("区間・テロップ");
     expect(onUndock).not.toHaveBeenCalled();
   });
 
   test("8px 以上動かすと枠から出して onUndock (指の位置・タブの中で押した点) を呼び、元の枠は残りの窓ですぐ描き直す", () => {
     const { manager, windows, onUndock } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
-    manager.activate("list");
+    manager.dock("list", "below");
+    manager.dock("bar", "below");
 
-    // タブの箱は (848, 60) から (stub)。(860, 70) で押す = タブの中の (12, 10)
-    const tab = tabOf("side", "list");
-    pointer(tab, "pointerdown", 860, 70);
-    pointer(tab, "pointermove", 860, 80);
+    // タブの箱は (8, 600) から (stub)。(20, 610) で押す = タブの中の (12, 10)。
+    // バーを引き出し、区間・テロップのタブが残る (バーだけ残るとタブの列ごと消えて、描き直しが見えない)
+    const tab = tabOf("below", "bar");
+    pointer(tab, "pointerdown", 20, 610);
+    pointer(tab, "pointermove", 20, 620);
 
-    expect(onUndock).toHaveBeenCalledWith("list", { x: 860, y: 80 }, { x: 12, y: 10 });
-    expect(windows.list.element.parentElement).toBe(document.body);
-    expect(manager.slotOf("list")).toBeNull();
-    expect(tabLabels("side")).toEqual(["設定"]);
-    pointer(tab, "pointerup", 860, 80);
+    expect(onUndock).toHaveBeenCalledWith("bar", { x: 20, y: 620 }, { x: 12, y: 10 });
+    expect(windows.bar.element.parentElement).toBe(document.body);
+    expect(manager.slotOf("bar")).toBeNull();
+    expect(tabLabels("below")).toEqual(["区間・テロップ"]);
+    pointer(tab, "pointerup", 20, 620);
   });
 
   test("残りが 0 になった枠は、ドラッグの間は 40px の目印に変わる", () => {
@@ -640,16 +646,16 @@ describe("タブ", () => {
 
   test("掴んだタブの要素だけは、指を離すまで DOM に残す (display: none。捕捉が付いている)", () => {
     const { manager } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("list", "below");
+    manager.dock("bar", "below");
 
-    const tab = tabOf("side", "list");
-    pointer(tab, "pointerdown", 860, 70);
-    pointer(tab, "pointermove", 860, 90);
+    const tab = tabOf("below", "bar");
+    pointer(tab, "pointerdown", 20, 610);
+    pointer(tab, "pointermove", 20, 630);
     expect(tab.isConnected).toBe(true);
     expect(tab.style.display).toBe("none");
 
-    // 設定のタブが描き直されても、掴んだタブは外さない
+    // 区間・テロップのタブが描き直されても、掴んだタブは外さない
     manager.sync();
     expect(tab.isConnected).toBe(true);
 
@@ -660,13 +666,14 @@ describe("タブ", () => {
 
   test("引き出した直後は元の枠の帯の中にあるので、一度帯を出て入り直すまで戻さない", () => {
     const { manager, windows } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("bar", "below");
+    manager.dock("list", "below");
 
-    const tab = tabOf("side", "list");
-    pointer(tab, "pointerdown", 860, 70);
-    pointer(tab, "pointermove", 1100, 70);
-    pointer(tab, "pointerup", 1100, 70);
+    // 下の枠の帯 (左端 0・幅 800) の中を横へ 40px 以上動かして離す
+    const tab = tabOf("below", "list");
+    pointer(tab, "pointerdown", 20, 610);
+    pointer(tab, "pointermove", 700, 610);
+    pointer(tab, "pointerup", 700, 610);
     expect(windows.list.element.parentElement).toBe(document.body);
   });
 
@@ -687,21 +694,21 @@ describe("タブ", () => {
 
   test("押している最中に別のタブが消えても、押しているタブは付け直さない (捕捉が外れない)", () => {
     const { manager, windows } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
-    const tab = tabOf("side", "list");
+    manager.dock("bar", "below");
+    manager.dock("list", "below");
+    const tab = tabOf("below", "list");
     const observer = new MutationObserver(() => undefined);
-    observer.observe(tabRowOf("side"), { childList: true });
-    pointer(tab, "pointerdown", 860, 70);
+    observer.observe(tabRowOf("below"), { childList: true });
+    pointer(tab, "pointerdown", 20, 610);
 
-    windows.settings.setVisible(false);
+    windows.bar.setVisible(false);
     manager.sync();
 
     const removed = observer.takeRecords().flatMap((record) => [...record.removedNodes]);
     observer.disconnect();
     expect(removed).not.toContain(tab);
-    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
-    pointer(tab, "pointerup", 860, 70);
+    expect(tabLabels("below")).toEqual(["区間・テロップ"]);
+    pointer(tab, "pointerup", 20, 610);
   });
 
   test("タブのダブルクリックで onTabDoubleClick", () => {
@@ -715,31 +722,33 @@ describe("タブ", () => {
 describe("タブからの引き出し中の DOM (Task 4・5 のレビューからの申し送り)", () => {
   test("掴んだタブは、描き直し (sync・帯の塗り) のたびに見た目を上書きされず、隠れたまま列に残る", () => {
     const { manager } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("bar", "below");
+    manager.dock("list", "below");
 
-    const tab = tabOf("side", "list");
-    pointer(tab, "pointerdown", 860, 70);
-    pointer(tab, "pointermove", 860, 90);
+    // 区間・テロップを引き出し、右の枠の帯を塗る
+    const tab = tabOf("below", "list");
+    pointer(tab, "pointerdown", 20, 610);
+    pointer(tab, "pointermove", 20, 630);
     manager.sync();
     pointer(tab, "pointermove", AWAY.x, AWAY.y);
-    pointer(tab, "pointermove", BELOW_BAND.x, BELOW_BAND.y);
+    pointer(tab, "pointermove", SIDE_BAND.x, SIDE_BAND.y);
 
-    expect(tab.parentElement).toBe(tabRowOf("side"));
+    expect(markerOf("side").dataset.dropHover).toBe("true");
+    expect(tab.parentElement).toBe(tabRowOf("below"));
     expect(tab.style.display).toBe("none");
     pointer(tab, "pointerup", AWAY.x, AWAY.y);
   });
 
   test("タブ自身のリスナは引き出す前に外す (その後の move で 2 度引き出さず、離しても前に出す扱いにしない)", () => {
     const { manager, windows, onUndock, onChange } = setup();
-    manager.dock("list", "side");
-    manager.dock("settings", "side");
+    manager.dock("bar", "below");
+    manager.dock("list", "below");
     const beginMoveFrom = vi.spyOn(windows.list, "beginMoveFrom");
 
-    const tab = tabOf("side", "list");
-    pointer(tab, "pointerdown", 860, 70);
-    pointer(tab, "pointermove", 860, 90);
-    pointer(tab, "pointermove", 860, 120);
+    const tab = tabOf("below", "list");
+    pointer(tab, "pointerdown", 20, 610);
+    pointer(tab, "pointermove", 20, 630);
+    pointer(tab, "pointermove", 20, 660);
     const changes = onChange.mock.calls.length;
     pointer(tab, "pointerup", AWAY.x, AWAY.y);
 
@@ -770,8 +779,8 @@ describe("destroy (マスタースイッチのオフ)", () => {
   test("ドラッグの最中 (目印を出している) でも、2 つの枠の根ごと目印・タブの列・入っている窓を外す", () => {
     const { manager, windows } = setup();
     manager.dock("list", "side");
-    // 設定の窓のドラッグを始める。空の下の枠に 40px の目印が出る
-    manager.drag("settings", "start", AWAY);
+    // バーのドラッグを始める。空の下の枠に 40px の目印が出る
+    manager.drag("bar", "start", AWAY);
     expect(markerOf("below").style.display).not.toBe("none");
 
     manager.destroy();

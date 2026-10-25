@@ -369,10 +369,9 @@ test("テロップの実機確認", async () => {
   ).not.toBeEmpty({ timeout: 30_000 });
 
   const button = (name: string) => bar.getByRole("button", { name, exact: true });
-  // 区間とテロップの一覧は区間・テロップの窓、設定は設定の窓にある (窓の分割の spec C1.1)。
-  // バーには拡大バーと操作の行だけ
+  // 区間とテロップの一覧は区間・テロップの窓にある (窓の分割の spec C1.1)。バーには拡大バーと操作の行だけ。
+  // 設定はページに無く、popup にある (settings-in-popup spec)
   const listWindow = page.locator("#yt-clip-list");
-  const settingsWindow = page.locator("#yt-clip-settings");
   const segmentRows = listWindow.locator("[data-role=segment]");
   const telopRows = listWindow.locator("[data-role=telop]");
 
@@ -478,6 +477,37 @@ test("テロップの実機確認", async () => {
     // 状態機械からの通知が返ってくるのを待つ。文言そのものは textarea に残って
     // いるので DOM では見分けられない
     await page.waitForTimeout(500);
+  }
+
+  /**
+   * popup の設定フォームで値を入れて「保存」する (settings-in-popup spec)。values の鍵は入力欄の id の
+   * `yt-clip-setting-<key>` の key。popup はタブで開くので、**開いている間 YouTube のタブは隠れる** (録画中には呼ばない)。
+   * アクティブなタブは popup 自身になるので、ハッシュタグ欄は入力できない (チャンネル別のタグは writeSettings で書く)。
+   * 保存は sync の settings に書かれ、ページは onChanged で拾う
+   */
+  async function saveSettingsInPopup(values: Record<string, string>): Promise<void> {
+    const popup = await context.newPage();
+    try {
+      await popup.goto(`chrome-extension://${extensionId}/src/popup/popup.html`, { timeout: 30_000 });
+      const save = popup.getByRole("button", { name: "保存" });
+      // 「保存」は設定を読み終えるまで押せない。読む前に入れると、読んだ値で上書きされる
+      await expect(save).toBeEnabled({ timeout: 10_000 });
+      for (const [key, value] of Object.entries(values)) {
+        const field = popup.locator(`#yt-clip-setting-${key}`);
+        if (await field.evaluate((element) => element.tagName === "SELECT")) {
+          await field.selectOption(value);
+        } else {
+          await field.fill(value);
+        }
+      }
+      // 保存できたら popup は閉じる (settings-in-popup spec §1)。閉じたことで書き込みが済んだと分かる
+      const closed = popup.waitForEvent("close", { timeout: 10_000 });
+      await save.click();
+      await closed;
+    } finally {
+      if (!popup.isClosed()) await popup.close();
+      await page.bringToFront();
+    }
   }
 
   async function buildSegments(): Promise<void> {
@@ -840,7 +870,8 @@ test("テロップの実機確認", async () => {
 
   // --- シンプルモードでは一覧が出ない ------------------------------------------
   await check("シンプルモードでテロップの一覧が出ない", async () => {
-    await writeSettings({ mode: "simple" });
+    // 切り替えは popup で行う (popup の保存が、読み込み直さずに実機の YouTube のページへ届くことも兼ねて見る)
+    await saveSettingsInPopup({ mode: "simple" });
     const addTelop = listWindow.locator("[data-role=add-telop]");
     // **有ることを先に確かめる。** toBeHidden は見つからない要素でも通るので、
     // 探す場所を間違えていても素通りしてしまう
@@ -867,11 +898,11 @@ test("テロップの実機確認", async () => {
   }
 
   // --- 受け入れ条件 (窓の分割の spec C2.10。フロートの窓の spec A.4・C1.5 を最初の配置 (ドック) で測る): 1440x795 で、
-  // 覚えた配置が無いとき、バーは下の枠 (#below の先頭) に入ってページの先頭で画面に収まり、区間・テロップと設定は
-  // 右の枠 (#secondary-inner の先頭) にタブで入ってプレイヤーに重ならない ---------------------------------------------
+  // 覚えた配置が無いとき、バーは下の枠 (#below の先頭) に入ってページの先頭で画面に収まり、区間・テロップは
+  // 右の枠 (#secondary-inner の先頭) に入ってプレイヤーに重ならない ---------------------------------------------------
   // 1920x1080 の確認がすべて済んでから切り替え、最後に戻す
   const ACCEPTANCE_1440 =
-    "受け入れ条件 1440x795: 最初の配置 (ドック) のまま帯の段が最大 (2 段 + 「+N」) で設定を開いても、下の枠のバーがプレイヤーの下で画面に収まり、右の枠の区間・テロップと設定がプレイヤーに重ならない";
+    "受け入れ条件 1440x795: 最初の配置 (ドック) のまま帯の段が最大 (2 段 + 「+N」) でも、下の枠のバーがプレイヤーの下で画面に収まり、右の枠の区間・テロップがプレイヤーに重ならない";
   await check(ACCEPTANCE_1440, async () => {
     // 前提を自分で作る: 覚えた配置を消して読み込み直す (最初の配置になる)。区間はまだ無い (直前の項目でシンプルに
     // 切り替えた) ので reloadAndWaitList は使わない
@@ -896,10 +927,6 @@ test("テロップの実機確認", async () => {
         await listWindow.locator("[data-role=add-telop]").click();
         await expect(telopRows).toHaveCount(i + 1);
       }
-      // 設定も開く (右の枠で設定のタブが前に出る)
-      await button("⚙").click();
-      await expect(page.locator("#yt-clip-setting-mode")).toBeVisible();
-      await expect(settingsWindow).toBeVisible();
 
       // 「スクロールせずに操作できる」かを測るので、ページは先頭に戻す
       await page.evaluate(() => window.scrollTo(0, 0));
@@ -937,7 +964,8 @@ test("テロップの実機確認", async () => {
           belowFirst: below.parentElement?.id === "below" && below.parentElement.firstElementChild === below,
           belowTabsShown: belowTabs !== null && getComputedStyle(belowTabs).display !== "none",
           listInSide: inSlot(side, "yt-clip-list"),
-          settingsInSide: inSlot(side, "yt-clip-settings"),
+          // 設定の窓はもう無い (settings-in-popup spec §3)。どこかに出ていれば落とす
+          settingsExists: document.getElementById("yt-clip-settings") !== null,
           sideFirst:
             side.parentElement?.id === "secondary-inner" && side.parentElement.firstElementChild === side,
           sideLabels: sideTabs.map((tab) => tab.textContent ?? ""),
@@ -977,12 +1005,12 @@ test("テロップの実機確認", async () => {
           measured.playerBottom <= measured.below.top &&
           measured.below.bottom <= measured.innerHeight &&
           measured.listInSide &&
-          measured.settingsInSide &&
+          !measured.settingsExists &&
           measured.sideFirst &&
           measured.side.left >= measured.playerRight &&
           measured.side.top >= (measured.mastheadBottom ?? Number.POSITIVE_INFINITY) &&
-          JSON.stringify(measured.sideLabels) === JSON.stringify(["区間・テロップ", "設定"]) &&
-          measured.sideActive === "設定" &&
+          JSON.stringify(measured.sideLabels) === JSON.stringify(["区間・テロップ"]) &&
+          measured.sideActive === "区間・テロップ" &&
           measured.telopBands === 2 &&
           measured.telopLanes === 2 &&
           measured.telopOverflow === "+1",
@@ -1000,11 +1028,10 @@ test("テロップの実機確認", async () => {
 
   // --- フロートの窓 (spec A.4・窓の分割の spec C1): 開閉する・動かす・大きさを変える・画面の外へ出しきれない・
   // 戻す・古い形を読む -------------------------------------------------------------------------------------
-  // 1920x1080 に戻した後に行う。受け入れ条件の確認で足した区間 5 つと、開いた設定が残っている
+  // 1920x1080 に戻した後に行う。受け入れ条件の確認で足した区間 5 つが残っている
   const barWindow = page.locator("#yt-clip-bar-window");
   const barGrip = bar.locator("[data-role=grip]");
   const listHeader = listWindow.locator("[data-role=window-header]");
-  const settingsHeader = settingsWindow.locator("[data-role=window-header]");
 
   type Box = { x: number; y: number; width: number; height: number };
   async function boxOf(locator: Locator): Promise<Box> {
@@ -1064,50 +1091,11 @@ test("テロップの実機確認", async () => {
     await expect(listWindow).toBeVisible();
   }
 
-  /**
-   * ⚙ を押す前にバーの窓を前に出す。⚙ はバーの右端にあり、区間・テロップの窓や設定の窓を
-   * 動かした後は同じ座標に重なりうる (触った順で重なり順が決まるため、⚙ の上に他の窓が乗ると
-   * click が塞がれて 30 秒 timeout する。実機の確認で実際に踏んだ)。grip は左端にあり他の窓と
-   * 重ならないので、押して離すだけ (位置は変わらず覚え直しもしない) で確実にバーを前に出せる
-   * (「右下をドラッグ…」の項目が元から使っていた idiom)
-   */
-  async function bringBarToFront(): Promise<void> {
-    await barGrip.click();
-  }
-
-  /**
-   * 設定が開いているか。**窓が見えているかでは判定しない**: ドック中で後ろのタブにいる設定の窓は、開いているが
-   * 見えない (枠の中の箱が隠れている)。開閉は窓の hidden (出す条件) で見る (窓の分割の spec C2.8)
-   */
-  async function isSettingsOpen(): Promise<boolean> {
-    return settingsWindow.evaluate((element) => !(element as HTMLElement).hidden);
-  }
-
-  /**
-   * 設定の窓が閉じていれば ⚙ を押して開く。**既に開いていれば何もしない**
-   * (トグルを盲目的に押すと、開いているつもりで押して閉じてしまう)。押す前にバーを前に出すので、
-   * 他の窓が ⚙ の上に重なっていても掴める
-   */
-  async function openSettings(): Promise<void> {
-    if (await isSettingsOpen()) return;
-    await bringBarToFront();
-    await button("⚙").click();
-    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
-  }
-
-  /** 設定の窓が開いていれば ⚙ を押して閉じる。既に閉じていれば何もしない */
-  async function closeSettings(): Promise<void> {
-    if (!(await isSettingsOpen())) return;
-    await bringBarToFront();
-    await button("⚙").click();
-    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
-  }
-
   // --- ドック枠の確認のヘルパ (窓の分割の spec C2) ---------------------------------------------------------------
   type Point = { x: number; y: number };
   const belowSlot = page.locator("#yt-clip-dock-below");
   const sideSlot = page.locator("#yt-clip-dock-side");
-  /** 3 つとも浮いた窓 (最初の位置) の配置。浮いた窓の確認の前提に使う (判断メモ 34) */
+  /** 2 つとも浮いた窓 (最初の位置) の配置。浮いた窓の確認の前提に使う (判断メモ 34) */
   const FLOAT_LAYOUT = { version: 2, float: {}, docks: {} };
 
   /** 枠の中の、文言が label のタブ */
@@ -1180,11 +1168,15 @@ test("テロップの実機確認", async () => {
         shown: getComputedStyle(root).display !== "none",
         parentId: root.parentElement?.id ?? null,
         first: root.parentElement?.firstElementChild === root,
+        // 先頭でないときに、前に何があるかを後から読めるようにする (記録だけ)
+        before: [...(root.parentElement?.children ?? [])]
+          .slice(0, [...(root.parentElement?.children ?? [])].indexOf(root))
+          .map((element) => `${element.tagName.toLowerCase()}${element.id === "" ? "" : `#${element.id}`}`),
         box: { top: b.top, bottom: b.bottom, left: b.left, right: b.right },
         tabsShown: row !== null && getComputedStyle(row).display !== "none",
         labels: tabs.map((tab) => tab.textContent ?? ""),
         active: tabs.find((tab) => tab.dataset.active === "true")?.textContent ?? null,
-        windows: ["yt-clip-bar-window", "yt-clip-list", "yt-clip-settings"].filter((windowId) => {
+        windows: ["yt-clip-bar-window", "yt-clip-list"].filter((windowId) => {
           const element = document.getElementById(windowId);
           return element !== null && root.contains(element);
         }),
@@ -1215,82 +1207,34 @@ test("テロップの実機確認", async () => {
     });
   }
 
-  /** 3 つの窓がどれも body の直下 (浮いた窓) か */
+  /** 2 つの窓がどちらも body の直下 (浮いた窓) か */
   async function allFloating(): Promise<boolean> {
     return page.evaluate(() =>
-      ["yt-clip-bar-window", "yt-clip-list", "yt-clip-settings"].every(
+      ["yt-clip-bar-window", "yt-clip-list"].every(
         (id) => document.getElementById(id)?.parentElement === document.body,
       ),
     );
   }
 
-  await check("⚙ で設定が別の窓に開閉し、区間・テロップの窓はそのまま", async () => {
-    // 前提: 3 つとも浮いた窓の最初の位置 (最初の配置はドックなので、覚えた配置を枠なしにして読み込み直す。判断メモ 34)
-    await setLayoutAndReload(FLOAT_LAYOUT);
-    await page.evaluate(() => window.scrollTo(0, 0));
-    // 前提を自分で作る (前の項目の終わり方に依存しない)。受け入れ条件の確認で開いたまま
-    // 終わっているはずだが、閉じていれば開く。どちらの窓もまだ動かしていない (1920x1080 の最初の位置)
-    await openSettings();
-    const listOpen = await boxOf(listWindow);
-    const settingsOpen = await boxOf(settingsWindow);
-
-    await bringBarToFront();
-    await button("⚙").click();
-    await expect(settingsWindow).toBeHidden({ timeout: 10_000 });
-    const listClosed = await boxOf(listWindow);
-
-    await bringBarToFront();
-    await button("⚙").click();
-    await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
-    const settingsReopened = await boxOf(settingsWindow);
-
-    record(
-      "⚙ で設定が別の窓に開閉し、区間・テロップの窓はそのまま",
-      // 設定の窓は区間・テロップの窓から (0, +32) (C1.3 のカスケード)
-      near(settingsOpen.x, listOpen.x) &&
-        near(settingsOpen.y, listOpen.y + 32) &&
-        near(settingsOpen.width, 400) &&
-        // 閉じても区間・テロップの窓は同じ場所に出たまま
-        samePlace(listClosed, listOpen) &&
-        near(listClosed.height, listOpen.height) &&
-        samePlace(settingsReopened, settingsOpen),
-      { listOpen, settingsOpen, listClosed, settingsReopened },
-    );
-  });
-
   await check("窓を動かすと、読み込み直しても同じ位置に出る", async () => {
-    // 前提: 3 つとも浮いた窓の最初の位置 (最初の配置はドックなので、覚えた配置を枠なしにして読み込み直す。判断メモ 34)
+    // 前提: 2 つとも浮いた窓の最初の位置 (最初の配置はドックなので、覚えた配置を枠なしにして読み込み直す。判断メモ 34)
     await setLayoutAndReload(FLOAT_LAYOUT);
     await page.evaluate(() => window.scrollTo(0, 0));
-    // 前提を自分で作る。設定の窓を動かすので開いていることが要る (直前の項目で開いたままの
-    // はずだが、閉じていれば開く)。設定の窓は区間・テロップの窓に下へ 32px ずれて重なり、前に出ている
-    await openSettings();
     const barStart = await boxOf(barWindow);
     const listStart = await boxOf(listWindow);
-    const settingsStart = await boxOf(settingsWindow);
 
     const grip = centerOf(await boxOf(barGrip));
     await dragFromTo(grip, { x: grip.x + 80, y: grip.y + 40 });
-    // 設定の窓を先に動かす。下へ 80px 送り、区間・テロップの窓の見出しの行 (上の 32px) から離す
-    const settingsAt = headerPoint(await boxOf(settingsHeader));
-    await dragFromTo(settingsAt, { x: settingsAt.x - 200, y: settingsAt.y + 80 });
-    // 区間・テロップの窓の見出しは、設定の窓の上に出ている (カスケード)。プレイヤーの上まで左へ動かし、右の枠の帯の外で離す
+    // 区間・テロップの窓はプレイヤーの上まで左へ動かし、右の枠の帯の外で離す
     const listAt = headerPoint(await boxOf(listHeader));
     await dragFromTo(listAt, { x: listAt.x - 200, y: listAt.y + 40 });
     const barMoved = await boxOf(barWindow);
     const listMoved = await boxOf(listWindow);
-    const settingsMoved = await boxOf(settingsWindow);
     const saved = await readWindowLayout();
 
     await reloadAndWaitList();
     const barAfter = await boxOf(barWindow);
     const listAfter = await boxOf(listWindow);
-    // 設定の開閉は覚えない (読み込み直すと閉じている)。⚙ で開いて、覚えた位置に出るかを見る。
-    // 覚えた位置はバーの ⚙ に重なりうるので、openSettings がバーを前に出してから押す
-    await openSettings();
-    const settingsAfter = await boxOf(settingsWindow);
-    // 後の項目は設定を閉じた状態から始める (設定の窓が区間・テロップの窓の右下の角を覆わないように)
-    await closeSettings();
 
     const float = floatOf(saved);
     record(
@@ -1299,40 +1243,22 @@ test("テロップの実機確認", async () => {
         near(barMoved.y, barStart.y + 40) &&
         near(listMoved.x, listStart.x - 200) &&
         near(listMoved.y, listStart.y + 40) &&
-        near(settingsMoved.x, settingsStart.x - 200) &&
-        near(settingsMoved.y, settingsStart.y + 80) &&
         samePlace(barAfter, barMoved) &&
         samePlace(listAfter, listMoved) &&
-        samePlace(settingsAfter, settingsMoved) &&
         float !== null &&
         "bar" in float &&
         "list" in float &&
-        "settings" in float,
-      {
-        barStart,
-        barMoved,
-        barAfter,
-        listStart,
-        listMoved,
-        listAfter,
-        settingsStart,
-        settingsMoved,
-        settingsAfter,
-        saved,
-      },
+        !("settings" in float),
+      { barStart, barMoved, barAfter, listStart, listMoved, listAfter, saved },
     );
   });
 
   await check("右下をドラッグすると大きさが変わる (バーの窓は幅だけ)", async () => {
-    // 前提: 3 つとも浮いた窓の最初の位置 (最初の配置はドックなので、覚えた配置を枠なしにして読み込み直す。判断メモ 34)
+    // 前提: 2 つとも浮いた窓の最初の位置 (最初の配置はドックなので、覚えた配置を枠なしにして読み込み直す。判断メモ 34)
     await setLayoutAndReload(FLOAT_LAYOUT);
-    // 前提を自分で作る。設定の窓は区間・テロップの窓と同じ幅で (0, +32) に重なるので、開いたまま
-    // だと区間・テロップの窓の右下のつまみを覆ってドラッグが届かない (C1.3 のカスケードの帰結)。
-    // 閉じてから大きさを変える
-    await closeSettings();
     // バーの窓を上にしておく (右下の角が区間・テロップの窓の下に潜っていても掴めるように)。
-    // 押して離すだけなので、位置は変わらず覚え直しもしない
-    await bringBarToFront();
+    // ⠿ を押して離すだけなので、位置は変わらず覚え直しもしない
+    await barGrip.click();
     const barBefore = await boxOf(barWindow);
     const barCorner = centerOf(await boxOf(barWindow.locator("[data-role=window-resize]")));
     await dragFromTo(barCorner, { x: barCorner.x - 200, y: barCorner.y + 50 });
@@ -1355,11 +1281,8 @@ test("テロップの実機確認", async () => {
   });
 
   await check("窓を画面の外へドラッグしても、掴む場所が画面に残る", async () => {
-    // 前提: 3 つとも浮いた窓の最初の位置 (最初の配置はドックなので、覚えた配置を枠なしにして読み込み直す。判断メモ 34)
+    // 前提: 2 つとも浮いた窓の最初の位置 (最初の配置はドックなので、覚えた配置を枠なしにして読み込み直す。判断メモ 34)
     await setLayoutAndReload(FLOAT_LAYOUT);
-    // 前提を自分で作る (前の項目の終わり方に依存しない)。設定の窓が開いていると区間・テロップの
-    // 窓の見出しに重なりうる
-    await closeSettings();
     const viewport = page.viewportSize();
     if (viewport === null) throw new Error("viewport が取れません");
     // 掴んだ点を画面の隅まで運ぶ。掴む場所の残りは画面の外へ出ようとするが、詰められて残る。
@@ -1396,49 +1319,40 @@ test("テロップの実機確認", async () => {
   });
 
   await check("掴む場所をダブルクリックすると最初の配置の枠 (ドック) に戻り、覚えた位置も消える", async () => {
-    // 前提: 3 つとも浮いた窓にして、どれも動かしておく (どの帯の外で離す)
+    // 前提: 2 つとも浮いた窓にして、どちらも動かしておく (どの帯の外で離す)
     await setLayoutAndReload(FLOAT_LAYOUT);
     await page.evaluate(() => window.scrollTo(0, 0));
-    await closeSettings();
     const grip = centerOf(await boxOf(barGrip));
     await dragFromTo(grip, { x: grip.x + 80, y: grip.y + 40 });
     const listAt = headerPoint(await boxOf(listHeader));
     await dragFromTo(listAt, { x: listAt.x - 200, y: listAt.y + 40 });
-    await openSettings();
-    const settingsAt = headerPoint(await boxOf(settingsHeader));
-    await dragFromTo(settingsAt, { x: settingsAt.x - 200, y: settingsAt.y + 160 });
     const savedMoved = await readWindowLayout();
 
     await barGrip.dblclick();
     const listHeaderBox = await boxOf(listHeader);
     await listHeader.dblclick({ position: { x: 40, y: listHeaderBox.height / 2 } });
-    const settingsHeaderBox = await boxOf(settingsHeader);
-    await settingsHeader.dblclick({ position: { x: 40, y: settingsHeaderBox.height / 2 } });
     await page.waitForTimeout(500);
     const below = await slotState("below");
     const side = await slotState("side");
     const saved = await readWindowLayout();
-    // 後の項目 (帯) は区間・テロップの窓の行を押す。設定は閉じておく (右の枠では区間・テロップのタブが前に出る)
-    await closeSettings();
 
     const movedFloat = floatOf(savedMoved);
     const float = floatOf(saved);
     record(
       "掴む場所をダブルクリックすると最初の配置の枠 (ドック) に戻り、覚えた位置も消える",
       movedFloat !== null &&
-        Object.keys(movedFloat).length === 3 &&
+        Object.keys(movedFloat).length === 2 &&
         below !== null &&
         below.windows.includes("yt-clip-bar-window") &&
         side !== null &&
         side.windows.includes("yt-clip-list") &&
-        side.windows.includes("yt-clip-settings") &&
-        sameJson(side.labels, ["区間・テロップ", "設定"]) &&
-        side.active === "設定" &&
+        sameJson(side.labels, ["区間・テロップ"]) &&
+        side.active === "区間・テロップ" &&
         float !== null &&
         Object.keys(float).length === 0 &&
         sameJson(docksOf(saved), {
           below: { tabs: ["bar"], active: "bar" },
-          side: { tabs: ["list", "settings"], active: "settings" },
+          side: { tabs: ["list"], active: "list" },
         }),
       { savedMoved, below, side, saved },
     );
@@ -1457,7 +1371,7 @@ test("テロップの実機確認", async () => {
     // 読み込みは書き戻さない (次に動かしたときに v2 で書く。C1.3)
     const savedAfterLoad = await readWindowLayout();
 
-    // 後の項目 (帯) のために最初の配置 (右の枠) へ戻す。戻すと v2 の組で書かれる。バーと設定は v1 に位置が無いので最初から枠の中
+    // 後の項目 (帯) のために最初の配置 (右の枠) へ戻す。戻すと v2 の組で書かれる。バーは v1 に位置が無いので最初から枠の中
     const header = await boxOf(listHeader);
     await listHeader.dblclick({ position: { x: 40, y: header.height / 2 } });
     await page.waitForTimeout(500);
@@ -1477,7 +1391,7 @@ test("テロップの実機確認", async () => {
   });
 
   // --- 拡大バー上のテロップの帯 (フロートの窓の spec B.4) ---------------------------------
-  // 窓の確認の後 (3 つの窓は最初の配置の枠に入り、設定は閉じている)。受け入れ条件の確認で足した区間 5 つと
+  // 窓の確認の後 (2 つの窓は最初の配置の枠に入っている)。受け入れ条件の確認で足した区間 5 つと
   // テロップ 5 つ (201・231・321×3) が残っている。区間 1 (200〜215) を選び直すと拡大バーの窓は
   // 192.5〜222.5 になり、テロップ 1 (201〜204) だけが帯で出る (ほかの帯と重ならない)
   type TelopTimes = { startSec: number; endSec: number; text: string };
@@ -1593,7 +1507,7 @@ test("テロップの実機確認", async () => {
 
   // --- ドック枠とタブ (窓の分割の spec C2.10) ---------------------------------------------------------------
   // 帯の確認の後 (末尾) に行う。受け入れ条件の確認で足した区間 5 つ・テロップ 5 つが残っている。**各項目は前提 (覚えた
-  // 配置・設定の開閉・画面の大きさ) を自分で作る**: 覚えた配置を書いて (消して) から読み込み直す
+  // 配置・画面の大きさ) を自分で作る**: 覚えた配置を書いて (消して) から読み込み直す
   const DOCK_NO_SUCK =
     "ドック: 浮いた窓を少し動かしてもドックされない (見出しを 20px 下・⠿ を 20px 右。1440x795)";
   await check(DOCK_NO_SUCK, async () => {
@@ -1601,8 +1515,6 @@ test("テロップの実機確認", async () => {
     try {
       await setLayoutAndReload(FLOAT_LAYOUT);
       await page.evaluate(() => window.scrollTo(0, 0));
-      // 受け入れ条件と同じく設定も開く (浮いた設定の窓は一覧の窓の下へ 32px ずれて前に出る。一覧の見出しは見えている)
-      await openSettings();
       const floatingBefore = await allFloating();
       // 見出しの上端から 4px の点 (帯の外から始まる、最も吸い込まれやすい経路。C2.10)
       const header = await boxOf(listHeader);
@@ -1632,7 +1544,6 @@ test("テロップの実機確認", async () => {
     await page.setViewportSize({ width: 1440, height: 795 });
     try {
       await setLayoutAndReload(FLOAT_LAYOUT);
-      await closeSettings();
       await page.evaluate(() => window.scrollTo(0, 0));
       // ⠿ をプレイヤーの中 (上方向) へ外してから (どの帯の外。下の枠の目印は #below の幅いっぱいなので、横へ動かすだけ
       // では帯を出られない位置から始まることがある。判断メモ 39)、プレイヤーの直下の目印 (#below の先頭) へ
@@ -1701,81 +1612,48 @@ test("テロップの実機確認", async () => {
     }
   });
 
-  const DOCK_SIDE_TABS =
-    "ドック: 浮いた区間・テロップの窓と設定の窓を右の枠に落とすとタブが 2 つ並び、後から落とした方が前。⚙ とタブで切り替わり、読み込み直しても並びが同じ";
-  await check(DOCK_SIDE_TABS, async () => {
+  const DOCK_SIDE =
+    "ドック: 浮いた区間・テロップの窓を右の枠 (空の枠の目印) に落とすと #secondary-inner の先頭に入り、タブは 区間・テロップ だけ。読み込み直しても入ったまま";
+  await check(DOCK_SIDE, async () => {
     await setLayoutAndReload(FLOAT_LAYOUT);
-    await closeSettings();
     await page.evaluate(() => window.scrollTo(0, 0));
-    // プレイヤーの上はどの帯の外
+    // プレイヤーの上はどの帯の外。右の枠は空なので、落とし先の帯は枠の先頭の目印 (dock.ts の render)
     const detour = centerOf(await boxOf(page.locator("#movie_player")));
     await dropInto(headerPoint(await boxOf(listHeader)), detour, sideSlot);
-    // 設定は浮いた窓で開く (最初の位置)。見出しを右の枠のタブの列へ
-    await openSettings();
-    await dropInto(headerPoint(await boxOf(settingsHeader)), detour, sideSlot);
     const docked = await slotState("side");
     const boxes = await pageBoxes();
-    const shown = { list: await listWindow.isVisible(), settings: await settingsWindow.isVisible() };
-
-    // ⚙ で閉じると設定のタブが消え、もう一度押すと設定のタブが前に出る
-    await closeSettings();
-    const closed = await slotState("side");
-    await openSettings();
-    const reopened = await slotState("side");
-    // 区間・テロップのタブを押すと一覧が出て設定が隠れる
-    await tabIn(sideSlot, "区間・テロップ").click();
-    await page.waitForTimeout(500);
-    const listFront = {
-      state: await slotState("side"),
-      list: await listWindow.isVisible(),
-      settings: await settingsWindow.isVisible(),
-    };
+    const shown = await listWindow.isVisible();
     const saved = await readWindowLayout();
 
-    // 読み込み直しても並びが同じ。設定の開閉は覚えないので、読み込み直した直後は一覧のタブだけ。⚙ で開いて並びを見る
     await reloadAndWaitList();
     const afterReload = await slotState("side");
-    await openSettings();
-    const afterReloadOpened = await slotState("side");
-    await closeSettings();
 
     const mastheadBottom = boxes.masthead?.bottom ?? Number.POSITIVE_INFINITY;
     const playerRight = boxes.player?.right ?? Number.POSITIVE_INFINITY;
     record(
-      DOCK_SIDE_TABS,
+      DOCK_SIDE,
       docked !== null &&
         docked.parentId === "secondary-inner" &&
         docked.first &&
         docked.box.left >= playerRight &&
         docked.box.top >= mastheadBottom &&
-        sameJson(docked.labels, ["区間・テロップ", "設定"]) &&
-        docked.active === "設定" &&
-        !shown.list &&
-        shown.settings &&
-        closed !== null &&
-        sameJson(closed.labels, ["区間・テロップ"]) &&
-        reopened !== null &&
-        reopened.active === "設定" &&
-        listFront.state !== null &&
-        listFront.state.active === "区間・テロップ" &&
-        listFront.list &&
-        !listFront.settings &&
-        sameJson(docksOf(saved), { side: { tabs: ["list", "settings"], active: "list" } }) &&
+        docked.windows.includes("yt-clip-list") &&
+        sameJson(docked.labels, ["区間・テロップ"]) &&
+        docked.active === "区間・テロップ" &&
+        shown &&
+        sameJson(docksOf(saved), { side: { tabs: ["list"], active: "list" } }) &&
         afterReload !== null &&
-        sameJson(afterReload.labels, ["区間・テロップ"]) &&
-        afterReloadOpened !== null &&
-        sameJson(afterReloadOpened.labels, ["区間・テロップ", "設定"]),
-      { docked, boxes, shown, closed, reopened, listFront, saved, afterReload, afterReloadOpened },
+        afterReload.windows.includes("yt-clip-list") &&
+        sameJson(afterReload.labels, ["区間・テロップ"]),
+      { docked, boxes, shown, saved, afterReload },
     );
   });
 
   const DOCK_TAB_TO_BELOW =
-    "ドック: 最初の配置から区間・テロップのタブを下の枠 (バーの上の目印) へ落とすと、下の枠にタブが 2 つ (バー / 区間・テロップ) 出て、右の枠は設定だけになる。タブを押すと切り替わる";
+    "ドック: 最初の配置から区間・テロップのタブを下の枠 (バーの上の目印) へ落とすと、下の枠にタブが 2 つ (バー / 区間・テロップ) 出て、右の枠は空になって隠れる。タブを押すと切り替わる";
   await check(DOCK_TAB_TO_BELOW, async () => {
-    // 前提: 最初の配置 (下の枠 [bar] / 右の枠 [list, settings])
+    // 前提: 最初の配置 (下の枠 [bar] / 右の枠 [list])。バーは下の枠にバーだけで入っていて、タブの列は出ていない
     await resetLayoutAndReload();
-    // 設定を開く (右の枠で設定のタブが前に出る)。バーは下の枠にバーだけで入っていて、⚙ が見えている
-    await openSettings();
     await page.evaluate(() => window.scrollTo(0, 0));
     const detour = centerOf(await boxOf(page.locator("#movie_player")));
     await dropInto(centerOf(await boxOf(tabIn(sideSlot, "区間・テロップ"))), detour, belowSlot);
@@ -1796,24 +1674,22 @@ test("テロップの実機確認", async () => {
         sameJson(below.labels, ["バー", "区間・テロップ"]) &&
         below.active === "区間・テロップ" &&
         side !== null &&
-        sameJson(side.labels, ["設定"]) &&
+        !side.shown &&
+        side.windows.length === 0 &&
         barFront.state !== null &&
         barFront.state.active === "バー" &&
         barFront.bar &&
         !barFront.list &&
-        sameJson(docksOf(saved), {
-          below: { tabs: ["bar", "list"], active: "bar" },
-          side: { tabs: ["settings"], active: "settings" },
-        }),
+        // 窓の無い枠は鍵ごと持たない (dock.ts の state)
+        sameJson(docksOf(saved), { below: { tabs: ["bar", "list"], active: "bar" } }),
       { below, side, barFront, saved },
     );
   });
 
   const DOCK_PULL_OUT =
-    "ドック: 最初の配置からタブを枠の外 (プレイヤーの上) へ引き出して離すとフロートになり、見出しのダブルクリックで右の枠 (最初の配置) に戻る。引き出してから右の枠の帯へ落としても戻る";
+    "ドック: 最初の配置からタブを枠の外 (プレイヤーの上) へ引き出して離すとフロートになり、見出しのダブルクリックで右の枠 (最初の配置) に戻る。引き出してから右の枠の目印へ落としても戻る";
   await check(DOCK_PULL_OUT, async () => {
     await resetLayoutAndReload();
-    await closeSettings();
     await page.evaluate(() => window.scrollTo(0, 0));
     const target = centerOf(await boxOf(page.locator("#movie_player")));
     await dragFromTo(centerOf(await boxOf(tabIn(sideSlot, "区間・テロップ"))), target);
@@ -1832,12 +1708,10 @@ test("テロップの実機確認", async () => {
     const reset = await slotState("side");
     const savedReset = await readWindowLayout();
 
-    // 設定を開いて右の枠にタブの列を出してから (spec C2.10「タブの列へ落としても戻る」)、もう一度引き出し、見出しをタブの列へ落として戻す
-    await openSettings();
+    // もう一度引き出し、見出しを右の枠へ落として戻す。右の枠は空になるので、落とし先の帯は枠の先頭の目印
     await dragFromTo(centerOf(await boxOf(tabIn(sideSlot, "区間・テロップ"))), target);
     await dropInto(headerPoint(await boxOf(listHeader)), { x: target.x, y: target.y + 100 }, sideSlot);
     const back = await slotState("side");
-    await closeSettings();
 
     const floatPulled = floatOf(savedPulled);
     const floatReset = floatOf(savedReset);
@@ -1848,10 +1722,7 @@ test("テロップの実機確認", async () => {
         !pulled.side.shown &&
         floatPulled !== null &&
         "list" in floatPulled &&
-        sameJson(docksOf(savedPulled), {
-          below: { tabs: ["bar"] },
-          side: { tabs: ["settings"] },
-        }) &&
+        sameJson(docksOf(savedPulled), { below: { tabs: ["bar"] } }) &&
         reset !== null &&
         reset.windows.includes("yt-clip-list") &&
         sameJson(reset.labels, ["区間・テロップ"]) &&
@@ -1859,11 +1730,11 @@ test("テロップの実機確認", async () => {
         !("list" in floatReset) &&
         sameJson(docksOf(savedReset), {
           below: { tabs: ["bar"] },
-          side: { tabs: ["list", "settings"], active: "list" },
+          side: { tabs: ["list"], active: "list" },
         }) &&
         back !== null &&
         back.windows.includes("yt-clip-list") &&
-        sameJson(back.labels, ["設定", "区間・テロップ"]) &&
+        sameJson(back.labels, ["区間・テロップ"]) &&
         back.active === "区間・テロップ",
       { pulled, savedPulled, reset, savedReset, back },
     );
@@ -1874,7 +1745,6 @@ test("テロップの実機確認", async () => {
     "ドック: 最初の配置のまま t でシアターモードにすると、右の枠は動画の下へ回ってドックされたまま。戻すと元の位置";
   await check(DOCK_THEATER, async () => {
     await resetLayoutAndReload();
-    await closeSettings();
     await page.evaluate(() => window.scrollTo(0, 0));
     const measure = async () => ({ slot: await slotState("side"), boxes: await pageBoxes() });
     /** YouTube のショートカット t。入力欄やボタンにフォーカスがあると効かない・文字として入るので、先に外す */

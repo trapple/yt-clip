@@ -11,8 +11,8 @@ import type { ClipState } from "@/shared/types";
  *
  * youtube.ts は import した時点で覚えた配置を 1 度だけ読むので、古い形 (v1) を読ませている youtube.test.ts とは
  * 別のファイルにする (vitest はファイルごとにモジュールを読み直す)。ここでは v2 の組を読ませる:
- * バーは下の枠、区間・テロップの窓は右の枠 (float にもある。枠を採る)、設定の窓は float の位置 (C1 から持ち越した
- * 「float.settings を読み込みで当てる経路」の検査)。
+ * バーは下の枠、区間・テロップの窓は右の枠 (float にもある。枠を採る)。**前の版が書いた設定の窓 (`settings`) が
+ * float と右の枠に残っている** (設定は popup へ移した。settings-in-popup spec §3): 黙って捨てて、ほかの窓は覚えた場所に出す。
  *
  * **canvas の getContext は stub しない。** 流す状態 (READY) はテロップが空で、プレビューは描かない。テロップ付きの状態を
  * 流す検査を足すときは、youtube.test.ts の spyOnGetContext と同じ扱いにする (jsdom の "Not implemented" が出力に混ざるため)
@@ -25,13 +25,15 @@ const READY: ClipState = {
   telops: [],
   meta: META,
 };
-/** 設定の窓の覚えた位置 (jsdom の画面 1024x768 に収まる値) */
+/** 前の版の設定の窓の覚えた位置 (jsdom の画面 1024x768 に収まる値) */
 const SETTINGS_RECT = { left: 200, top: 150, width: 360, height: 300 };
 const LAYOUT_AT_LOAD = {
   version: 2,
   float: { list: { left: 50, top: 60, width: 320 }, settings: SETTINGS_RECT },
-  docks: { below: { tabs: ["bar"] }, side: { tabs: ["list"], active: "list" } },
+  docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "settings" } },
 };
+/** 読み込みの間に出た warn (前の版の settings で騒がないこと) */
+const warnings: string[] = [];
 
 /** chrome.storage.local へ書いた windowLayout。書いた順 */
 const layoutWrites: unknown[] = [];
@@ -78,7 +80,7 @@ function buildPage(): void {
   const titleText = document.createElement("yt-formatted-string");
   titleText.textContent = META.title;
   title.append(titleText);
-  // チャンネル (構造化データのハンドル)。⚙ で開いた設定パネルがチャンネルを読むので、無いと warn が出力に混ざる
+  // チャンネル (構造化データのハンドル)。popup の問い合わせ (channel/get) に答えるときに読む
   const author = document.createElement("span");
   author.setAttribute("itemprop", "author");
   const authorUrl = document.createElement("link");
@@ -108,11 +110,14 @@ function tabLabels(slot: "below" | "side"): string[] {
     .map((tab) => tab.textContent ?? "");
 }
 
-/** 読み込む前の様子 (枠と 3 つの窓が出ているか) */
+/** 読み込む前の様子 (枠と窓が出ているか) */
 let beforeLoad = { slotsShown: [] as boolean[], windowsHidden: [] as boolean[] };
 
 beforeAll(async () => {
   buildPage();
+  vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  });
   stubClientSize();
   // 差す先に幅を持たせる (jsdom はレイアウトを持たず、幅 0 の枠は使えない扱いになる)
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
@@ -170,7 +175,7 @@ beforeAll(async () => {
     slotsShown: ["below", "side"].map(
       (slot) => document.getElementById(`yt-clip-dock-${slot}`)?.style.display === "block",
     ),
-    windowsHidden: ["yt-clip-bar-window", "yt-clip-list", "yt-clip-settings"].map(
+    windowsHidden: ["yt-clip-bar-window", "yt-clip-list"].map(
       (id) => byId(id).hidden,
     ),
   };
@@ -193,7 +198,7 @@ afterAll(async () => {
 describe("覚えた枠を読み込む", () => {
   test("読み込むまでは、枠も窓も出さない (浮いた窓で出してから枠へ跳ぶ絵にしない)", () => {
     expect(beforeLoad.slotsShown).toEqual([false, false]);
-    expect(beforeLoad.windowsHidden).toEqual([true, true, true]);
+    expect(beforeLoad.windowsHidden).toEqual([true, true]);
   });
 
   test("読み込みは保存しない", () => {
@@ -215,23 +220,19 @@ describe("覚えた枠を読み込む", () => {
     expect(tabLabels("side")).toEqual(["区間・テロップ"]);
   });
 
-  test("覚えた float.settings の位置に、⚙ で開いた設定の窓を出す", async () => {
-    const gear = [...document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button")].find(
-      (button) => button.textContent === "⚙",
+  test("前の版の設定の窓 (float.settings と右の枠のタブ) は黙って捨て、設定の窓も ⚙ も出さない", () => {
+    expect(warnings.filter((line) => line.includes("windowLayout"))).toEqual([]);
+    expect(document.getElementById("yt-clip-settings")).toBeNull();
+    const labels = [...document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button")].map(
+      (button) => button.textContent,
     );
-    if (gear === undefined) throw new Error("⚙ がありません");
-    gear.click();
-    await flush();
+    expect(labels).not.toContain("⚙");
+  });
 
-    const settings = byId("yt-clip-settings");
-    expect(settings.parentElement).toBe(document.body);
-    expect(settings.hidden).toBe(false);
-    expect({
-      left: settings.style.left,
-      top: settings.style.top,
-      width: settings.style.width,
-      height: settings.style.height,
-    }).toEqual({ left: "200px", top: "150px", width: "360px", height: "300px" });
+  test("popup の問い合わせ (channel/get) に、いま開いている動画のチャンネルを答える", () => {
+    const responses: unknown[] = [];
+    onMessage?.({ type: "channel/get" }, {}, (response) => responses.push(response));
+    expect(responses).toEqual([{ channel: { id: CHANNEL.id, name: CHANNEL.name } }]);
   });
 
   test("#secondary が無くなると区間・テロップの窓は最初の位置の浮いた窓で出て (float に位置があっても)、戻ると枠に戻る", async () => {

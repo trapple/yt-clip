@@ -2,10 +2,8 @@
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import {
   PANEL_HEADER_HEIGHT_PX,
-  SETTINGS_CASCADE_PX,
   createPanelWindow,
   initialListRect,
-  initialSettingsRect,
   type PanelWindow,
   type PanelWindowOptions,
 } from "@/content/panel-window";
@@ -76,9 +74,10 @@ describe("createPanelWindow", () => {
   });
 
   test("窓と中身の箱を id で外から辿れる (中身の箱は `${id}-body`)", () => {
-    const target = makeWindow({ id: "yt-clip-settings", title: "設定" });
-    expect(document.getElementById("yt-clip-settings")).toBe(target.element);
-    expect(document.getElementById("yt-clip-settings-body")).toBe(target.body);
+    // 既定 (yt-clip-list) と違う id で、渡した id を使うことを見る
+    const target = makeWindow({ id: "yt-clip-other", title: "ほか" });
+    expect(document.getElementById("yt-clip-other")).toBe(target.element);
+    expect(document.getElementById("yt-clip-other-body")).toBe(target.body);
   });
 
   test("見出しに中身の名前を出す。折り畳みのボタンは持たない", () => {
@@ -193,19 +192,6 @@ describe("最初の位置", () => {
       top: 68,
       width: 400,
     });
-  });
-
-  test("設定の窓は区間・テロップの窓から下へ 32px だけずらす (left は同じ)", () => {
-    expect(SETTINGS_CASCADE_PX).toBe(32);
-    expect(initialSettingsRect({ width: 1440, height: 795 })).toEqual({
-      left: 1024,
-      top: 100,
-      width: 400,
-    });
-  });
-
-  test("1440x795 で設定の窓の左端はプレイヤーの右端 (1012px、実測) より右 (受け入れ条件 C1.5)", () => {
-    expect(initialSettingsRect({ width: 1440, height: 795 }).left).toBeGreaterThanOrEqual(1012);
   });
 });
 

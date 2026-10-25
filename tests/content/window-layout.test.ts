@@ -27,13 +27,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** 最初の配置 (ドック。spec C2.6): バーは下の枠、区間・テロップの窓と設定の窓は右の枠 */
+/**
+ * 最初の配置 (ドック。spec C2.6): バーは下の枠、区間・テロップの窓は右の枠
+ * (設定の窓は popup へ移した。settings-in-popup spec §3)
+ */
 const INITIAL: WindowLayout = {
   version: 2,
   float: {},
-  docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"] } },
+  docks: { below: { tabs: ["bar"] }, side: { tabs: ["list"] } },
 };
-/** v2 で枠を空に書いてある組 (3 つとも浮いた窓の最初の位置) */
+/** v2 で枠を空に書いてある組 (2 つとも浮いた窓の最初の位置) */
 const EMPTY: WindowLayout = { version: 2, float: {}, docks: {} };
 
 describe("mergeWindowLayout", () => {
@@ -57,7 +60,6 @@ describe("mergeWindowLayout", () => {
       float: {
         bar: { left: 24, top: 636, width: 988 },
         list: { left: 1024, top: 68, width: 400, height: 500 },
-        settings: { left: 1024, top: 100, width: 400 },
       },
       docks: {},
     };
@@ -65,14 +67,36 @@ describe("mergeWindowLayout", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  test("古い形 (v1: version が無い) は bar → float.bar、panel → float.list に読み替える。位置のある窓は浮いた窓のまま、設定の窓は最初の配置の枠", () => {
+  // settings-in-popup spec §3: 前の版が書いた正しい値なので、更新しただけで毎回コンソールに出さない
+  test("前の版の設定の窓 (float.settings・枠のタブ・前のタブ) は warn せず黙って捨てる", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const stored = {
+      version: 2,
+      float: { settings: { left: 1024, top: 100, width: 400 } },
+      docks: { side: { tabs: ["list", "settings"], active: "settings" } },
+    };
+    expect(mergeWindowLayout(stored)).toEqual({
+      version: 2,
+      float: {},
+      docks: { side: { tabs: ["list"] } },
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("古い形 (v1: version が無い) は bar → float.bar、panel → float.list に読み替える。位置のある窓は浮いた窓のまま、位置の無い窓は最初の配置の枠", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const bar = { left: 24, top: 636, width: 988 };
     const panel = { left: 1024, top: 68, width: 400, height: 500 };
     expect(mergeWindowLayout({ bar, panel })).toEqual({
       version: 2,
       float: { bar, list: panel },
-      docks: { side: { tabs: ["settings"] } },
+      docks: {},
+    });
+    // バーの位置が無ければ、バーは最初の配置の枠 (下の枠)
+    expect(mergeWindowLayout({ panel })).toEqual({
+      version: 2,
+      float: { list: panel },
+      docks: { below: { tabs: ["bar"] } },
     });
     expect(warn).not.toHaveBeenCalled();
   });
@@ -103,7 +127,7 @@ describe("mergeWindowLayout", () => {
     expect(mergeWindowLayout({ bar: { left: "24", top: 636, width: 988 }, panel })).toEqual({
       version: 2,
       float: { list: panel },
-      docks: { below: { tabs: ["bar"] }, side: { tabs: ["settings"] } },
+      docks: { below: { tabs: ["bar"] } },
     });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain("windowLayout.bar");
@@ -193,7 +217,7 @@ describe("mergeWindowLayout", () => {
     const stored = {
       version: 2,
       float: {},
-      docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "settings" } },
+      docks: { below: { tabs: ["bar", "list"], active: "bar" } },
     };
     expect(mergeWindowLayout(stored)).toEqual(stored);
     expect(warn).not.toHaveBeenCalled();
@@ -218,18 +242,18 @@ describe("acceptsDock", () => {
   test("バーは右の枠に入れない。ほかの組み合わせは入れる", () => {
     expect(acceptsDock("bar", "side")).toBe(false);
     expect(acceptsDock("bar", "below")).toBe(true);
-    for (const id of ["list", "settings"] as const) {
-      expect(acceptsDock(id, "below")).toBe(true);
-      expect(acceptsDock(id, "side")).toBe(true);
-    }
+    expect(acceptsDock("list", "below")).toBe(true);
+    expect(acceptsDock("list", "side")).toBe(true);
   });
 });
 
 describe("parseDockState", () => {
   test("枠ごとのタブの並びと前のタブを読む", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const docks = { below: { tabs: ["bar", "list"], active: "list" }, side: { tabs: ["settings"] } };
-    expect(parseDockState(docks)).toEqual(docks);
+    const together = { below: { tabs: ["bar", "list"], active: "list" } };
+    expect(parseDockState(together)).toEqual(together);
+    const apart = { below: { tabs: ["bar"] }, side: { tabs: ["list"], active: "list" } };
+    expect(parseDockState(apart)).toEqual(apart);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -259,8 +283,8 @@ describe("parseDockState", () => {
   test("同じ枠の重複は先頭を残し、別の枠にも入っている窓は below の方を残す", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(
-      parseDockState({ below: { tabs: ["list", "list"] }, side: { tabs: ["list", "settings"] } }),
-    ).toEqual({ below: { tabs: ["list"] }, side: { tabs: ["settings"] } });
+      parseDockState({ below: { tabs: ["list", "list", "bar"] }, side: { tabs: ["list"] } }),
+    ).toEqual({ below: { tabs: ["list", "bar"] } });
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
@@ -274,7 +298,7 @@ describe("parseDockState", () => {
 
   test("active が tabs に無ければ無い扱いにして warn する", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(parseDockState({ side: { tabs: ["list"], active: "settings" } })).toEqual({
+    expect(parseDockState({ side: { tabs: ["list"], active: "bar" } })).toEqual({
       side: { tabs: ["list"] },
     });
     expect(parseDockState({ side: { tabs: ["list"], active: 7 } })).toEqual({
@@ -289,9 +313,25 @@ describe("parseDockState", () => {
     // 打ち切らないと "bar" の重複ぶん (499 回) warn が出る
     const rawTabs = new Array(500).fill("bar");
     expect(parseDockState({ below: { tabs: rawTabs } })).toEqual({ below: { tabs: ["bar"] } });
-    // 打ち切り後は WINDOW_IDS.length (3) 件のうち先頭の "bar" だけ採用、残り 2 件が重複で捨てられ、
-    // 打ち切りの warn が 1 回。要素の数 (500) には比例しない
+    // 打ち切り後は 窓の数 + 前の版の窓の数 (2 + 1 = 3) 件のうち先頭の "bar" だけ採用、残り 2 件が重複で捨てられ、
+    // 打ち切りの warn が 1 回 (計 3 回)。要素の数 (500) には比例しない
     expect(warn.mock.calls.length).toBeLessThanOrEqual(WINDOW_IDS.length + 1);
+  });
+
+  test("前の版の窓 (settings) が入って窓の数より長い tabs でも、打ち切りの warn を出さない (前の版が書いた正しい値)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(parseDockState({ below: { tabs: ["bar", "list", "settings"] } })).toEqual({
+      below: { tabs: ["bar", "list"] },
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("前の版の窓 (settings) だけの枠は、warn せず鍵ごと持たない", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(
+      parseDockState({ below: { tabs: ["bar"] }, side: { tabs: ["settings"], active: "settings" } }),
+    ).toEqual({ below: { tabs: ["bar"] } });
+    expect(warn).not.toHaveBeenCalled();
   });
 
   test("知らない枠の名前は黙って無視する (後の版で枠が増えても古い版が騒がない)", () => {
@@ -466,7 +506,7 @@ describe("覚えた配置の保存と読み込み", () => {
     expect(await loadWindowLayout()).toEqual({
       version: 2,
       float: { bar: BAR, list: LIST },
-      docks: { side: { tabs: ["settings"] } },
+      docks: {},
     });
     expect(writes).toBe(0);
     expect(store[WINDOW_LAYOUT_KEY]).toEqual({ bar: BAR, panel: LIST });
@@ -483,8 +523,8 @@ describe("覚えた配置の保存と読み込み", () => {
 
   test("組ごと書く。前に覚えていた組は読まずに置き換える", async () => {
     store[WINDOW_LAYOUT_KEY] = { bar: BAR, panel: LIST };
-    await saveWindowLayout({ version: 2, float: { settings: LIST }, docks: {} });
-    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ version: 2, float: { settings: LIST }, docks: {} });
+    await saveWindowLayout({ version: 2, float: { list: LIST }, docks: {} });
+    expect(store[WINDOW_LAYOUT_KEY]).toEqual({ version: 2, float: { list: LIST }, docks: {} });
   });
 
   test("続けて保存すると、後に呼んだ組が残る (書き込みの順を保つ)", async () => {
@@ -532,12 +572,12 @@ describe("覚えた配置の保存と読み込み", () => {
     await saveWindowLayout({
       version: 2,
       float: { list: LIST },
-      docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "settings" } },
+      docks: { below: { tabs: ["bar", "list"], active: "bar" } },
     });
     expect(store[WINDOW_LAYOUT_KEY]).toEqual({
       version: 2,
       float: { list: LIST },
-      docks: { below: { tabs: ["bar"] }, side: { tabs: ["list", "settings"], active: "settings" } },
+      docks: { below: { tabs: ["bar", "list"], active: "bar" } },
     });
   });
 });

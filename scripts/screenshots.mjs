@@ -52,8 +52,7 @@ try {
   });
 
   // **関連動画の中身を隠す。** 掲載画像に他人の動画のサムネイルが写り込むのを避ける。
-  // **右の列 (#secondary) そのものは残す**: 最初の配置では区間・テロップと設定が右の列の先頭の枠に入る
-  // (窓の分割の spec C2.6)。列ごと隠すと右の枠が使えない扱いになり、設定が浮いた窓で出て、実際の絵と違ってしまう
+  // **右の列 (#secondary) そのものは残す**: 列ごと隠すとプレイヤーの幅が実際の YouTube と変わる
   await page.addStyleTag({
     content:
       "#related, #chat, ytd-watch-next-secondary-results-renderer { display: none !important; }",
@@ -80,7 +79,7 @@ try {
   await page.locator("#yt-clip-bar-status").waitFor({ timeout: WAIT_TIMEOUT_MS });
 
   /**
-   * ページの先頭へ戻す。最初の配置ではバーはプレイヤーの直下 (#below の先頭の枠)、設定はおすすめ動画の上の枠に
+   * ページの先頭へ戻す。最初の配置ではバーはプレイヤーの直下 (#below の先頭の枠) に
    * ページの一部として入っている (窓の分割の spec C2.6) ので、先頭のままでプレイヤーと操作の両方が 1 枚に入る
    * (1280x800 でプレイヤーの下端 + バー約 140px < 800)。浮いた窓の置き直し (resize) は要らなくなった
    */
@@ -93,14 +92,26 @@ try {
   await page.screenshot({ path: `${OUT_DIR}/1-range.png` });
   console.log(`${OUT_DIR}/1-range.png`);
 
-  // 設定を開く。最初の配置では、おすすめ動画の上の枠で設定のタブが前に出る (窓の分割の spec C2.2)。
-  // ページの中の窓は中身なりに伸びるので、1280x800 では設定の末尾が画面の下で切れるが、それでよい
-  await bar.getByRole("button", { name: "⚙" }).click();
-  await page
-    .locator("#yt-clip-settings")
+  // 設定は popup にある (settings-in-popup spec)。ツールバーの popup そのものは Playwright から開けないので、
+  // popup のページを 1280x800 の中央に置いて撮る (store-release.md)。拡張の id は service worker の URL から取る
+  const worker =
+    context.serviceWorkers()[0] ??
+    (await context.waitForEvent("serviceworker", { timeout: WAIT_TIMEOUT_MS }));
+  const extensionId = new URL(worker.url()).host;
+  const popup = await context.newPage();
+  await popup.setViewportSize({ width: WIDTH, height: HEIGHT });
+  await popup.goto(`chrome-extension://${extensionId}/src/popup/popup.html`, {
+    timeout: NAV_TIMEOUT_MS,
+  });
+  await popup
+    .getByRole("button", { name: "保存" })
     .waitFor({ state: "visible", timeout: WAIT_TIMEOUT_MS });
-  await frameTop();
-  await page.screenshot({ path: `${OUT_DIR}/2-settings.png` });
+  await popup.addStyleTag({
+    content:
+      "html { min-height: 100%; display: flex; align-items: center; justify-content: center; background: #e5e5e5; }" +
+      " body { box-shadow: 0 4px 16px rgba(0,0,0,0.25); border-radius: 8px; }",
+  });
+  await popup.screenshot({ path: `${OUT_DIR}/2-settings.png` });
   console.log(`${OUT_DIR}/2-settings.png`);
 } finally {
   await context.close();

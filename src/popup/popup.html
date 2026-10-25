@@ -4,12 +4,18 @@
     <meta charset="utf-8" />
     <title>yt-clip</title>
     <style>
+      /*
+        配色はページ内の窓と同じ --ytc-* (popup.ts が applyPalette で body に置く。OS のダーク / ライトに従う)。
+        読む前の一瞬は既定 (ライト) の色で出る
+      */
       body {
-        width: 320px;
+        width: 380px;
         margin: 0;
-        padding: 12px;
+        padding: 10px 12px 0;
         font-family: system-ui, sans-serif;
         font-size: 13px;
+        color: var(--ytc-text, #0f0f0f);
+        background: var(--ytc-panel, #ffffff);
       }
       #switch-row {
         display: flex;
@@ -20,7 +26,7 @@
       }
       #switch-note {
         margin: 2px 0 0 24px;
-        color: #606060;
+        color: var(--ytc-text-sub, #606060);
         font-size: 12px;
       }
       #switch-error {
@@ -28,9 +34,9 @@
         color: #c00;
       }
       hr {
-        margin: 10px 0;
+        margin: 8px 0;
         border: none;
-        border-top: 1px solid #ddd;
+        border-top: 1px solid var(--ytc-border, #c6c6c6);
       }
       #message {
         margin: 0 0 10px;
@@ -39,7 +45,12 @@
       #note {
         margin: 0 0 10px;
         line-height: 1.5;
-        color: #606060;
+        color: var(--ytc-text-sub, #606060);
+      }
+      #settings-heading {
+        margin: 0 0 8px;
+        font-size: 13px;
+        font-weight: bold;
       }
       #progress-area {
         display: flex;
@@ -50,11 +61,22 @@
       #progress {
         flex: 1;
       }
+      /* 上の display:flex が UA の [hidden] に勝つので、隠すときを明示する (録画中以外に空の進捗バーが出ていた) */
+      #progress-area[hidden] {
+        display: none;
+      }
+      #settings input:disabled {
+        opacity: 0.5;
+      }
+      [data-role="save"]:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
     </style>
   </head>
   <body>
     <!--
-      全機能のオン / オフ (マスタースイッチの spec §6.1)。popup が持つ唯一の操作。どの状態でも押せる (disabled を付けない)。
+      全機能のオン / オフ (マスタースイッチの spec §6.1)。どの状態でも押せる (disabled を付けない)。
       既定はオンなので checked で始める (読み終えるまでの一瞬にオフに見えないように)
     -->
     <label id="switch-row">
@@ -70,6 +92,11 @@
       <progress id="progress" value="0" max="1"></progress>
       <span id="remain"></span>
     </div>
+    <!-- 設定 (settings-in-popup spec §1)。オン / オフに関わらず出す。中身は popup.ts が settings-form で作る -->
+    <hr />
+    <section id="settings" aria-labelledby="settings-heading">
+      <h2 id="settings-heading">設定</h2>
+    </section>
     <script type="module" src="./popup.ts"></script>
   </body>
 </html>

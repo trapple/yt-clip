@@ -1,5 +1,9 @@
-// popup は状態を映す。持つ操作はオン / オフのスイッチだけ (マスタースイッチの spec §6.1)。
-// ほかの操作はページ内バーが持つ。オンに戻す操作はページに何も無いときに要るので、ページの外 (ここ) にしか置けない
+// popup は状態を映す。持つ操作はオン / オフのスイッチ (マスタースイッチの spec §6.1) と設定
+// (settings-in-popup spec)。切り抜きの操作はページ内バーが持つ。オンに戻す操作はページに何も無いときに要るので、
+// ページの外 (ここ) にしか置けない
+import { applyPalette, isDarkTheme } from "@/content/styles";
+import { readTabContext } from "@/popup/channel";
+import { createSettingsForm } from "@/popup/settings-form";
 import { describeState, describeSwitch } from "@/popup/view";
 import { loadEnabled, saveEnabled, watchEnabled } from "@/shared/master-switch";
 import type { Message, MessageResponse } from "@/shared/messages";
@@ -14,6 +18,20 @@ const progressElement = document.getElementById(
   "progress",
 ) as HTMLProgressElement;
 const remainElement = document.getElementById("remain") as HTMLElement;
+const settingsSection = document.getElementById("settings") as HTMLElement;
+
+// 配色はページ内の窓と同じ。popup にはページのテーマが無いので OS の設定に従う (isDarkTheme が matchMedia に倒す)
+applyPalette(document.body, isDarkTheme());
+
+// 設定はオン / オフにも service worker にも依らない (chrome.storage へ直接読み書きする)。開いたときに 1 回読む。
+// ハッシュタグはいま開いているタブの動画のチャンネルに付く (readTabContext。分からなければその欄だけ入力できない)
+// 保存できたら閉じる (settings-in-popup spec §1。通らない項目・書けなかったときは開いたまま理由を出す)
+const settingsForm = createSettingsForm({
+  getContext: () => readTabContext(),
+  onSaved: () => window.close(),
+});
+settingsSection.append(settingsForm.element);
+void settingsForm.fill();
 
 /** 保存されているオン / オフ。読むまでは null (スイッチは HTML の既定 = オンのまま) */
 let enabled: boolean | null = null;

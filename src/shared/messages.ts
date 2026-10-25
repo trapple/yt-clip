@@ -1,3 +1,4 @@
+import type { Channel } from "@/shared/settings";
 import type { ClipEvent, ClipState } from "@/shared/types";
 
 /** chrome.runtime を流れるメッセージ。両端がこの型だけを知る */
@@ -53,7 +54,15 @@ export type Message =
   /** content(x) → sw: 添付成功 */
   | { type: "x/attached" }
   /** content(x) → sw: 添付失敗 (DOM 変更など) */
-  | { type: "x/failed"; reason: string };
+  | { type: "x/failed"; reason: string }
+  /**
+   * popup → content (YouTube): いま開いている動画のチャンネル。popup の設定がハッシュタグの鍵にする
+   * (`.claude/specs/2026-10-04-settings-in-popup-design.md` §2)。応答は ChannelResponse
+   */
+  | { type: "channel/get" };
+
+/** `channel/get` の応答。動画の再生画面以外・チャンネルを特定できないときは null */
+export type ChannelResponse = { channel: Channel | null };
 
 /**
  * sw が返す応答。**常に最新の状態を返す。**

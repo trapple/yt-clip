@@ -1,5 +1,5 @@
 /**
- * フロートの窓 (バーの窓・区間・テロップの窓・設定の窓) の位置と大きさ
+ * フロートの窓 (バーの窓・区間・テロップの窓) の位置と大きさ
  * (`.claude/specs/2026-09-24-floating-windows-design.md` A.2 / A.3、
  * `.claude/specs/2026-09-25-dockable-windows-design.md` C1.3)。
  *
@@ -12,9 +12,17 @@
 
 export const WINDOW_LAYOUT_KEY = "windowLayout";
 
-/** 窓の名前 (窓の分割の spec C1.1)。覚えた配置の鍵にも使う */
-export type WindowId = "bar" | "list" | "settings";
-export const WINDOW_IDS: readonly WindowId[] = ["bar", "list", "settings"];
+/**
+ * 窓の名前 (窓の分割の spec C1.1)。覚えた配置の鍵にも使う。**設定の窓は popup へ移したので無い**
+ * (`.claude/specs/2026-10-04-settings-in-popup-design.md` §3。覚えた配置に残る名前は RETIRED_WINDOW_IDS)
+ */
+export type WindowId = "bar" | "list";
+export const WINDOW_IDS: readonly WindowId[] = ["bar", "list"];
+/**
+ * 前の版にあった窓の名前。**覚えた配置に残っていても黙って捨てる** (前の版が書いた正しい値なので、知らない窓として
+ * warn すると更新しただけで毎回コンソールに出る。settings-in-popup spec §3)
+ */
+const RETIRED_WINDOW_IDS: readonly string[] = ["settings"];
 /**
  * ドック枠の名前 (C2.1)。below はプレイヤーの下 (#below の先頭)、side は右の列 (#secondary-inner の先頭。
  * おすすめ動画の上)
@@ -57,19 +65,19 @@ export function currentViewport(): Viewport {
   const root = document.documentElement;
   return { width: root.clientWidth, height: root.clientHeight };
 }
-/** 掴む場所 (区間・テロップの窓と設定の窓は見出し、バーはつまみ) の箱。窓の左上からの位置 */
+/** 掴む場所 (区間・テロップの窓は見出し、バーはつまみ) の箱。窓の左上からの位置 */
 export type GripBox = { left: number; top: number; width: number; height: number };
 export type SizeLimits = { minWidth: number; minHeight?: number };
 
 /**
- * 最初の配置 (C2.6): **ドック**。バーは下の枠、区間・テロップの窓と設定の窓は右の枠 (並びは区間・テロップ → 設定)。
- * 設定のタブは ⚙ で開いている間、区間・テロップのタブはエディットモードで区間がある間だけ出る (隠れた窓のタブは出さない)。
+ * 最初の配置 (C2.6): **ドック**。バーは下の枠、区間・テロップの窓は右の枠。
+ * 区間・テロップのタブはエディットモードで区間がある間だけ出る (隠れた窓のタブは出さない)。
  * ユーザーが 2026-09-25 に選んだ。**最初の配置はここ 1 か所に置く**: initialWindowLayout (何も覚えていない・壊れた値・
  * 読めない版)、v1 の読み替え (位置の無い窓)、ダブルクリックの戻し先 (dock.ts の restore に youtube.ts が渡す) がここを見る
  */
 const INITIAL_DOCKS: DockState = {
   below: { tabs: ["bar"] },
-  side: { tabs: ["list", "settings"] },
+  side: { tabs: ["list"] },
 };
 
 /** 枠の中身を写す (呼び出し側が書き換えても共有しない) */
@@ -212,16 +220,19 @@ export function parseDockState(value: unknown): DockState {
     // 窓は WINDOW_IDS.length 個しか無いので、正しい値でもこれより長くはならない。壊れた保存値
     // (chrome.storage.local を直接書き換えられる人だけが作れる) が巨大な配列だと、打ち切らずに
     // 回すと要素の数だけ console.warn が出て DevTools を開いていると固まる (whole-branch review M3)
+    // 前の版の窓 (RETIRED_WINDOW_IDS) も数に入れる。前の版が書いた正しい値で warn しない
+    const maxTabs = WINDOW_IDS.length + RETIRED_WINDOW_IDS.length;
     let boundedTabs = rawTabs as unknown[];
-    if (boundedTabs.length > WINDOW_IDS.length) {
+    if (boundedTabs.length > maxTabs) {
       console.warn(
-        `[yt-clip] 保存された windowLayout.docks.${slot}.tabs が窓の数 (${WINDOW_IDS.length}) より` +
-          ` 多い (${boundedTabs.length} 件) ため、先頭 ${WINDOW_IDS.length} 件だけを見ます`,
+        `[yt-clip] 保存された windowLayout.docks.${slot}.tabs が窓の数 (${maxTabs}) より` +
+          ` 多い (${boundedTabs.length} 件) ため、先頭 ${maxTabs} 件だけを見ます`,
       );
-      boundedTabs = boundedTabs.slice(0, WINDOW_IDS.length);
+      boundedTabs = boundedTabs.slice(0, maxTabs);
     }
     const tabs: WindowId[] = [];
     for (const tab of boundedTabs) {
+      if (typeof tab === "string" && RETIRED_WINDOW_IDS.includes(tab)) continue;
       if (!isWindowId(tab) || seen.has(tab) || !acceptsDock(tab, slot)) {
         console.warn(
           `[yt-clip] 保存された windowLayout.docks.${slot}.tabs の ${JSON.stringify(tab)} を捨てます (知らない窓・重複・入れられない枠)`,
@@ -233,7 +244,8 @@ export function parseDockState(value: unknown): DockState {
     }
     if (tabs.length === 0) continue;
     const active = entry.active;
-    if (active === undefined) {
+    // 前の版の窓が前に出ていたなら、無い扱い (黙って。前のタブは見えているタブの先頭になる)
+    if (active === undefined || (typeof active === "string" && RETIRED_WINDOW_IDS.includes(active))) {
       docks[slot] = { tabs };
     } else if (isWindowId(active) && tabs.includes(active)) {
       docks[slot] = { tabs, active };
@@ -272,7 +284,7 @@ function readRects(
   return rects;
 }
 
-/** 古い形 (v1) の鍵 → 窓。パネルの位置は区間・テロップの窓が継ぐ。設定の窓は v1 に無い (C1.3) */
+/** 古い形 (v1) の鍵 → 窓。パネルの位置は区間・テロップの窓が継ぐ (C1.3) */
 const V1_KEYS = [
   ["bar", "bar"],
   ["panel", "list"],
@@ -284,7 +296,7 @@ const V2_KEYS = WINDOW_IDS.map((id) => [id, id] as const);
  *
  * - 何も覚えていない・組でない → 最初の配置 (ドック。INITIAL_DOCKS)
  * - `version` のキーが無ければ古い形 (v1: `{ bar?, panel? }`)。`bar` → `float.bar`、`panel` → `float.list`
- *   に読み替える。**位置を覚えていた窓は浮いた窓のまま**、位置の無い窓 (`settings` を含む) は最初の配置の枠に入れる
+ *   に読み替える。**位置を覚えていた窓は浮いた窓のまま**、位置の無い窓は最初の配置の枠に入れる
  *   (A で自分で動かした窓を黙ってドックへ移さない)。**読み替えた組は書き戻さない** (読み込みは書かない。
  *   次に動かしたときに v2 で書く)
  * - `version` が 2 なら v2 を書いてあるとおりに読む (`docks: {}` なら 3 つとも浮いた窓)。`float` と `docks` は**無いだけなら空**
