@@ -1122,9 +1122,9 @@ describe("content script の読み込み", () => {
   });
 });
 
-describe("エディットモードの録画対象タブ", () => {
+describe("区間の追加での録画対象タブ", () => {
   test("区間を足したタブが録画対象になる", async () => {
-    // エディットモードの最初の区間は MARK_IN ではなく ADD_SEGMENT で作られる。
+    // ＋ 区間を追加で作った最初の区間は MARK_IN ではなく ADD_SEGMENT で作られる。
     // ここでタブを覚えないと、新しいブラウザセッション (session storage が空)
     // では captureTabId が null のまま録画に進み、指示がどこへも飛ばない
     const h = makeHarness();

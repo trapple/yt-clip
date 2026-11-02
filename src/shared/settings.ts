@@ -18,15 +18,6 @@ import { TELOP_FONT_PRESETS } from "@/shared/telop-style";
 
 export const SETTINGS_KEY = "settings";
 
-/**
- * 切り抜きの作り方。
- *
- * **往復するトグルではなく設定にしてある。** 往復を許すと「シンプルで作った
- * 範囲をエディットに引き継ぐか」という問いが常に付きまとう。固定モードなら
- * 切り替えは稀な操作として扱える。
- */
-export type ClipMode = "simple" | "edit";
-
 export type Settings = {
   /** 投稿本文のテンプレート。いまは画面から編集できないが設定ではある */
   template: string;
@@ -38,8 +29,6 @@ export type Settings = {
   hashtagsByChannel: Record<string, string[]>;
   /** 1 クリップの最大長 (秒) */
   maxClipSec: number;
-  /** 切り抜きの作り方。エディットでは複数の区間を結合できる */
-  mode: ClipMode;
   // テロップの見た目。**5 つの平坦なキーで持つ。** 1 つのオブジェクトにまとめると、
   // 設定パネルの保存 (項目ごとの差分を浅く重ねる) で後の項目が前の項目を消す
   /** テロップの文字の大きさ。動画の高さ 1080 px を基準にした px */
@@ -73,7 +62,6 @@ export const DEFAULT_SETTINGS: Settings = {
   template: DEFAULT_TEMPLATE,
   hashtagsByChannel: {},
   maxClipSec: DEFAULT_MAX_CLIP_SEC,
-  mode: "simple",
   telopFontSizePx: 64,
   telopFont: TELOP_FONT_PRESETS[0].label,
   telopFillColor: "#ffffff",
@@ -145,20 +133,6 @@ export function parseMaxClipSec(input: string): FieldResult {
     };
   }
   return { ok: true, patch: { maxClipSec: value } };
-}
-
-/**
- * 入力欄の文字列をモードの差分にする。
- *
- * **既定値に倒さない。** 選択肢しか出していないのに別の値が来たら、それは
- * UI のバグである。黙って `simple` にすると、エディットに切り替えたつもりで
- * シンプルのまま録画に進む
- */
-export function parseMode(input: string): FieldResult {
-  if (!isClipMode(input)) {
-    return { ok: false, message: `知らないモードです: ${input}` };
-  }
-  return { ok: true, patch: { mode: input } };
 }
 
 /** テロップの文字の大きさとして設定できる範囲 (1080 px 基準) */
@@ -295,11 +269,6 @@ function isSettableClipSec(value: unknown): value is number {
   );
 }
 
-/** 保存されている値がモードとして読めるか */
-function isClipMode(value: unknown): value is ClipMode {
-  return value === "simple" || value === "edit";
-}
-
 /** 保存されている値が期待する型かどうか */
 function isStringArray(value: unknown): value is string[] {
   return (
@@ -360,13 +329,9 @@ export function mergeSettings(stored: unknown): Settings {
     );
   }
 
-  if (isClipMode(source.mode)) {
-    settings.mode = source.mode;
-  } else if (source.mode !== undefined) {
-    console.warn(
-      `[yt-clip] 保存された mode が使えないため既定値を使います: ${String(source.mode)}`,
-    );
-  }
+  // `mode` (シンプル / エディット) はもう無い (ADR 0001)。前の版が書いた値が残っていても読み飛ばす。次に保存したとき
+  // (saveSettings は読み直した設定に差分を重ねて書く) storage からも消える。
+  // ※ 局所例外 (Fail Fast): warn も出さない。正しい値なので、出すと更新しただけで毎回コンソールに出る
 
   // テロップの見た目。どれも同じ作法: 型の合う値だけ採り、合わなければ理由を残す
   const telopFields = [
@@ -468,22 +433,6 @@ export type SettingsField = {
  * パネルはこれを並べるだけで、項目ごとの分岐を持たない
  */
 export const SETTINGS_FIELDS: readonly SettingsField[] = [
-  // **先頭に置く。** 他の項目の意味がモードによって変わる (最大秒数は合計に効く)
-  {
-    key: "mode",
-    label: "モード",
-    scope: "global",
-    control: {
-      kind: "select",
-      options: [
-        { value: "simple", label: "シンプル (1 区間を切り抜く)" },
-        { value: "edit", label: "エディット (複数区間を結合する)" },
-      ],
-    },
-    hint: () => "モードを変えると作りかけの区間は消えます",
-    toText: (settings) => settings.mode,
-    fromText: (text) => parseMode(text),
-  },
   {
     key: "hashtags",
     label: "ハッシュタグ",
@@ -529,16 +478,14 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     toText: (settings) => String(settings.maxClipSec),
     fromText: (text) => parseMaxClipSec(text),
   },
-  // テロップの見た目。**モードに関わらず常に出す。** パネルには項目をモードで
-  // 出し分ける仕組みが無く、モード自体が同じパネルの未保存の選択肢なので、
-  // 出し分けると選び直した瞬間に項目が出入りする処理まで要る
+  // テロップの見た目
   {
     key: "telopFontSizePx",
     label: "テロップの文字サイズ",
     scope: "global",
     control: { kind: "text" },
     hint: () =>
-      `エディットモードのテロップに使う。${TELOP_FONT_SIZE_RANGE.min}〜${TELOP_FONT_SIZE_RANGE.max} (1080p で見たときの px)`,
+      `テロップに使う。${TELOP_FONT_SIZE_RANGE.min}〜${TELOP_FONT_SIZE_RANGE.max} (1080p で見たときの px)`,
     toText: (settings) => String(settings.telopFontSizePx),
     fromText: (text) => parseTelopFontSize(text),
   },
@@ -551,7 +498,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
       suggestions: TELOP_FONT_PRESETS.map((preset) => preset.label),
     },
     hint: () =>
-      "エディットモードのテロップに使う。候補から選ぶか、手元にあるフォントの名前を書く (無ければ代わりのフォントで描く)",
+      "テロップに使う。候補から選ぶか、手元にあるフォントの名前を書く (無ければ代わりのフォントで描く)",
     toText: (settings) => settings.telopFont,
     fromText: (text) => parseTelopFont(text),
   },
@@ -560,7 +507,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: "テロップの文字の色",
     scope: "global",
     control: { kind: "color" },
-    hint: () => "エディットモードのテロップに使う",
+    hint: () => "テロップに使う",
     toText: (settings) => settings.telopFillColor,
     fromText: (text) => parseColor("telopFillColor", text),
   },
@@ -569,7 +516,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     label: "テロップの縁取りの色",
     scope: "global",
     control: { kind: "color" },
-    hint: () => "エディットモードのテロップに使う",
+    hint: () => "テロップに使う",
     toText: (settings) => settings.telopStrokeColor,
     fromText: (text) => parseColor("telopStrokeColor", text),
   },
@@ -579,7 +526,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     scope: "global",
     control: { kind: "text" },
     hint: () =>
-      `エディットモードのテロップに使う。${TELOP_STROKE_WIDTH_RANGE.min}〜${TELOP_STROKE_WIDTH_RANGE.max}、0 で縁取りなし (1080p で見たときの px)`,
+      `テロップに使う。${TELOP_STROKE_WIDTH_RANGE.min}〜${TELOP_STROKE_WIDTH_RANGE.max}、0 で縁取りなし (1080p で見たときの px)`,
     toText: (settings) => String(settings.telopStrokeWidthPx),
     fromText: (text) => parseTelopStrokeWidth(text),
   },

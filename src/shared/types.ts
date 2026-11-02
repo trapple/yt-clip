@@ -169,10 +169,10 @@ export const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
 ]);
 
 export type ClipEvent =
-  /** 範囲の作成 (シンプルモード)。今ある区間を置き換える */
+  /** 範囲の作成。今ある区間とテロップを置き換える (IN を、区間を組み立てている途中以外で押したとき) */
   | { type: "MARK_IN"; range: ClipRange; meta: VideoMeta }
   /**
-   * 区間の追加 (エディットモード)。
+   * 区間の追加。
    *
    * `idle` から受けたときは `MARK_IN` と同じ結果になるので、
    * 「最初の 1 回だけ MARK_IN」という分岐は content script に要らない

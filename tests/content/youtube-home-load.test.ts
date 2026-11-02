@@ -131,7 +131,7 @@ beforeAll(async () => {
   vi.stubGlobal("chrome", {
     storage: {
       sync: {
-        get: async (): Promise<Record<string, unknown>> => ({ settings: { mode: "edit" } }),
+        get: async (): Promise<Record<string, unknown>> => ({}),
         set: async (): Promise<void> => undefined,
       },
       local: {

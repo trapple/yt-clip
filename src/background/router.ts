@@ -377,8 +377,8 @@ export function createRouter(
       return;
     }
 
-    // **区間を作るイベントはどちらも録画対象のタブを決める。** エディット
-    // モードの最初の区間は MARK_IN ではなく ADD_SEGMENT で作られるため、
+    // **区間を作るイベントはどちらも録画対象のタブを決める。** ＋ 区間を追加で
+    // 作った最初の区間は MARK_IN ではなく ADD_SEGMENT で作られるため、
     // MARK_IN だけを見ていると captureTabId が null のまま録画に進み、
     // recorder/start がどこへも飛ばずに seeking で固まる
     if (

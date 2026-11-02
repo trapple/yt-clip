@@ -141,7 +141,7 @@ beforeAll(async () => {
   vi.stubGlobal("chrome", {
     storage: {
       sync: {
-        get: async (): Promise<Record<string, unknown>> => ({ settings: { mode: "edit" } }),
+        get: async (): Promise<Record<string, unknown>> => ({}),
         set: async (): Promise<void> => undefined,
       },
       local: {
@@ -181,7 +181,7 @@ beforeAll(async () => {
   };
   releaseLayout();
   await flush();
-  // エディットモードで区間があるので、区間・テロップの窓を出す条件を満たす
+  // 区間があるので、区間・テロップの窓を出す条件を満たす
   onMessage?.({ type: "state/changed", state: READY }, {}, () => undefined);
   await flush();
 });

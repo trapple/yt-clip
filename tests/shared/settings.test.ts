@@ -10,7 +10,6 @@ import {
   hashtagsFor,
   parseColor,
   parseMaxClipSec,
-  parseMode,
   parseTelopFont,
   parseTelopFontSize,
   parseTelopStrokeWidth,
@@ -383,40 +382,19 @@ describe("チャンネル別にする前の共通タグ", () => {
   });
 });
 
-describe("モード", () => {
-  test("既定はシンプル", () => {
-    expect(DEFAULT_SETTINGS.mode).toBe("simple");
-  });
-
-  test("保存された値を読む", () => {
-    expect(mergeSettings({ mode: "edit" }).mode).toBe("edit");
-  });
-
-  test("知らない値は既定に倒して理由を残す", () => {
+describe("保存済みのモード (モードを無くす前の版が書いた値)", () => {
+  test("読み飛ばし、warn も出さない", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-
-    expect(mergeSettings({ mode: "advanced" }).mode).toBe("simple");
-
-    expect(warn).toHaveBeenCalled();
+    const settings = mergeSettings({ mode: "edit", maxClipSec: 30 });
+    expect(settings).not.toHaveProperty("mode");
+    expect(settings.maxClipSec).toBe(30);
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
-  });
-
-  test("項目として画面に出る", () => {
-    const field = SETTINGS_FIELDS.find((item) => item.key === "mode");
-    expect(field?.control.kind).toBe("select");
   });
 });
 
-describe("parseMode", () => {
-  test("受け付ける値", () => {
-    expect(parseMode("simple")).toEqual({ ok: true, patch: { mode: "simple" } });
-    expect(parseMode("edit")).toEqual({ ok: true, patch: { mode: "edit" } });
-  });
-
-  test("知らない値は既定に倒さず理由を返す", () => {
-    // 選択肢しか出していないのに別の値が来たら、それは UI のバグ
-    expect(parseMode("advanced").ok).toBe(false);
-  });
+test("設定の欄にモードは無い", () => {
+  expect(SETTINGS_FIELDS.map((field) => field.key)).not.toContain("mode");
 });
 
 describe("テロップの見た目", () => {
@@ -507,7 +485,7 @@ describe("テロップの見た目", () => {
     expect(parseColor("telopFillColor", "#fff").ok).toBe(false);
   });
 
-  test("画面にはモードに関わらず 5 項目が出る", () => {
+  test("画面には 5 項目が出る", () => {
     const keys = SETTINGS_FIELDS.map((field) => field.key);
     expect(keys).toEqual(
       expect.arrayContaining([

@@ -181,7 +181,7 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
     // router と UI にも同じガードがあるが、そちらが漏れたときに
     // 防御が一枚も残らないのは避ける
     if (BUSY_KINDS.has(state.kind)) return invalid(state);
-    // シンプルモードの「区間を丸ごと置き換える」操作。テロップも持ち越さない
+    // IN の「区間を丸ごと置き換える」操作。テロップも持ち越さない
     return readyWith([event.range], event.meta, []);
   }
 

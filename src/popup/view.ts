@@ -43,8 +43,8 @@ function durationOf(segments: ClipRange[]): number {
 /**
  * 区間を人が読める形にする。
  *
- * **1 区間なら今までどおり範囲で出す。** 区間数を常に出すと、シンプルモードで
- * 使っている人に関係のない概念が見えることになる
+ * **1 区間なら今までどおり範囲で出す。** 区間数を常に出すと、1 つの範囲だけを
+ * 切り抜いている人に関係のない概念が見えることになる
  */
 function segmentsLabel(segments: ClipRange[]): string {
   const only = segments.length === 1 ? segments[0] : undefined;

@@ -81,7 +81,6 @@ import {
   mergeSettings,
   SETTINGS_KEY,
   DEFAULT_SETTINGS,
-  type ClipMode,
   type Channel,
   type Settings,
 } from "@/shared/settings";
@@ -130,7 +129,6 @@ const MIN_RECOMMENDED_HEIGHT = 720;
 
 /**
  * いま画面に出ている区間列。**状態機械が正で、これはその写し。**
- * シンプルモードでは常に 0 個か 1 個
  */
 let currentSegments: ClipRange[] = [];
 /**
@@ -152,8 +150,6 @@ let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
  * 並べ替えもマージもしないので index は動かず、数が変わったときだけ詰める
  */
 let selectedIndex = -1;
-/** 切り抜きの作り方。設定から読む */
-let mode: ClipMode = "simple";
 let segmentList: SegmentList | null = null;
 let telopList: TelopList | null = null;
 /**
@@ -198,7 +194,7 @@ let listWindow!: PanelWindow;
 /**
  * バーの窓。拡大バーと操作の行 (中身の根 #yt-clip-bar) を入れる。
  *
- * **オンの間は 1 つを使い回す** (spec A.3)。モードを変えてバーを作り直しても窓は作り直さないので、
+ * **オンの間は 1 つを使い回す** (spec A.3)。YouTube の再描画でバーを作り直しても窓は作り直さないので、
  * 位置と大きさは変わらない。見出しの行は作らず、操作の行の左端のつまみ (⠿) で動かす
  * (見出しの行ぶん高くなると、1440x795 でプレイヤーの下端を覆うため。spec A.1)。オンの間だけあるのも同じ
  */
@@ -260,18 +256,10 @@ function createWindows(): void {
 /**
  * 状態機械から最後に届いた種類。
  *
- * モードを切り替えてよいかの判定に使う。`busy` だけでは、録画済みクリップを
- * 抱えた `preview` / `posted` / `degraded` を見分けられない
+ * いま状態機械がどの状態か (IN が作り直すか頭を合わせるかの判定と、録画の監視に使う)。`busy` だけでは、
+ * 録画済みクリップを抱えた `preview` / `posted` / `degraded` を見分けられない
  */
 let lastKind: ClipState["kind"] = "idle";
-/**
- * 適用を待っているモード。
- *
- * **`chrome.storage.onChanged` は次に設定を保存するまで来ない。** 切り替えを
- * その場で捨てると、設定はエディットなのにタブはシンプルのまま、開き直すまで
- * 直らない。落ち着いた時点で適用できるよう覚えておく
- */
-let pendingMode: ClipMode | null = null;
 /**
  * 次に状態が届いたとき、末尾の区間を選ぶ。
  *
@@ -468,25 +456,27 @@ function rangeLabel(range: ClipRange): string {
   return `${formatTime(range.startSec)} 〜 ${formatTime(range.endSec)} (${durationSec}秒)`;
 }
 
+/** 状態の欄の最初の案内。区間が無いときに出す */
+const INITIAL_STATUS = "IN を押して開始位置を指定";
+
 /** 同じ範囲を指しているか。別のオブジェクトでも値が同じなら同じ範囲 */
 function sameRange(a: ClipRange, b: ClipRange): boolean {
   return a.startSec === b.startSec && a.endSec === b.endSec;
 }
 
+/**
+ * 状態機械の index の区間が、送った範囲になっているか。区間を変える送信が受け付けられたかの判定に使う
+ * (拒まれたら send が画面を状態機械に戻し、「受け付けられませんでした」を出す)
+ */
+function segmentIs(state: ClipState, index: number, range: ClipRange): boolean {
+  if (state.kind !== "ready") return false;
+  const segment = state.segments[index];
+  return segment !== undefined && sameRange(segment, range);
+}
+
 /** 拡大バーが編集している区間。無ければ null */
 function selectedSegment(): ClipRange | null {
   return currentSegments[selectedIndex] ?? null;
-}
-
-/**
- * 状態機械が持つ先頭の区間が、送った範囲と一致するか。
- *
- * シンプルモードの確定待ちに使う。エディットでは並べ替えとマージで結果が
- * 変わるため、そもそも確定を待たない (`onMarkIn` 参照)
- */
-function firstMatches(segments: ClipRange[], range: ClipRange): boolean {
-  const first = segments[0];
-  return first !== undefined && sameRange(first, range);
 }
 
 /**
@@ -546,45 +536,27 @@ function abortRecording(): void {
   });
 }
 
-function applyRange(range: ClipRange, videoDurationSec: number): void {
-  // 範囲が変われば、前の範囲を見ている監視は用済み
-  cancelPreviewWatch();
-
-  // **シンプルモードの楽観描画専用。** `currentSegments` を 1 つに倒して
-  // `selectedIndex` を 0 にするので、エディットからは呼ばない
-  currentSegments = [range];
-  selectedIndex = 0;
-  paintRangeBar(range, videoDurationSec);
-  paintOverlay(currentSegments, videoDurationSec);
-  setStatus(rangeLabel(range));
-}
-
 /**
- * IN ボタン。モードで意味が変わる。
+ * IN ボタン (ADR 0001: モードを無くし、区間が 1 つならシンプルと同じにする)。
  *
- * - シンプル: 範囲を作り直す (`MARK_IN`)
- * - エディット: **選択中の区間の頭だけ**を今の位置に動かす (`onMarkSegmentStart`)
+ * - **区間を組み立てている途中** (状態が ready で、この動画の区間がある): 選んでいる区間の頭だけを今の位置に動かす
+ * - **それ以外** (区間が無い・録画した後・失敗・別の動画の区間しか無い): 今の位置から範囲を作り直す (`MARK_IN`。
+ *   区間とテロップは置き換わる)。録り終えたら次の場面で IN、という流れを残すため。録画した後の区間は録った
+ *   クリップに焼き込み済みで、頭を動かしても録り直しになるだけ
  *
- * **エディットで IN を「区間を追加」に置き換えない。** OUT があるのに IN が
- * 無い状態になり、一度作った区間の頭を詰められなくなる。
+ * **IN を「区間を追加」に置き換えない。** OUT があるのに IN が無い状態になり、一度作った区間の頭を詰められなくなる
  */
 function onMarkIn(): void {
-  if (mode === "edit") {
-    onMarkSegmentStart();
-    return;
-  }
-
-  // 録画中に打ち直されると状態機械だけが範囲を作り直し、録画は走り続けて
-  // 取り残される。状態機械と router にも同じガードがあるが、ここで止めれば
-  // ユーザーに理由をすぐ返せる。
-  //
-  // **ドラッグ (canAdjustRange) と違い、IN は preview からでも受け付ける。**
-  // spec §5.6 の「MARK_IN はどの状態からでも ready へ」を content script 側で
-  // 狭めると、録り終えた後に次の切り抜きを始められなくなるため。代償として、
-  // 録画済みクリップへの参照 (clipId) は状態から外れる (IndexedDB には残るが
-  // popup から辿れなくなる)。この非対称は意図したもの
+  // 録画中に打ち直されると状態機械だけが範囲を作り直し、録画は走り続けて取り残される。状態機械と router にも
+  // 同じガードがあるが、ここで止めればユーザーに理由をすぐ返せる
   if (busy) {
     setStatus("録画中は範囲を変更できません");
+    return;
+  }
+  const composing =
+    lastKind === "ready" && currentSegments.length > 0 && rangeVideoId === currentVideoId();
+  if (composing) {
+    onMarkSegmentStart();
     return;
   }
 
@@ -592,12 +564,13 @@ function onMarkIn(): void {
   const meta = getVideoMeta();
   // 既定の長さの範囲をここで作る。状態機械は長さの決め方を知らない
   const range = makeDefaultRange(video.currentTime, video.duration, maxClipSec);
-
   rangeVideoId = meta.videoId;
-  applyRange(range, video.duration);
+  // 範囲が変われば、前の範囲を見ている再生の監視は用済み (消した楽観描画が外していた)
+  cancelPreviewWatch();
+  // 楽観的に描かない。状態機械の答えを待ってから描く (区間 1 つの ready になり、それが選ばれる)
   send(
     { type: "MARK_IN", range, meta },
-    (state) => state.kind === "ready" && firstMatches(state.segments, range),
+    (state) => state.kind === "ready" && state.segments.length === 1 && segmentIs(state, 0, range),
   );
 }
 
@@ -622,48 +595,9 @@ function applyStateToSelection(): void {
 }
 
 /**
- * モードの変更を取り込む。
- *
- * **作りかけの区間は全部消す。** エディット (2 区間) からシンプルへ戻したとき、
- * 先頭だけ残すような半端な引き継ぎは何が消えたのか分からない。設定パネルの
- * 説明にも「モードを変えると作りかけの区間は消えます」と書いてある。
- *
- * **録画中は変えない。** 状態機械だけが戻り、録画が走り続けて取り残される。
- * 設定は既に保存されているので、録画が終われば次の変更通知で追いつく
- */
-function applyMode(next: ClipMode): void {
-  if (next === mode) {
-    pendingMode = null;
-    return;
-  }
-
-  // **区間を捨ててよいのは、まだ何も録れていないときだけ。** 録画中に変えると
-  // 状態機械だけが idle へ戻って録画が取り残され、録画済みクリップを持つ状態
-  // (preview / posted / degraded) で変えると、実時間を払った成果物への参照ごと
-  // 失う。捨てられる状態になるまで待つ
-  if (lastKind !== "idle" && lastKind !== "ready") {
-    pendingMode = next;
-    setStatus("いまは切り替えられません。録画や投稿が済んでから切り替えます");
-    return;
-  }
-
-  pendingMode = null;
-  mode = next;
-  // バーごと作り直してラベルと並びを入れ替える。部分的に差し替えるより、
-  // 一度で作り直す方が「どちらのモードの見た目が残っているか」を考えずに済む
-  barPart(BAR_ID)?.remove();
-  mount();
-
-  if (currentSegments.length > 0) {
-    send({ type: "RESET_MARKS" });
-  }
-}
-
-/**
  * 「＋ 区間を追加」。今の再生位置から新しい区間を作る。
  *
- * **楽観的に描かない。** 並べ替えとマージで結果が変わるので、状態機械の答えを
- * 待ってから描く (`applyStateToDisplay` が反映する)
+ * **楽観的に描かない。** 状態機械の答えを待ってから描く (`applyStateToDisplay` が反映する)
  */
 function onAddSegment(): void {
   if (busy) {
@@ -680,6 +614,8 @@ function onAddSegment(): void {
   // 足した区間を選ぶ。前の区間が選ばれたままだと、続けて IN/OUT を押したとき
   // 別の区間が動く
   selectLastOnNextState = true;
+  // 選ぶ区間が変わるので、前の区間を見ている再生の監視は用済み
+  cancelPreviewWatch();
   send({ type: "ADD_SEGMENT", range, meta });
 }
 
@@ -787,7 +723,7 @@ function onTelopDragged(index: number, startSec: number, endSec: number): void {
 }
 
 /**
- * エディットモードの IN。選択中の区間の**頭だけ**を今の位置に動かす。
+ * IN (区間を組み立てている途中)。選択中の区間の**頭だけ**を今の位置に動かす。
  *
  * **専用イベントを持たない。** `ADJUST_SEGMENT` (拡大バーのドラッグと同じ) が
  * 既に「この区間をこの範囲にする」を表せているので、同じことをする経路を
@@ -811,6 +747,11 @@ function onMarkSegmentStart(): void {
 
   const video = getVideo();
   const next = { startSec: video.currentTime, endSec: editing.endSec };
+  // 尻より後ろで押した = 新しい場面を始めたいことが多い。区間を組み立てている途中なので作り直さず、道を示す
+  if (next.startSec >= editing.endSec) {
+    setStatus(`IN が区間の尻 (${formatTime(editing.endSec)}) より後ろです。新しい区間は ＋ 区間を追加 で作れます`);
+    return;
+  }
   const validation = validateRange(next.startSec, next.endSec, maxClipSec);
   if (!validation.ok) {
     setStatus(validation.message);
@@ -818,7 +759,9 @@ function onMarkSegmentStart(): void {
   }
 
   // 並べ替えないので、頭を動かしても選択はその場に留まる
-  send({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next });
+  const index = selectedIndex;
+  cancelPreviewWatch();
+  send({ type: "ADJUST_SEGMENT", index, range: next }, (state) => segmentIs(state, index, next));
 }
 
 function onMarkOut(): void {
@@ -828,9 +771,7 @@ function onMarkOut(): void {
   }
   const editing = selectedSegment();
   if (editing === null) {
-    setStatus(
-      mode === "edit" ? "先に区間を追加してください" : "先に IN を指定してください",
-    );
+    setStatus("先に区間を追加してください");
     return;
   }
 
@@ -856,23 +797,12 @@ function onMarkOut(): void {
     return;
   }
 
-  // **`applyRange` より先に index を取る。** `applyRange` は単一区間の
-  // 楽観描画なので `selectedIndex` を 0 に倒す。後で読むと、2 番目の区間を
-  // 選んで OUT を押しても先頭区間が伸び、全区間がマージされて溶ける
+  // 範囲が変われば、前の範囲を見ている再生の監視は用済み (消した楽観描画が外していた。外さないと、
+  // 「▶ 区間を見る」の最中に尻を伸ばしても古い OUT で止まる)
+  cancelPreviewWatch();
+  // 楽観的に描かない。状態機械の答えを待ってから描く (`onAddSegment` と同じ)
   const index = selectedIndex;
-
-  // エディットでは楽観的に描かない。並べ替えとマージで結果が変わるので、
-  // 状態機械の答えを待ってから描く (`onMarkIn` と同じ理由)
-  if (mode === "edit") {
-    send({ type: "MARK_OUT", index, sec: next.endSec });
-    return;
-  }
-
-  applyRange(next, video.duration);
-  send(
-    { type: "MARK_OUT", index, sec: next.endSec },
-    (state) => state.kind === "ready" && firstMatches(state.segments, next),
-  );
+  send({ type: "MARK_OUT", index, sec: next.endSec }, (state) => segmentIs(state, index, next));
 }
 
 /**
@@ -899,13 +829,8 @@ function onRangeCommitted(range: ClipRange): void {
     );
     paintOverlay(currentSegments, durationSec);
     setStatus(rangeLabel(range));
-    send(
-      { type: "ADJUST_SEGMENT", index: selectedIndex, range },
-      mode === "edit"
-        ? undefined
-        : (state) =>
-            state.kind === "ready" && firstMatches(state.segments, range),
-    );
+    const index = selectedIndex;
+    send({ type: "ADJUST_SEGMENT", index, range }, (state) => segmentIs(state, index, range));
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
   }
@@ -1026,7 +951,7 @@ function refreshOverlay(): void {
 /**
  * プレビューを今のテロップと見た目に合わせる。
  *
- * エディットモードで、範囲を作った動画を見ているときだけ出す。別の動画の
+ * 範囲を作った動画を見ているときだけ出す。別の動画の
  * テロップを重ねない (帯と同じ規則)
  */
 function refreshTelopPreview(): void {
@@ -1043,7 +968,7 @@ function refreshTelopPreview(): void {
   }
   // 動画ページ以外では canvas を差さない (spa-inject)
   const videoId = currentVideoId();
-  const visible = mode === "edit" && videoId !== null && rangeVideoId === videoId;
+  const visible = videoId !== null && rangeVideoId === videoId;
   telopPreview.update(video, visible ? currentTelops : [], telopStyle);
 }
 
@@ -1097,14 +1022,14 @@ function renderActions(kind: ClipState["kind"]): void {
 }
 
 /**
- * 一覧に出す区間とテロップ。**エディットモードで、範囲を作った動画を見ているときだけ。**
+ * 一覧に出す区間とテロップ。**範囲を作った動画を見ているときだけ。**
  *
- * シンプルで使っている人に、関係のない概念を見せない。別の動画の区間は出さない
+ * 別の動画の区間は出さない
  * (帯・プレビューと同じ規則)。画面に浮いた窓に出すので、SPA で動画 B へ移ったのに
  * 動画 A の区間が出続けると目立つ (spec §4)
  */
 function listedItems(): { segments: ClipRange[]; telops: Telop[] } {
-  if (mode !== "edit" || rangeVideoId !== currentVideoId()) {
+  if (rangeVideoId !== currentVideoId()) {
     return { segments: [], telops: [] };
   }
   return { segments: currentSegments, telops: currentTelops };
@@ -1130,7 +1055,7 @@ function initialWindowRect(id: WindowId): WindowRect | null {
   if (player === null) return null;
   const box = player.getBoundingClientRect();
   // **高さを測る前にプレイヤーの幅を当てる。** 覚えた位置が無い読み込みでは窓は最小の幅
-  // (480px) のままで、エディットモードの操作の行は 2 段に折り返して背が高く測れる。その高さで
+  // (480px) のままで、操作の行は 2 段に折り返して背が高く測れる。その高さで
   // 画面の下端に詰めると、プレイヤーの直下より上に置かれてシークバーに重なる。
   // place は style を同期で当てるので、直後の測定は新しい幅でレイアウトされる
   barWindow.place({ left: box.left, top: barWindow.rect().top, width: box.width });
@@ -1347,7 +1272,7 @@ function paintRangeBar(range: ClipRange, videoDurationSec: number): void {
  * 拡大バーの下のテロップの帯を描き直す (フロートの窓の spec B)。拡大バーを描き直したとき
  * (`paintRangeBar`) と、テロップや出す条件が変わったとき (`refreshLists`) に呼ぶ。
  *
- * 出すテロップは一覧と同じ規則 (`listedItems`: エディットモードで、範囲を作った動画を見ている
+ * 出すテロップは一覧と同じ規則 (`listedItems`: 範囲を作った動画を見ている
  * とき)。拡大バーがまだ窓を持たない (範囲を描く前) ときは渡さない (時間の軸が無い)。
  * 動かせる条件も一覧と同じ (`canEditTelops`)。
  *
@@ -1450,12 +1375,12 @@ function applyStateToDisplay(state: ClipState): void {
   // **別の動画の状態では言わない。** 削除の応答待ちの間に別の動画へ移ると、取り込まない
   // ので手元は空になるが、状態機械にはまだ残っている。idle は meta を持たないが、
   // そのときは本当に消えている
-  if (
+  const telopsGone =
     removedIndexOnNextState !== null &&
     previousTelopCount > 0 &&
     currentTelops.length === 0 &&
-    (stateMeta === null || stateMeta.videoId === currentVideoId())
-  ) {
+    (stateMeta === null || stateMeta.videoId === currentVideoId());
+  if (telopsGone) {
     setStatus("テロップも消えました");
   }
   // **並べ替えないので index は動かない。** 足した直後だけ末尾へ移し、
@@ -1515,10 +1440,15 @@ function applyStateToDisplay(state: ClipState): void {
   if (revealTelop) revealLastRow(telopList?.element, "telop");
 
   lastKind = state.kind;
-  // 待たせていた切り替えを拾う。`applyMode` はバーを作り直すので、
-  // 画面の更新をひととおり終えてから呼ぶ
-  if (pendingMode !== null) {
-    applyMode(pendingMode);
+
+  // 選んでいる区間が変わったら、範囲と秒数を状態の欄に出す (IN / OUT / ＋ 区間を追加の答え)。ready のときだけ:
+  // 録画中・プレビュー・失敗などは、それぞれの文言を上で出している
+  if (state.kind === "ready" && current !== null && drifted) {
+    setStatus(rangeLabel(current));
+  } else if (current === null && previous !== null && !telopsGone && state.kind !== "failed") {
+    // 区間が無くなった (消した・idle に戻った・別の動画へ移った)。書いた範囲を残すと、別の動画のバーに前の動画の
+    // 範囲が出続ける。最初の案内に戻す。「テロップも消えました」と失敗の文言は上で出しているので上書きしない
+    setStatus(INITIAL_STATUS);
   }
 
   if (current !== null && (drifted || busy)) {
@@ -1606,9 +1536,7 @@ async function prepareRecording(
     // **テロップの有無で録画の経路を決め、描けるかをここで確かめる。**
     // `beginRecording` で気付くと、router が理由を問わず recording-aborted に
     // 落とすので専用の文言が出ない。見た目もここで固定する (録画中に変えても効かない)
-    // **エディットモードのときだけ合成する。** シンプルモードでは一覧もプレビューも
-    // 出ないので、状態にテロップが残っていても焼き込むと画面に無い文字がクリップに入る
-    if (mode === "edit" && hasRenderableTelops(currentTelops, currentSegments)) {
+    if (hasRenderableTelops(currentTelops, currentSegments)) {
       // 隠れたまま始めると、最初のフレームから映像が止まる。**描けるかより先に
       // 見る。** 隠れた窓では動画がデコードされず videoWidth が 0 になり
       // (テロップ spec §9.1)、先に「動画の大きさがまだ分かりません」が出て
@@ -1934,22 +1862,15 @@ function buildBar(): HTMLElement {
 
   // 常に出ている操作。主操作は状態ごとに変わる側 (renderActions) が持つ
   // **IN は残す。** 置き換えると、一度作った区間の頭を詰められなくなる
-  const addButton =
-    mode === "edit"
-      ? makeButton("＋ 区間を追加", false, onAddSegment)
-      : null;
+  const addButton = makeButton("＋ 区間を追加", false, onAddSegment);
   const inButton = makeButton("IN", false, onMarkIn);
   const outButton = makeButton("OUT", false, onMarkOut);
-  const playButton = makeButton(
-    mode === "edit" ? "▶ 区間を見る" : "▶ 範囲を見る",
-    false,
-    () => void playRange(),
-  );
+  const playButton = makeButton("▶ 区間を見る", false, () => void playRange());
 
   const status = document.createElement("span");
   status.id = `${BAR_ID}-status`;
   status.style.cssText = BAR_STYLE.status;
-  status.textContent = "IN を押して開始位置を指定";
+  status.textContent = INITIAL_STATUS;
   status.title = status.textContent;
 
   // 状態ごとに中身を入れ替える箱。押しても拒まれるだけの操作は出さない
@@ -1958,9 +1879,7 @@ function buildBar(): HTMLElement {
   actions.style.cssText = BAR_STYLE.row;
 
   // つまみは左端。その後は「追加してから頭と尻を決める」順に並べる
-  row.append(grip);
-  if (addButton !== null) row.append(addButton);
-  row.append(inButton, outButton, playButton, actions, status);
+  row.append(grip, addButton, inButton, outButton, playButton, actions, status);
 
   // 拡大バーは生成直後は無効。範囲が確定して ready になったら有効化される
   rangeBar = createRangeBar({
@@ -2122,13 +2041,13 @@ function mount(): void {
   // (spec A.3 / C2.1)。まだ無い間にバーを作ると、タイトルもプレイヤーも読めないまま IN を押せる
   const anchor = document.querySelector(YT_SELECTORS.mountAnchor);
   if (anchor === null) {
-    // applyMode が中身の根 (BAR_ID) を外した直後にここで抜けると、バーの窓が中身の無いまま
-    // 出続ける。refreshWindows は中身の根が無ければバーの窓を隠すので、ここで一度呼んでおく
+    // 中身の根 (BAR_ID) が無いままここで抜けると、バーの窓が中身の無いまま出続けることがある。
+    // refreshWindows は中身の根が無ければバーの窓を隠すので、ここで一度呼んでおく
     refreshWindows();
     return; // 動画ページ未生成。次の observe で再試行する
   }
 
-  // 前のバーが外されていることがある (モードの切り替え)。参照だけ差し替えると
+  // 前のバーが外されていることがある (YouTube の再描画で枠ごと外れた)。参照だけ差し替えると
   // rAF とリスナを抱えた古いインスタンスが解放されないまま残る
   const previousBar = rangeBar;
   const previousTrack = telopTrack;
@@ -2337,14 +2256,13 @@ function applyTelopSettings(settings: Settings): void {
  * ましで、上限の食い違いも起きない (全員が既定値を見る)
  */
 function loadInitialSettings(): void {
-  // 読み終えるまでにオフにしたら、バーを作り直さない (applyMode は mount を呼ぶ)
+  // 読み終えるまでにオフにしたら、読んだ値を使わない
   const id = runId;
   void loadSettings()
     .then((settings) => {
       if (!isCurrentRun(id)) return;
       maxClipSec = settings.maxClipSec;
       applyTelopSettings(settings);
-      applyMode(settings.mode);
     })
     .catch((error: unknown) => {
       if (!isCurrentRun(id)) return;
@@ -2410,7 +2328,6 @@ function onSettingsChanged(
   const settings = mergeSettings(change.newValue);
   maxClipSec = settings.maxClipSec;
   applyTelopSettings(settings);
-  applyMode(settings.mode);
 }
 
 /** 直前に見ていた URL。SPA 遷移の検出に使う。start() が読み直す */
@@ -2470,9 +2387,8 @@ let pageObserver!: MutationObserver;
  * モジュールの状態を最初の値に戻す (stop() の最後。spec §2.2)。**状態機械が正で、ここにあるのは写し**なので、戻しても
  * 失うものは無い (次の start() の content/loaded の応答と、覚えた配置の読み直しで取り戻す)。
  *
- * **設定から読んだ値 (mode / maxClipSec / telopStyle) は戻さない** (判断メモ 8)。start() の loadInitialSettings が読み直す
- * ので値は同じになる。mode を simple に戻すと、読み直しの applyMode が「モードが変わった」としてバーを作り直し、
- * content/loaded の応答が先に届いて区間を持っていると RESET_MARKS で区間を捨てる
+ * **設定から読んだ値 (maxClipSec / telopStyle) は戻さない** (判断メモ 8)。start() の loadInitialSettings が読み直す
+ * ので値は同じになる
  */
 function resetModuleState(): void {
   currentSegments = [];
@@ -2487,7 +2403,6 @@ function resetModuleState(): void {
   // 覚えた配置の写し。start() の loadInitialLayout が読み直す (オフの間に別のタブで動かした位置も拾う)
   for (const id of WINDOW_IDS) delete floatLayout[id];
   lastKind = "idle";
-  pendingMode = null;
   selectLastOnNextState = false;
   revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;

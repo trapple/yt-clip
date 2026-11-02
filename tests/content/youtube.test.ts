@@ -801,7 +801,7 @@ beforeEach(async () => {
   // 前のテストで送ったままにしない
   const body = document.getElementById("yt-clip-list-body");
   if (body !== null) body.scrollTop = 0;
-  // モードも既定へ戻す。edit のまま次のテストに入るとバーの見た目が変わる
+  // 設定を既定へ戻す
   changeSettings({});
   // 前のテストの範囲・録画・監視をすべて捨てさせる
   emit({ kind: "idle" });
@@ -831,7 +831,7 @@ describe("範囲再生の監視", () => {
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
 
     // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
-    clickButton("▶ 範囲を見る");
+    clickButton("▶ 区間を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
@@ -866,7 +866,7 @@ describe("範囲再生の監視", () => {
 
   test("録画に入ると範囲再生の監視は解除される", async () => {
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
-    clickButton("▶ 範囲を見る");
+    clickButton("▶ 区間を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
@@ -915,7 +915,7 @@ describe("動画の入れ替わり", () => {
 
     // 「範囲を再生」を押しても、この動画は動かない
     const beforeSec = video.element.currentTime;
-    clickButton("▶ 範囲を見る");
+    clickButton("▶ 区間を見る");
     await flush();
 
     expect(video.element.currentTime).toBe(beforeSec);
@@ -1387,6 +1387,9 @@ describe("最大秒数の設定", () => {
     video.element.currentTime = 100;
     clickButton("IN");
     await flush();
+    // IN は状態機械の答えを待って描く。上限 10 秒の範囲ができた答えを流す
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 110 }], telops: [], meta: META_A });
+    await flush();
 
     video.element.currentTime = 130;
     clickButton("OUT");
@@ -1397,7 +1400,7 @@ describe("最大秒数の設定", () => {
   });
 });
 
-describe("エディットモード", () => {
+describe("複数区間", () => {
   /** バーに出ているボタンの文言 */
   function buttonLabels(): string[] {
     return [...document.querySelectorAll("#yt-clip-bar button")].map(
@@ -1410,16 +1413,7 @@ describe("エディットモード", () => {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
-  test("シンプルでは一覧を出さない", async () => {
-    changeSettings({ mode: "simple" });
-    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
-    await flush();
-
-    expect(segmentRows()).toEqual([]);
-  });
-
-  test("エディットでは追加ボタンが増える。IN は消えない", async () => {
-    changeSettings({ mode: "edit" });
+  test("追加ボタンと IN が並ぶ", async () => {
     await flush();
 
     // IN を追加ボタンに置き換えると、一度作った区間の頭を詰められなくなる
@@ -1429,7 +1423,6 @@ describe("エディットモード", () => {
   });
 
   test("追加ボタンは区間を足すイベントを送る", async () => {
-    changeSettings({ mode: "edit" });
     await flush();
     sent = [];
 
@@ -1441,8 +1434,7 @@ describe("エディットモード", () => {
     });
   });
 
-  test("シンプルの IN は今までどおり置き換える", async () => {
-    changeSettings({ mode: "simple" });
+  test("区間が無いときの IN は区間を置き換える", async () => {
     await flush();
     sent = [];
 
@@ -1455,7 +1447,6 @@ describe("エディットモード", () => {
   });
 
   test("区間ごとに行が出る", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -1472,7 +1463,6 @@ describe("エディットモード", () => {
   });
 
   test("行を押すとその区間が拡大バーに載る", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -1490,33 +1480,6 @@ describe("エディットモード", () => {
     expect(statusText()).toContain("4:02");
   });
 
-  test("モードが変わると作りかけの区間を消す", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-
-    expect(sent.at(-1)).toMatchObject({
-      type: "clip/event",
-      event: { type: "RESET_MARKS" },
-    });
-  });
-
-  test("録画中はモードの変更を受け付けない", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-
-    // 状態機械だけが戻ると、録画が走り続けて取り残される
-    expect(sent).toEqual([]);
-  });
 });
 
 describe("複数区間の録画", () => {
@@ -1527,7 +1490,6 @@ describe("複数区間の録画", () => {
 
   /** 録画が走っている状態まで進める */
   async function startTwoSegments(): Promise<FakeRecorder> {
-    changeSettings({ mode: "edit" });
     emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
     await flush();
     command("recorder/start");
@@ -1558,7 +1520,6 @@ describe("複数区間の録画", () => {
   }
 
   test("最初の区間の頭へ飛ぶ", async () => {
-    changeSettings({ mode: "edit" });
     emit({ kind: "seeking", segments: TWO, telops: [], meta: META_A });
     await flush();
 
@@ -1659,7 +1620,6 @@ describe("シークバーの帯", () => {
   }
 
   async function showTwoSegments(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -1706,13 +1666,12 @@ describe("シークバーの帯", () => {
   });
 });
 
-describe("エディットモードの OUT", () => {
+describe("OUT", () => {
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
   test("選んでいる区間の index を送る", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -1742,60 +1701,12 @@ describe("エディットモードの OUT", () => {
   });
 });
 
-describe("進行中のモード変更", () => {
-  function segmentRows(): HTMLElement[] {
-    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
-  }
-
-  test("録画が終わってから切り替わる", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-    // 状態機械だけが戻ると、録画が走り続けて取り残される
-    expect(clipEvents()).toEqual([]);
-
-    // 録画が終わったら追いつく。storage の変更通知は次に保存するまで来ないので、
-    // ここで拾わないとタブは開き直すまでエディットのままになる
-    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
-    await flush();
-
-    expect(clipEvents()).toContainEqual({ type: "RESET_MARKS" });
-  });
-
-  test("録画済みクリップを持つ間は切り替えない", async () => {
-    changeSettings({ mode: "edit" });
-    emit({
-      kind: "degraded",
-      segments: [RANGE],
-      telops: [],
-      meta: META_A,
-      clipId: "clip-1",
-      mimeType: "video/mp4",
-      reason: "x-attach-failed",
-    });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-
-    // RESET_MARKS は idle へ落とす。実時間を払った録画への参照ごと失う
-    expect(clipEvents()).toEqual([]);
-    expect(segmentRows().length).toBe(1);
-  });
-});
-
 describe("区間を足した直後の選択", () => {
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
   test("足した区間が選ばれる", async () => {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [{ startSec: 83, endSec: 98 }], telops: [], meta: META_A });
     await flush();
 
@@ -1821,7 +1732,7 @@ describe("区間を足した直後の選択", () => {
 
 describe("合計が上限を超えた録画", () => {
   test("内部エラーではなく区間を直せる状態へ戻す", async () => {
-    changeSettings({ mode: "edit", maxClipSec: 20 });
+    changeSettings({ maxClipSec: 20 });
     emit({
       kind: "ready",
       segments: [
@@ -1851,13 +1762,12 @@ describe("合計が上限を超えた録画", () => {
   });
 });
 
-describe("エディットモードの IN", () => {
+describe("IN", () => {
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
   async function showTwo(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -1888,20 +1798,6 @@ describe("エディットモードの IN", () => {
     });
   });
 
-  test("シンプルの IN は今までどおり作り直す", async () => {
-    changeSettings({ mode: "simple" });
-    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
-    await flush();
-    sent = [];
-
-    clickButton("IN");
-    await flush();
-
-    expect(clipEvents().map((event) => (event as { type: string }).type)).toContain(
-      "MARK_IN",
-    );
-  });
-
   test("頭が尻を追い越したら弾く", async () => {
     await showTwo();
     segmentRows()[1]?.click();
@@ -1917,17 +1813,89 @@ describe("エディットモードの IN", () => {
     expect(statusText()).not.toBe("");
   });
 
-  test("区間が無ければ先に追加するよう促す", async () => {
-    changeSettings({ mode: "edit" });
+  test("区間が 1 つも無いときの IN は、今の位置から範囲を作る (MARK_IN)", async () => {
     emit({ kind: "idle" });
     await flush();
+    video.element.currentTime = 10;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+    expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+    expect(events[0]?.range?.startSec).toBe(10);
+  });
+
+  test("録画した後 (preview) の IN は、今の位置から範囲を作り直す (次の切り抜きを始める)", async () => {
+    emit({ kind: "preview", clipId: "clip-1", mimeType: "video/mp4", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 300;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+    expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+    expect(events[0]?.range?.startSec).toBe(300);
+  });
+
+  test("区間 1 つで OUT まで進め、録画を押せる (区間 1 つの流れ)", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 20;
+    sent = [];
+
+    clickButton("OUT");
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "MARK_OUT", index: 0, sec: 20 });
+    const record = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "● 録画",
+    );
+    expect(record?.disabled).toBe(false);
+  });
+
+  test("状態が届くと、選んでいる区間の範囲を状態の欄に出す (IN / OUT の後に範囲と秒数が見える)", async () => {
+    emit({ kind: "idle" });
+    await flush();
+
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:25 (15秒)");
+
+    // OUT で尻が動いた答え
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 20 }], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:20 (10秒)");
+  });
+
+  test("区間の尻より後ろで IN を押すと、＋ 区間を追加へ案内する", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 40;
     sent = [];
 
     clickButton("IN");
     await flush();
 
     expect(clipEvents()).toEqual([]);
-    expect(statusText()).toContain("区間を追加");
+    expect(statusText()).toBe("IN が区間の尻 (0:25) より後ろです。新しい区間は ＋ 区間を追加 で作れます");
+  });
+
+  test("区間を組み立てている途中で、区間が 1 つでも IN は頭を合わせる (作り直さない)", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 12;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([
+      { type: "ADJUST_SEGMENT", index: 0, range: { startSec: 12, endSec: 25 } },
+    ]);
   });
 });
 
@@ -1937,7 +1905,6 @@ describe("重なる位置での区間追加", () => {
   }
 
   test("区間の中で押しても区間が増える", async () => {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], telops: [], meta: META_A });
     await flush();
     // 既存区間の内側
@@ -1954,7 +1921,6 @@ describe("重なる位置での区間追加", () => {
   });
 
   test("足した区間が末尾で選ばれる", async () => {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], telops: [], meta: META_A });
     await flush();
 
@@ -1977,7 +1943,6 @@ describe("重なる位置での区間追加", () => {
   });
 
   test("途中の区間を消しても選択が飛ばない", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -2016,7 +1981,6 @@ describe("区間を消したときの選択", () => {
   }
 
   async function showThree(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -2156,7 +2120,6 @@ describe("テロップ付きの録画", () => {
    * (seeking を受けたとき) で行うので、recording から始めると合成を通らない
    */
   async function recordWith(telops: Telop[]): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops });
     await flush();
     emit({ kind: "recording", segments: [RANGE], meta: META_A, telops });
@@ -2205,28 +2168,9 @@ describe("テロップ付きの録画", () => {
     expect(recordsCapturedVideo()).toBe(true);
   });
 
-  test("シンプルモードでは状態にテロップが残っていても今の経路のまま", async () => {
-    // シンプルモードではテロップの一覧もプレビューも出ない。見えないテロップを
-    // 焼き込むと、画面に無い文字がクリップに入る (テロップ spec §6「シンプルモードの録画は一切変わらない」)
-    const { track } = installCanvas();
-    changeSettings({ mode: "simple" });
-
-    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
-    await flush();
-    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops: [TELOP] });
-    await flush();
-    command("recorder/start");
-    await flush();
-
-    expect(recordsCapturedVideo()).toBe(true);
-    const stream = startedRecorder().stream as { getVideoTracks(): unknown[] };
-    expect(stream.getVideoTracks()).not.toContain(track);
-  });
-
   test("canvas に描けなければ録画を始めずに telop-render-failed で落とす", async () => {
     // テロップなしで録って続行すると、実時間を払った後で気付くことになる
     installCanvas({ tainted: true });
-    changeSettings({ mode: "edit" });
 
     emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
     await flush();
@@ -2249,7 +2193,6 @@ describe("テロップ付きの録画", () => {
     // 隠れたまま始めると、最初のフレームから映像が止まる
     installCanvas();
     setHidden(true);
-    changeSettings({ mode: "edit" });
 
     emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
     await flush();
@@ -2263,7 +2206,6 @@ describe("テロップ付きの録画", () => {
     // service worker との往復の間に隠れると、監視はまだ付いていないので
     // startCompositor が始まる前に見ておかないと素通りする
     installCanvas();
-    changeSettings({ mode: "edit" });
 
     emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
     await flush();
@@ -2311,7 +2253,6 @@ describe("テロップ付きの録画", () => {
     installCanvas();
     Object.defineProperty(video.element, "videoWidth", { configurable: true, value: 0 });
     setHidden(true);
-    changeSettings({ mode: "edit" });
 
     emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
     await flush();
@@ -2356,7 +2297,6 @@ describe("テロップの一覧", () => {
     telops: Telop[],
     segments: ClipRange[] = [RANGE],
   ): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments, meta: META_A, telops });
     await flush();
     sent = [];
@@ -2495,7 +2435,6 @@ describe("テロップの一覧", () => {
 
   test("preview では操作できない", async () => {
     // 区間の拡大バーと同じ条件。テロップだけ触れる非対称を作らない
-    changeSettings({ mode: "edit" });
     emit({
       kind: "preview",
       clipId: "clip-1",
@@ -2513,14 +2452,6 @@ describe("テロップの一覧", () => {
     expect(clipEvents()).toEqual([]);
   });
 
-  test("シンプルモードでは出さない", async () => {
-    changeSettings({ mode: "simple" });
-    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [] });
-    await flush();
-
-    // 一覧の箱は ＋ テロップの見出しの親
-    expect(addTelopButton().parentElement?.parentElement?.hidden).toBe(true);
-  });
 });
 
 describe("拡大バーの下のテロップの帯", () => {
@@ -2580,18 +2511,12 @@ describe("拡大バーの下のテロップの帯", () => {
     );
   }
 
-  test("エディットモードで、拡大バーの窓に入るテロップを拡大バーの直下に帯で出す", async () => {
+  test("拡大バーの窓に入るテロップを拡大バーの直下に帯で出す", async () => {
     await showReady([TELOP, { startSec: 100, endSec: 103, text: "窓の外" }]);
 
     expect(track().hidden).toBe(false);
     expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
     expect(track().previousElementSibling?.id).toBe("yt-clip-range");
-  });
-
-  test("シンプルモードでは出さない", async () => {
-    await showReady([TELOP], [RANGE], "simple");
-
-    expect(track().hidden).toBe(true);
   });
 
   test("テロップが 1 つも無ければ段ごと出さない (バーを高くしない)", async () => {
@@ -2684,7 +2609,6 @@ describe("拡大バーの下のテロップの帯", () => {
 
   test("preview では帯を薄く出し、動かしも再生もしない", async () => {
     // 区間の拡大バーと同じ条件 (canEditTelops)。テロップだけ触れる非対称を作らない
-    changeSettings({ mode: "edit" });
     emit({
       kind: "preview",
       clipId: "clip-1",
@@ -2721,7 +2645,6 @@ describe("区間・テロップの窓", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
 
   async function showEdit(telops: Telop[] = []): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops, meta: META_A });
     await flush();
   }
@@ -2768,33 +2691,14 @@ describe("区間・テロップの窓", () => {
     expect(document.querySelector("[data-role='collapse']")).toBeNull();
   });
 
-  test("エディットで区間があると区間・テロップの窓を出す", async () => {
+  test("区間があると区間・テロップの窓を出す", async () => {
     await showEdit();
     expect(listElement().hidden).toBe(false);
   });
 
-  test("エディットでも区間が 0 個なら区間・テロップの窓を出さない", async () => {
-    changeSettings({ mode: "edit" });
+  test("区間が 0 個なら区間・テロップの窓を出さない", async () => {
     await flush();
     expect(listElement().hidden).toBe(true);
-  });
-
-  test("モードを変えてバーを作り直しても、一覧が 2 重にならない", async () => {
-    changeSettings({ mode: "edit" });
-    await flush();
-    changeSettings({ mode: "simple" });
-    await flush();
-    changeSettings({ mode: "edit" });
-    await flush();
-
-    expect(document.querySelectorAll("#yt-clip-list").length).toBe(1);
-    expect(listBody().children.length).toBe(2);
-    expect(document.querySelectorAll("[data-role='add-telop']").length).toBe(1);
-
-    // 入っているのは今の一覧。状態が届けば行が出る
-    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
-    await flush();
-    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
   });
 
   test("バーを作り直しても、手元の区間で一覧を描き直す", async () => {
@@ -2920,7 +2824,6 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
   test("区間を足したら、区間・テロップの窓の中を末尾の行へ送る", async () => {
     const first: ClipRange = { startSec: 83, endSec: 98 };
     const added: ClipRange = { startSec: 300, endSec: 315 };
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [first], telops: [], meta: META_A });
     await flush();
     const spy = placeRows("segment");
@@ -2947,7 +2850,6 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
 
   test("テロップを足したら、区間・テロップの窓の中を末尾の行へ送る", async () => {
     const added: Telop = { startSec: 15, endSec: 18, text: "" };
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops: [TELOP], meta: META_A });
     await flush();
     const spy = placeRows("telop");
@@ -2973,7 +2875,6 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
   test("足した行へ送っても、区間・テロップの窓を前に出さない (前に出したバーの窓が潜らない)", async () => {
     const first: ClipRange = { startSec: 83, endSec: 98 };
     const added: ClipRange = { startSec: 300, endSec: 315 };
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [first], telops: [], meta: META_A });
     await flush();
     // バーを触って区間を足す場面。一覧の窓を触った後にバーを触り、バーの窓が前に出ている
@@ -2991,7 +2892,6 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
   });
 
   test("足していない状態の通知では送らない", async () => {
-    changeSettings({ mode: "edit" });
     const spy = placeRows("segment");
     try {
       emit({
@@ -3041,8 +2941,8 @@ describe("フロートの窓", () => {
   test("覚えた位置で出る。古い形 (v1) のパネルの位置は区間・テロップの窓が継ぐ", () => {
     expect(windowsAfterLayout).toEqual({
       barHidden: false,
-      // シンプルモードで一覧が空なので、区間・テロップの窓は隠れている (位置は当たっている)
-      listHidden: true,
+      // 読み込み時に取り戻した区間があるので、区間・テロップの窓も出る (位置は v1 のパネルから継いでいる)
+      listHidden: false,
       bar: { left: "40px", top: "500px", width: "700px", height: "" },
       list: { left: "300px", top: "120px", width: "360px", height: "400px" },
     });
@@ -3175,9 +3075,8 @@ describe("フロートの窓", () => {
     ]);
   });
 
-  /** 区間・テロップの窓を出す (エディットで区間が 1 つある)。出すかは一覧の中身で決まる */
+  /** 区間・テロップの窓を出す (区間が 1 つある)。出すかは一覧の中身で決まる */
   async function showList(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
   }
@@ -3277,19 +3176,21 @@ describe("フロートの窓", () => {
     }
   });
 
-  test("モードを変えても窓を作り直さず、位置も変わらない。作り直したつまみでも動かせる", async () => {
+  test("バーを作り直しても窓は作り直さず、位置も変わらない。作り直したつまみでも動かせる", async () => {
     const frame = barWindowElement();
     drag(barGrip(), 30, 20);
     await flush();
     const placed = styleRect(frame);
     const oldGrip = barGrip();
 
-    changeSettings({ mode: "edit" });
+    // YouTube の再描画でバーの中身が外れた場面。窓は作り直さず、中身 (つまみを含む) だけを作り直す
+    barElement().remove();
+    document.body.append(document.createElement("div"));
     await flush();
 
     expect(barWindowElement()).toBe(frame);
     expect(styleRect(frame)).toEqual(placed);
-    // 中身は作り直した (＋ 区間を追加 が増えた)。つまみも新しい要素になる
+    // 中身は作り直した。つまみも新しい要素になる
     expect(barGrip()).not.toBe(oldGrip);
     drag(barGrip(), 10, 0);
     expect(frame.style.left).toBe(`${parseFloat(placed.left) + 10}px`);
@@ -3708,7 +3609,6 @@ describe("ドック枠とタブ", () => {
   }
 
   async function showEdit(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
   }
@@ -4053,7 +3953,7 @@ describe("ドック枠とタブ", () => {
 });
 
 describe("オン / オフ (マスタースイッチ)", () => {
-  /** テロップ付きの ready。エディットモードならプレビューの canvas が video の親に付く */
+  /** テロップ付きの ready。プレビューの canvas が video の親に付く */
   const READY_WITH_TELOP: ClipState = {
     kind: "ready",
     segments: [RANGE],
@@ -4078,7 +3978,6 @@ describe("オン / オフ (マスタースイッチ)", () => {
   });
 
   test("オフにすると窓・ドック枠・シークバーの帯・プレビューの canvas が消え、YouTube の要素の中に何も残らない", async () => {
-    changeSettings({ mode: "edit" });
     emit(READY_WITH_TELOP);
     await flush();
     // 前提: 帯と canvas と枠が出ている
@@ -4150,7 +4049,6 @@ describe("オン / オフ (マスタースイッチ)", () => {
     await flush();
     sent = [];
 
-    changeSettings({ mode: "edit" });
     await flush();
 
     expect(ourElements()).toBe(0);
@@ -4175,7 +4073,6 @@ describe("オン / オフ (マスタースイッチ)", () => {
   });
 
   test("オフ → オンで覚えた配置を読み直し、動かした窓は同じ位置に出る", async () => {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     drag(listHeader(), -100, 20);
@@ -4194,7 +4091,6 @@ describe("オン / オフ (マスタースイッチ)", () => {
   });
 
   test("浮いた窓をドラッグしている最中にオフにすると、外れた見出しに lostpointercapture が届いても配置を保存しない (他の窓の覚えた位置が残る)", async () => {
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     // バーの位置を覚えさせる (オフで消えてはいけない他の窓の記憶)
@@ -4221,7 +4117,6 @@ describe("オン / オフ (マスタースイッチ)", () => {
   test("退避中の窓をドラッグしている最中にオフにすると、lostpointercapture が届いても片付けた窓をページへ戻さない", async () => {
     // beforeEach で 2 つとも退避中 (枠に入っているが枠が使えない)。退避中の窓を動かすと undock で body へ
     // 出し直す (C2.1) ので、オフの後にそれが走ると片付けた窓がオフのページに戻る
-    changeSettings({ mode: "edit" });
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     const element = listElement();
@@ -4257,7 +4152,7 @@ describe("オン / オフ (マスタースイッチ)", () => {
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     const play = vi.spyOn(video.element, "play");
     try {
-      clickButton("▶ 範囲を見る");
+      clickButton("▶ 区間を見る");
       // seek の完了 (setTimeout の後) を待たずに切る
       setEnabled(false);
       await flush();
@@ -4400,7 +4295,6 @@ describe("録画中・書き出し中のオフ (マスタースイッチの spec
       { startSec: 83, endSec: 98 },
       { startSec: 242, endSec: 250 },
     ];
-    changeSettings({ mode: "edit" });
     emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
     await flush();
     command("recorder/start");
