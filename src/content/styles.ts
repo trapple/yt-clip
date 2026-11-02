@@ -178,6 +178,35 @@ export const TELOP_STYLE = {
 } as const;
 
 /**
+ * 文字起こしの欄 (`transcript-panel.ts`)。区間とテロップの一覧の上に並ぶので見た目を揃える。
+ * **行の箱だけがスクロールする** (欄の下の一覧に手が届くよう、高さに上限を持つ)。
+ * 行は文字を選べなくする (Shift + クリックで文字が選ばれて、まとめて選ぶ操作の邪魔をしない)
+ */
+const TRANSCRIPT_ROW =
+  "display:grid;grid-template-columns:12px 40px 1fr auto;gap:4px;align-items:start;padding:3px 6px;border-radius:6px;cursor:pointer;user-select:none;";
+const TRANSCRIPT_TIME = `border:none;background:transparent;font-family:${FONT};font-size:11px;padding:2px 0;cursor:pointer;text-align:left;font-variant-numeric:tabular-nums;`;
+const TRANSCRIPT_TEXT = "font-size:12px;white-space:pre-wrap;word-break:break-word;";
+export const TRANSCRIPT_STYLE = {
+  root: "display:flex;flex-direction:column;gap:6px;",
+  header: "display:flex;align-items:center;gap:8px;",
+  title: "color:var(--ytc-text);font-size:12px;font-weight:600;flex:1;",
+  source: "color:var(--ytc-text-sub);font-size:11px;",
+  notice: "color:var(--ytc-text-sub);font-size:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+  dubbed: "color:var(--ytc-text);font-size:11px;padding:4px 8px;border-radius:6px;background:var(--ytc-surface);",
+  lines: "position:relative;display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto;",
+  row: `${TRANSCRIPT_ROW}background:transparent;border-left:3px solid transparent;`,
+  rowSelected: `${TRANSCRIPT_ROW}background:var(--ytc-surface);border-left:3px solid var(--ytc-accent);`,
+  now: "color:var(--ytc-accent);font-size:10px;padding-top:3px;",
+  time: `${TRANSCRIPT_TIME}color:var(--ytc-text-sub);`,
+  timeCurrent: `${TRANSCRIPT_TIME}color:var(--ytc-accent);font-weight:600;`,
+  text: `${TRANSCRIPT_TEXT}color:var(--ytc-text);`,
+  textHidden: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);text-decoration:line-through;`,
+  actions: "display:flex;gap:4px;",
+  edit: `${TELOP_STYLE.textarea}user-select:text;`,
+  textButton: TELOP_STYLE.textButton,
+} as const;
+
+/**
  * 見出しのある「幅と高さ」の窓 (`panel-window.ts`。区間・テロップの窓と設定の窓) の中身の箱。
  * **枠の見た目 (地・影・見出し) は `FLOATING_WINDOW_STYLE` が持つ。** 位置・幅は YouTube の実機の値に
  * 合わせるので、出所と一緒に `panel-window.ts` が持つ。

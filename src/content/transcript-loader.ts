@@ -124,7 +124,7 @@ export function createDefaultTranscriptLoader(onChange: (status: TranscriptStatu
   });
 }
 
-const SOURCE_LABEL: Record<Transcript["source"], string> = {
+export const TRANSCRIPT_SOURCE_LABEL: Record<Transcript["source"], string> = {
   "youtube-manual": "公式字幕",
   "youtube-asr": "公式字幕 (自動)",
 };
@@ -137,7 +137,7 @@ export function transcriptLogLine(status: TranscriptStatus): string | null {
       return null;
     case "ready": {
       const dubbed = status.dubbed ? " (吹き替えの音声が流れています)" : "";
-      return `[yt-clip] 文字起こし: ${SOURCE_LABEL[status.transcript.source]} ${status.transcript.lines.length} 行${dubbed}`;
+      return `[yt-clip] 文字起こし: ${TRANSCRIPT_SOURCE_LABEL[status.transcript.source]} ${status.transcript.lines.length} 行${dubbed}`;
     }
     case "none":
       return "[yt-clip] 文字起こし: この動画には公式字幕がありません";
