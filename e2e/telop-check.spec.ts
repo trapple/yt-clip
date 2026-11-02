@@ -347,7 +347,8 @@ test("テロップの実機確認", async () => {
   // 録画 4 本 (各 6 秒 + 準備) と画質の切り替え待ちを含む
   test.setTimeout(900_000);
 
-  await writeSettings({ mode: "edit" });
+  // 設定を既定に戻してから始める (前に手で変えた最大秒数やテロップの見た目を持ち込まない)
+  await writeSettings({});
 
   const page = await context.newPage();
   await page.setViewportSize({ width: 1920, height: 1080 });
@@ -477,37 +478,6 @@ test("テロップの実機確認", async () => {
     // 状態機械からの通知が返ってくるのを待つ。文言そのものは textarea に残って
     // いるので DOM では見分けられない
     await page.waitForTimeout(500);
-  }
-
-  /**
-   * popup の設定フォームで値を入れて「保存」する (settings-in-popup spec)。values の鍵は入力欄の id の
-   * `yt-clip-setting-<key>` の key。popup はタブで開くので、**開いている間 YouTube のタブは隠れる** (録画中には呼ばない)。
-   * アクティブなタブは popup 自身になるので、ハッシュタグ欄は入力できない (チャンネル別のタグは writeSettings で書く)。
-   * 保存は sync の settings に書かれ、ページは onChanged で拾う
-   */
-  async function saveSettingsInPopup(values: Record<string, string>): Promise<void> {
-    const popup = await context.newPage();
-    try {
-      await popup.goto(`chrome-extension://${extensionId}/src/popup/popup.html`, { timeout: 30_000 });
-      const save = popup.getByRole("button", { name: "保存" });
-      // 「保存」は設定を読み終えるまで押せない。読む前に入れると、読んだ値で上書きされる
-      await expect(save).toBeEnabled({ timeout: 10_000 });
-      for (const [key, value] of Object.entries(values)) {
-        const field = popup.locator(`#yt-clip-setting-${key}`);
-        if (await field.evaluate((element) => element.tagName === "SELECT")) {
-          await field.selectOption(value);
-        } else {
-          await field.fill(value);
-        }
-      }
-      // 保存できたら popup は閉じる (settings-in-popup spec §1)。閉じたことで書き込みが済んだと分かる
-      const closed = popup.waitForEvent("close", { timeout: 10_000 });
-      await save.click();
-      await closed;
-    } finally {
-      if (!popup.isClosed()) await popup.close();
-      await page.bringToFront();
-    }
   }
 
   async function buildSegments(): Promise<void> {
@@ -868,23 +838,6 @@ test("テロップの実機確認", async () => {
     );
   });
 
-  // --- シンプルモードでは一覧が出ない ------------------------------------------
-  await check("シンプルモードでテロップの一覧が出ない", async () => {
-    // 切り替えは popup で行う (popup の保存が、読み込み直さずに実機の YouTube のページへ届くことも兼ねて見る)
-    await saveSettingsInPopup({ mode: "simple" });
-    const addTelop = listWindow.locator("[data-role=add-telop]");
-    // **有ることを先に確かめる。** toBeHidden は見つからない要素でも通るので、
-    // 探す場所を間違えていても素通りしてしまう
-    await expect(addTelop).toHaveCount(1, { timeout: 10_000 });
-    await expect(addTelop).toBeHidden({ timeout: 10_000 });
-    const count = await addTelop.count();
-    const visible = await addTelop.isVisible();
-    record("シンプルモードでテロップの一覧が出ない", count === 1 && !visible, {
-      addTelopCount: count,
-      addTelopVisible: visible,
-    });
-  });
-
   /**
    * 拡張が覚えた窓の位置 (何も覚えていなければ null)。受け入れ条件の記録にも使うので、
    * その検査より前に置く
@@ -904,17 +857,29 @@ test("テロップの実機確認", async () => {
   const ACCEPTANCE_1440 =
     "受け入れ条件 1440x795: 最初の配置 (ドック) のまま帯の段が最大 (2 段 + 「+N」) でも、下の枠のバーがプレイヤーの下で画面に収まり、右の枠の区間・テロップがプレイヤーに重ならない";
   await check(ACCEPTANCE_1440, async () => {
-    // 前提を自分で作る: 覚えた配置を消して読み込み直す (最初の配置になる)。区間はまだ無い (直前の項目でシンプルに
-    // 切り替えた) ので reloadAndWaitList は使わない
+    // 前提を自分で作る: 覚えた配置を消して読み込み直す (最初の配置になる)。区間とテロップはここで空にした
+    // (読み込み直した後は一覧が出ていないので reloadAndWaitList は使わない)
     const worker = await getWorker();
     await worker.evaluate(() => chrome.storage.local.remove("windowLayout"));
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.setViewportSize({ width: 1440, height: 795 });
+    // page.reload より前に置く (今のページに一覧が出ている間に消す。reload の後だと、一覧が描かれる前に
+    // count() が 0 を返して空振りする)。前の確認が残した区間とテロップを空にする (モードの切り替えで捨てていた分)。
+    // テロップを先に消す: テロップが残っていると最後の区間は ✕ できない
+    while ((await telopRows.count()) > 0) {
+      const count = await telopRows.count();
+      await telopRows.first().locator("[data-role=remove]").click();
+      await expect(telopRows).toHaveCount(count - 1);
+    }
+    while ((await segmentRows.count()) > 0) {
+      const count = await segmentRows.count();
+      await segmentRows.first().locator("[data-role=remove]").click();
+      await expect(segmentRows).toHaveCount(count - 1);
+    }
     try {
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       await expect(bar).toBeVisible({ timeout: 60_000 });
       await waitNoAd();
-      await writeSettings({ mode: "edit" });
       await expect(button("＋ 区間を追加")).toBeVisible({ timeout: 10_000 });
       for (const [i, startSec] of LAYOUT_SEGMENT_STARTS.entries()) {
         await seekPaused(startSec);
@@ -1086,7 +1051,7 @@ test("テロップの実機確認", async () => {
     await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
     await expect(bar).toBeVisible({ timeout: 60_000 });
     await waitNoAd();
-    // エディットで区間があるので区間・テロップの窓も出る (受け入れ条件の確認で足した区間が状態機械に残っている)
+    // 区間があるので区間・テロップの窓も出る (受け入れ条件の確認で足した区間が状態機械に残っている)
     await expect(segmentRows).toHaveCount(LAYOUT_SEGMENT_STARTS.length, { timeout: 30_000 });
     await expect(listWindow).toBeVisible();
   }

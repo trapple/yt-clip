@@ -332,12 +332,11 @@ test("オフにすると 1 秒以内に拡張の要素が消え、YouTube はそ
 });
 
 test("オフ → オンで、浮かせて置いた窓は同じ位置に、枠に入れた窓は同じ枠に出る", async () => {
-  // 前提を自分で作る: エディットモード (区間・テロップの窓は区間があるときだけ出る) と、区間・テロップの窓を
-  // 浮かせて (200, 150) に置き、バーを下の枠に入れた配置
+  // 前提を自分で作る: 区間・テロップの窓を浮かせて (200, 150) に置き、バーを下の枠に入れた配置
+  // (区間・テロップの窓は区間があるときだけ出る。区間は後で ＋ 区間を追加で作る)
   await writeEnabled(true);
   await (await getWorker()).evaluate(() =>
     Promise.all([
-      chrome.storage.sync.set({ settings: { mode: "edit" } }),
       chrome.storage.local.set({
         windowLayout: {
           version: 2,
@@ -407,7 +406,7 @@ test("popup のスイッチを押すと 1 秒以内に YouTube のタブから�
     );
     // オフの間も設定は出ている (settings-in-popup spec §1)
     await expect(popup.getByRole("button")).toHaveText(["保存"]);
-    await expect(popup.locator("#yt-clip-setting-mode")).toBeVisible();
+    await expect(popup.locator("#yt-clip-setting-maxClipSec")).toBeVisible();
 
     await toggle.click();
     await expect(toggle).toBeChecked();
@@ -421,7 +420,7 @@ test("popup のスイッチを押すと 1 秒以内に YouTube のタブから�
 
 // **この項目はファイルの最後に置く** (ブラウザを起動し直す。context と extensionId を作り直す)
 test("設定は popup にあり、保存すると開いている YouTube のタブにすぐ効く。ページには ⚙ も設定の窓も無い", async () => {
-  // 前提を自分で作る: オン・シンプル
+  // 前提を自分で作る: オン・設定は既定
   await writeEnabled(true);
   await (await getWorker()).evaluate(() => chrome.storage.sync.remove("settings"));
   const page = await context.newPage();
@@ -440,14 +439,16 @@ test("設定は popup にあり、保存すると開いている YouTube のタ�
     await expect(popup.locator("#yt-clip-setting-hashtags")).toBeDisabled();
     const save = popup.getByRole("button", { name: "保存" });
     await expect(save).toBeEnabled();
-    await popup.locator("#yt-clip-setting-mode").selectOption("edit");
+    await popup.locator("#yt-clip-setting-maxClipSec").fill("10");
     // 保存できたら popup は閉じる (settings-in-popup spec §1)
     const closed = popup.waitForEvent("close", { timeout: 10_000 });
     await save.click();
     await closed;
 
-    // 読み込み直さずにエディットモードのバーになる (sync の onChanged)
-    await expect(bar.getByRole("button", { name: "＋ 区間を追加" })).toBeVisible({ timeout: 5_000 });
+    // 読み込み直さずに効く (sync の onChanged): ＋ 区間を追加で足す区間が 10 秒になり、選ばれて状態の欄に出る。
+    // IN ではなく ＋ 区間を追加で確かめる: 前のテストが残した区間があると、IN は頭を合わせるだけで新しい範囲を作らない
+    await bar.getByRole("button", { name: "＋ 区間を追加" }).click();
+    await expect(bar.locator("#yt-clip-bar-status")).toContainText("(10秒)", { timeout: 5_000 });
   } finally {
     await (await getWorker()).evaluate(() => chrome.storage.sync.remove("settings"));
     if (!popup.isClosed()) await popup.close();
