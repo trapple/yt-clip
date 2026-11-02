@@ -1142,4 +1142,31 @@ describe("区間の追加での録画対象タブ", () => {
       expect.objectContaining({ tabId: 7 }),
     );
   });
+
+  test("区間を作ったタブを閉じた後、別のタブで区間を動かすと、そのタブが録画対象になる", async () => {
+    // 区間を作ったタブを閉じても状態は ready のまま残る。別のタブで同じ動画を開いて IN (頭合わせ) や OUT を
+    // 押したとき、そのタブを録画対象にしないと、状態の通知も録画の指示もどこへも届かない
+    const h = makeHarness();
+    await h.router.handle({ type: "clip/event", event: { type: "ADD_SEGMENT", range, meta } }, 7);
+    await h.router.handleTabRemoved(7);
+
+    await h.router.handle(
+      { type: "clip/event", event: { type: "ADJUST_SEGMENT", index: 0, range: { startSec: 12, endSec: 40 } } },
+      9,
+    );
+    await h.router.handle({ type: "clip/event", event: { type: "START_RECORDING" } }, 9);
+
+    expect(h.sentToTab).toContainEqual(expect.objectContaining({ tabId: 9 }));
+  });
+
+  test("録画中は、別のタブの区間の操作で録画対象を奪わない", async () => {
+    const h = makeHarness();
+    await h.router.handle({ type: "clip/event", event: { type: "ADD_SEGMENT", range, meta } }, 7);
+    await h.router.handle({ type: "clip/event", event: { type: "START_RECORDING" } }, 7);
+    const sentBefore = h.sentToTab.length;
+
+    await h.router.handle({ type: "clip/event", event: { type: "MARK_OUT", index: 0, sec: 30 } }, 9);
+
+    expect(h.sentToTab.slice(sentBefore).some((entry) => entry.tabId === 9)).toBe(false);
+  });
 });

@@ -16,6 +16,17 @@ import {
 } from "@/shared/types";
 
 /** router が使う外部依存。テストではフェイクを渡す */
+/** タブから届いたとき、そのタブを録画対象にするイベント (MARK_IN / ADD_SEGMENT は上で別に扱う) */
+const TAB_OWNING_EVENTS: ReadonlySet<ClipEvent["type"]> = new Set<ClipEvent["type"]>([
+  "MARK_OUT",
+  "ADJUST_SEGMENT",
+  "REMOVE_SEGMENT",
+  "ADD_TELOP",
+  "UPDATE_TELOP",
+  "REMOVE_TELOP",
+  "START_RECORDING",
+]);
+
 export type RouterDeps = {
   saveClip(clip: StoredClip): Promise<void>;
   getClip(id: string): Promise<StoredClip>;
@@ -384,6 +395,17 @@ export function createRouter(
     if (
       (event.type === "MARK_IN" || event.type === "ADD_SEGMENT") &&
       senderTabId !== undefined
+    ) {
+      captureTabId = senderTabId;
+    }
+    // **区間・テロップを動かしたタブ、録画を押したタブも録画対象にする (録画中でなければ)。** 区間を作ったタブを
+    // 閉じても状態は ready のまま残る。別のタブで同じ動画を開いて IN (頭合わせ) や OUT を押したとき、そのタブを
+    // 覚えないと、状態の通知も録画の指示もどこへも届かず、画面が変わらないまま録画が seeking で固まる。
+    // 録画中は奪わない (走っている録画のタブから指示を外さない)。popup からのイベントはタブを持たないので変えない
+    if (
+      senderTabId !== undefined &&
+      !BUSY_KINDS.has(state.kind) &&
+      TAB_OWNING_EVENTS.has(event.type)
     ) {
       captureTabId = senderTabId;
     }
