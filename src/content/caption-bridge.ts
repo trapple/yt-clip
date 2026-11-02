@@ -50,6 +50,12 @@ export type BridgeDeps = {
 };
 
 const POLL_MS = 100;
+/**
+ * pot 付きの URL を拾えないとき、字幕を選び直す間隔。**開いた直後のプレイヤーは pot 無しで取りに行く**
+ * (PO トークンがまだできていない。2026-11-02 に実機で、開いて 1.4 秒は pot 無し、2.5 秒以降は pot 付きだった)。
+ * 一度取った字幕はプレイヤーが覚えているので、選び直さないと取り直さない
+ */
+const RESELECT_EVERY_MS = 1000;
 const HIDE_STYLE_ID = "yt-clip-hide-captions";
 
 function trackName(name: RawTrack["name"]): string {
@@ -120,15 +126,16 @@ async function capturePot(
     });
     showCaptions = deps.hideCaptions();
     player.loadModule?.("captions");
+    const selection = wasOn ? previous : { languageCode: first.languageCode, kind: first.kind === "asr" ? "asr" : "" };
     // 一度外してから選ぶ。同じ字幕を選び直すだけでは、プレイヤーが取り直さない
-    player.setOption?.("captions", "track", {});
-    player.setOption?.(
-      "captions",
-      "track",
-      wasOn ? previous : { languageCode: first.languageCode, kind: first.kind === "asr" ? "asr" : "" },
-    );
+    const select = (): void => {
+      player.setOption?.("captions", "track", {});
+      player.setOption?.("captions", "track", selection);
+    };
+    select();
     for (let waited = 0; found === null && waited < POT_WAIT_MS; waited += POLL_MS) {
       await deps.sleep(POLL_MS);
+      if (found === null && (waited + POLL_MS) % RESELECT_EVERY_MS === 0) select();
     }
   } finally {
     try {

@@ -16,10 +16,13 @@ function setup(options: {
   ad?: boolean;
   /** 真なら、字幕を選んだ時ではなく待ちの途中 (sleep) で pot の URL を届ける (待ちのループで await を挟ませる) */
   deliverInSleep?: boolean;
+  /** 字幕を選んだ回数がこれに満たない間は、pot の無い URL で取りに行く (開いた直後はトークンができていない) */
+  potFromSelection?: number;
 } = {}) {
   const calls: Call[] = [];
   let onUrl: ((url: string) => void) | null = null;
   let hidden = 0;
+  let selections = 0;
   const player = {
     classList: { contains: (name: string) => options.ad === true && name === "ad-showing" },
     getPlayerResponse: () => ({
@@ -39,7 +42,9 @@ function setup(options: {
     setOption: (module: string, option: string, value: unknown) => {
       calls.push(["setOption", module, option, value]);
       const selected = typeof value === "object" && value !== null && "languageCode" in value;
-      if (selected && options.fetchesOnSelect !== false) onUrl?.(POT_URL);
+      if (!selected || options.fetchesOnSelect === false) return;
+      selections += 1;
+      onUrl?.(selections < (options.potFromSelection ?? 1) ? POT_URL.replace("&pot=P0T", "") : POT_URL);
     },
     loadModule: (module: string) => calls.push(["loadModule", module]),
     unloadModule: (module: string) => calls.push(["unloadModule", module]),
@@ -148,6 +153,13 @@ describe("answer", () => {
       ["unloadModule", "captions"],
     ]);
     expect(hidden()).toBe(0);
+  });
+
+  test("プレイヤーが pot 無しで取りに行ったら (開いた直後)、選び直して pot 付きで取らせる", async () => {
+    const { deps, calls } = setup({ potFromSelection: 3 });
+    expect(await answer({ videoId: "vid", wantPot: true }, deps)).toMatchObject({ ok: true, potUrl: POT_URL });
+    const selects = calls.filter(([name, , , value]) => name === "setOption" && typeof value === "object" && value !== null && "languageCode" in value);
+    expect(selects).toHaveLength(3);
   });
 
   test("pot の無い timedtext の URL は拾わない", async () => {

@@ -9,8 +9,11 @@
 
 export const BRIDGE_REQUEST = "yt-clip/captions-request" as const;
 export const BRIDGE_RESPONSE = "yt-clip/captions-response" as const;
-/** プレイヤーが字幕を取りに行くのを待つ上限。頼む側の待ちはこれより長くする */
-export const POT_WAIT_MS = 5000;
+/**
+ * プレイヤーが pot 付きで字幕を取りに行くのを待つ上限。頼む側の待ちはこれより長くする。開いた直後は PO トークンが
+ * まだ無く、できるまで (実機で 2.5 秒ほど) 選び直して待つ
+ */
+export const POT_WAIT_MS = 8000;
 /** 失敗の理由の文字数の上限。応答はページの他のスクリプトも偽れるので、巨大な文字列を受け取らない */
 export const MAX_ERROR_MESSAGE_LENGTH = 500;
 

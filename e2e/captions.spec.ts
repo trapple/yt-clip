@@ -32,15 +32,15 @@ test.afterAll(async () => {
 
 /**
  * ページの文脈 (MAIN world) から、隔離された world と同じ形で一覧だけを頼む。答えが無ければ null。
- * **待ちは頼む側 (caption-source) の pot の待ちと同じ 8 秒**: ブリッジは頼みを 1 本ずつ答えるので、拡張自身が
- * ページを開いたときに頼んだ pot の取得 (最長 5 秒) の後ろに並ぶことがある
+ * **待ちは頼む側 (caption-source) の pot の待ちと同じ 11 秒**: ブリッジは頼みを 1 本ずつ答えるので、拡張自身が
+ * ページを開いたときに頼んだ pot の取得 (最長 8 秒) の後ろに並ぶことがある
  */
 function askBridge(page: Page, videoId: string): Promise<unknown> {
   return page.evaluate(
     (id) =>
       new Promise((resolve) => {
         const requestId = `e2e-${Math.random()}`;
-        const timer = setTimeout(() => resolve(null), 8000);
+        const timer = setTimeout(() => resolve(null), 11_000);
         window.addEventListener("message", (event) => {
           const data = event.data as { type?: string; id?: string } | null;
           if (data?.type === "yt-clip/captions-response" && data.id === requestId) {
