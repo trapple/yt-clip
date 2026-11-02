@@ -1728,6 +1728,65 @@ describe("区間を足した直後の選択", () => {
     // 「IN → OUT」の癖で OUT を押したとき、前の区間の終端が動くと事故になる
     expect(segmentRows()[1]?.dataset.selected).toBe("true");
   });
+
+  test("前の場面に足した区間は時間順の位置に入り、それが選ばれる", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 10;
+    sent = [];
+
+    clickButton("＋ 区間を追加");
+    await flush();
+    const added = (clipEvents() as { type: string; range?: ClipRange }[]).find((event) => event.type === "ADD_SEGMENT");
+    expect(added?.range?.startSec).toBe(10);
+    // 状態機械は時間順に並べて返す
+    emit({
+      kind: "ready",
+      segments: [added!.range!, { startSec: 100, endSec: 115 }],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+    expect(rows.map((row) => row.dataset.selected)).toEqual(["true", "false"]);
+  });
+
+  test("頭を動かして順が入れ替わっても、動かした区間を選んだまま", async () => {
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+    document.querySelectorAll<HTMLElement>("[data-role='segment']")[1]?.click();
+    await flush();
+    video.element.currentTime = 5;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+    expect(clipEvents()).toContainEqual({ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 5, endSec: 40 } });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 5, endSec: 40 },
+        { startSec: 10, endSec: 20 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+    expect(rows.map((row) => row.dataset.selected)).toEqual(["true", "false"]);
+    // 並び替わっても「受け付けられませんでした」にしない
+    expect(statusText()).toBe("0:05 〜 0:40 (35秒)");
+  });
 });
 
 describe("合計が上限を超えた録画", () => {
@@ -2049,7 +2108,7 @@ describe("重なる位置での区間追加", () => {
     video.element.currentTime = 90;
     clickButton("＋ 区間を追加");
     await flush();
-    // 並べ替えないので、足した区間は必ず末尾に来る
+    // 状態機械の答えを偽装しているので、足した区間は末尾に置いてある
     emit({
       kind: "ready",
       segments: [
@@ -2978,6 +3037,25 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
       listBody().scrollTop = 0;
       emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
       expect(listBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("前の場面に区間を足したら、時間順で入った行 (先頭) へ送る", async () => {
+    const later: ClipRange = { startSec: 300, endSec: 315 };
+    emit({ kind: "ready", segments: [later], telops: [], meta: META_A });
+    await flush();
+    const spy = placeRows("segment");
+    try {
+      video.element.currentTime = 83;
+      sent = [];
+      clickButton("＋ 区間を追加");
+      await flush();
+      const added = (clipEvents() as { type: string; range?: ClipRange }[]).find((event) => event.type === "ADD_SEGMENT")!.range!;
+      emit({ kind: "ready", segments: [added, later], telops: [], meta: META_A });
+      // 先頭 (1 行目: 900px) の頭を本体の上端 (100px) に揃える
+      expect(listBody().scrollTop).toBe(800);
     } finally {
       spy.mockRestore();
     }

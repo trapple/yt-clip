@@ -147,7 +147,7 @@ let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
  * 拡大バーがいま編集している区間の位置。区間が無ければ -1。
  *
  * **ここが選択の唯一の持ち主。** 一覧にも持たせると同期が要る。
- * 並べ替えもマージもしないので index は動かず、数が変わったときだけ詰める
+ * 状態機械は区間を時間順に並べるので、足した・動かした直後は範囲で引き直す (selectRangeOnNextState)。それ以外は数が変わったときだけ詰める
  */
 let selectedIndex = -1;
 let segmentList: SegmentList | null = null;
@@ -261,17 +261,17 @@ function createWindows(): void {
  */
 let lastKind: ClipState["kind"] = "idle";
 /**
- * 次に状態が届いたとき、末尾の区間を選ぶ。
- *
- * 区間を足した直後は**足した区間**を選ぶ。前の区間が選ばれたままだと、
- * 「IN → OUT」の癖で OUT を押したときに前の区間の終端が動いて事故になる。
- * 足した区間は必ず末尾に来る (並べ替えないため)
+ * 次に状態が届いたとき、この範囲の区間を選ぶ。区間を足した・動かした直後は**その区間**を選ぶ。
+ * 前の区間が選ばれたままだと、続けて OUT を押したときに前の区間の終端が動いて事故になる。
+ * **位置ではなく範囲で覚える**: 状態機械は区間を時間順に並べるので、足した区間・動かした区間の位置は変わりうる
  */
-let selectLastOnNextState = false;
+let selectRangeOnNextState: ClipRange | null = null;
+/** 次に状態が届いたとき、選んだ区間の行を区間・テロップの窓の見える範囲に入れる (区間を足した直後) */
+let revealSegmentOnNextState = false;
 /**
  * 次に状態が届いたとき、テロップの一覧の末尾の行を区間・テロップの窓の見える範囲に入れる。
  *
- * `selectLastOnNextState` と同じ形。**クリックの時点では行がまだ無い** (状態機械の
+ * `revealSegmentOnNextState` と同じ形。**クリックの時点では行がまだ無い** (状態機械の
  * 答えを待って描く) ので、応答を描いた後に 1 回だけ送る
  */
 let revealLastTelopOnNextState = false;
@@ -465,13 +465,12 @@ function sameRange(a: ClipRange, b: ClipRange): boolean {
 }
 
 /**
- * 状態機械の index の区間が、送った範囲になっているか。区間を変える送信が受け付けられたかの判定に使う
- * (拒まれたら send が画面を状態機械に戻し、「受け付けられませんでした」を出す)
+ * 状態機械の区間に、送った範囲の区間があるか。区間を変える送信が受け付けられたかの判定に使う
+ * (拒まれたら send が画面を状態機械に戻し、「受け付けられませんでした」を出す)。**位置では見ない**: 状態機械は
+ * 区間を時間順に並べるので、動かした区間の位置は変わりうる
  */
-function segmentIs(state: ClipState, index: number, range: ClipRange): boolean {
-  if (state.kind !== "ready") return false;
-  const segment = state.segments[index];
-  return segment !== undefined && sameRange(segment, range);
+function hasSegment(state: ClipState, range: ClipRange): boolean {
+  return state.kind === "ready" && state.segments.some((segment) => sameRange(segment, range));
 }
 
 /** 拡大バーが編集している区間。無ければ null */
@@ -598,7 +597,7 @@ function startOver(): void {
   // rangeVideoId も答えの meta から取る (先に書くと、答えが来なかったとき前の動画の区間に今の動画の秒を書きうる)
   send(
     { type: "MARK_IN", range, meta },
-    (state) => state.kind === "ready" && state.segments.length === 1 && segmentIs(state, 0, range),
+    (state) => state.kind === "ready" && state.segments.length === 1 && hasSegment(state, range),
   );
 }
 
@@ -641,7 +640,8 @@ function onAddSegment(): void {
   rangeVideoId = meta.videoId;
   // 足した区間を選ぶ。前の区間が選ばれたままだと、続けて IN/OUT を押したとき
   // 別の区間が動く
-  selectLastOnNextState = true;
+  selectRangeOnNextState = range;
+  revealSegmentOnNextState = true;
   // 選ぶ区間が変わるので、前の区間を見ている再生の監視は用済み
   cancelPreviewWatch();
   send({ type: "ADD_SEGMENT", range, meta });
@@ -786,10 +786,10 @@ function onMarkSegmentStart(): void {
     return;
   }
 
-  // 並べ替えないので、頭を動かしても選択はその場に留まる
-  const index = selectedIndex;
+  // 頭を動かすと時間順の位置が変わりうる。選択は範囲で追う (selectRangeOnNextState)
   cancelPreviewWatch();
-  send({ type: "ADJUST_SEGMENT", index, range: next }, (state) => segmentIs(state, index, next));
+  selectRangeOnNextState = next;
+  send({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next }, (state) => hasSegment(state, next));
 }
 
 function onMarkOut(): void {
@@ -829,8 +829,8 @@ function onMarkOut(): void {
   // 「▶ 区間を見る」の最中に尻を伸ばしても古い OUT で止まる)
   cancelPreviewWatch();
   // 楽観的に描かない。状態機械の答えを待ってから描く (`onAddSegment` と同じ)
-  const index = selectedIndex;
-  send({ type: "MARK_OUT", index, sec: next.endSec }, (state) => segmentIs(state, index, next));
+  selectRangeOnNextState = next;
+  send({ type: "MARK_OUT", index: selectedIndex, sec: next.endSec }, (state) => hasSegment(state, next));
 }
 
 /**
@@ -857,8 +857,8 @@ function onRangeCommitted(range: ClipRange): void {
     );
     paintOverlay(currentSegments, durationSec);
     setStatus(rangeLabel(range));
-    const index = selectedIndex;
-    send({ type: "ADJUST_SEGMENT", index, range }, (state) => segmentIs(state, index, range));
+    selectRangeOnNextState = range;
+    send({ type: "ADJUST_SEGMENT", index: selectedIndex, range }, (state) => hasSegment(state, range));
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
   }
@@ -1352,21 +1352,19 @@ function isDockedInPage(id: WindowId): boolean {
  * **浮いた窓は前には出さない** (C1.2 は窓の中を送ることだけを求める)。前に出すと、もう一方の窓を
  * 見ながら区間を足したときにそちらが潜る。**ドック中ならタブを前に出すだけ** (C2.2): ページの中の窓は中身なりの
  * 高さで中でスクロールしないので送る先が無く、ページもスクロールしない (右側パネルの spec §3 と同じ理由)。
- * 窓が隠れている (全画面など) ときは何もしない。出す判断は `refreshWindows` のもの
+ * 窓が隠れている (全画面など) ときは何もしない。出す判断は `refreshWindows` のもの。
+ * index を渡さなければ末尾の行
  */
-function revealLastRow(
-  list: HTMLElement | undefined,
-  role: "segment" | "telop",
-): void {
+function revealRow(list: HTMLElement | undefined, role: "segment" | "telop", index?: number): void {
   if (list === undefined || listWindow.element.hidden) return;
   const rows = list.querySelectorAll<HTMLElement>(`[data-role='${role}']`);
-  const last = rows[rows.length - 1];
-  if (last === undefined) return;
+  const row = rows[index ?? rows.length - 1];
+  if (row === undefined) return;
   if (isDockedInPage("list")) {
     dockManager.activate("list");
     return;
   }
-  listWindow.scrollTo(last);
+  listWindow.scrollTo(row);
 }
 
 function applyStateToDisplay(state: ClipState): void {
@@ -1413,11 +1411,16 @@ function applyStateToDisplay(state: ClipState): void {
   if (telopsGone) {
     setStatus("テロップも消えました");
   }
-  // **並べ替えないので index は動かない。** 足した直後だけ末尾へ移し、
-  // それ以外は今の位置を保つ。削除で数が減ったときだけ範囲内へ詰める
+  // 足した・動かした直後は、その範囲の区間を選ぶ (状態機械が時間順に並べるので位置は変わりうる)。
+  // それ以外は今の位置を保ち、削除で数が減ったときだけ範囲内へ詰める
+  const wanted = selectRangeOnNextState;
+  const wantedIndex =
+    wanted === null ? -1 : liveSegments.findIndex((segment) => sameRange(segment, wanted));
   if (liveSegments.length === 0) {
     selectedIndex = -1;
-  } else if (selectLastOnNextState || selectedIndex < 0) {
+  } else if (wantedIndex >= 0) {
+    selectedIndex = wantedIndex;
+  } else if (selectedIndex < 0) {
     selectedIndex = liveSegments.length - 1;
   } else {
     // 選択より前が消えたら、選んでいた区間は 1 つ手前へ移っている
@@ -1433,9 +1436,10 @@ function applyStateToDisplay(state: ClipState): void {
     }
   }
   // 足した直後の 1 回だけ、足した行へ送る。描き終えてから送るので、ここでは覚えるだけ
-  const revealSegment = selectLastOnNextState;
+  const revealSegment = revealSegmentOnNextState;
   const revealTelop = revealLastTelopOnNextState;
-  selectLastOnNextState = false;
+  selectRangeOnNextState = null;
+  revealSegmentOnNextState = false;
   revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;
 
@@ -1466,8 +1470,8 @@ function applyStateToDisplay(state: ClipState): void {
   // ずれていなくても確定済みの範囲で描き直す
   refreshLists();
   // 一覧と窓の表示が決まってから送る (出す → 送る の順)
-  if (revealSegment) revealLastRow(segmentList?.element, "segment");
-  if (revealTelop) revealLastRow(telopList?.element, "telop");
+  if (revealSegment) revealRow(segmentList?.element, "segment", selectedIndex);
+  if (revealTelop) revealRow(telopList?.element, "telop");
 
   lastKind = state.kind;
 
@@ -2440,7 +2444,8 @@ function resetModuleState(): void {
   for (const id of WINDOW_IDS) delete floatLayout[id];
   lastKind = "idle";
   startOverArmed = false;
-  selectLastOnNextState = false;
+  selectRangeOnNextState = null;
+  revealSegmentOnNextState = false;
   revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;
   rangeVideoId = null;

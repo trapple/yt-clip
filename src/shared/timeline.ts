@@ -33,13 +33,13 @@ export function assertValidRange(range: ClipRange): void {
 /**
  * 区間として成立しているか確かめる。
  *
- * **並べ替えもマージもしない。** 拾った順がそのまま出力順になる。当初は
+ * **ここでは並べ替えもマージもしない** (時間順に並べるのは状態機械の readyWith)。当初は
  * 時系列ソートと重なりのマージをしていたが、区間の中で「区間を追加」を押した
  * ときに無反応になり (新しい区間が既存区間に完全に含まれると結果が変わらない)、
  * 同じ場面を 2 回使うこともできなかった。
  *
- * 拾った順のままなら **index が動かない**ので、選択の同定に ID も要らない。
- * 代償は録画中の巻き戻しシークだが、繋ぎ目の品質は `waitForFreshFrame` が守る。
+ * 区間は状態機械が時間順に並べる (ADR 0001)。重なった区間はマージしないので、録画中の巻き戻しシークは
+ * 重なった区間でだけ起きる。繋ぎ目の品質は `waitForFreshFrame` が守る。
  */
 export function assertValidSegments(segments: ClipRange[]): void {
   for (const segment of segments) {
