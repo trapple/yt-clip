@@ -1871,8 +1871,18 @@ describe("IN", () => {
     expect(statusText()).toBe("0:10 〜 0:20 (10秒)");
   });
 
-  test("区間の尻より後ろで IN を押すと、＋ 区間を追加へ案内する", async () => {
-    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+  test("区間が 2 つ以上あるとき、選んでいる区間の尻より後ろで IN を押すと、＋ 区間を追加へ案内する", async () => {
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 25 },
+        { startSec: 50, endSec: 60 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+    segmentRows()[0]?.click();
     await flush();
     video.element.currentTime = 40;
     sent = [];
@@ -1884,8 +1894,28 @@ describe("IN", () => {
     expect(statusText()).toBe("IN が区間の尻 (0:25) より後ろです。新しい区間は ＋ 区間を追加 で作れます");
   });
 
-  test("区間を組み立てている途中で、区間が 1 つでも IN は頭を合わせる (作り直さない)", async () => {
+  test("区間が 1 つでテロップが無ければ、区間の前でも後ろでも IN は作り直す (これまでのシンプルと同じ)", async () => {
     emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+
+    for (const at of [40, 5]) {
+      video.element.currentTime = at;
+      sent = [];
+      clickButton("IN");
+      await flush();
+      const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+      expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+      expect(events[0]?.range?.startSec).toBe(at);
+    }
+  });
+
+  test("テロップがあれば、区間が 1 つでも IN は頭を合わせる (作り直してテロップを消さない)", async () => {
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 10, endSec: 25 }],
+      telops: [{ startSec: 11, endSec: 14, text: "こんにちは" }],
+      meta: META_A,
+    });
     await flush();
     video.element.currentTime = 12;
     sent = [];
@@ -1896,6 +1926,60 @@ describe("IN", () => {
     expect(clipEvents()).toEqual([
       { type: "ADJUST_SEGMENT", index: 0, range: { startSec: 12, endSec: 25 } },
     ]);
+  });
+
+  test("投稿した後 (posted) でも、区間が 2 つ以上なら IN は頭を合わせる", async () => {
+    emit({
+      kind: "posted",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [
+        { startSec: 10, endSec: 25 },
+        { startSec: 50, endSec: 60 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+    segmentRows()[0]?.click();
+    await flush();
+    video.element.currentTime = 12;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([
+      { type: "ADJUST_SEGMENT", index: 0, range: { startSec: 12, endSec: 25 } },
+    ]);
+  });
+
+  test("録画した後 (preview) で区間が 2 つ以上なら、1 回目の IN は消える数を出すだけ。もう一度押すと作り直す", async () => {
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [
+        { startSec: 10, endSec: 25 },
+        { startSec: 50, endSec: 60 },
+      ],
+      telops: [{ startSec: 11, endSec: 14, text: "こんにちは" }],
+      meta: META_A,
+    });
+    await flush();
+    video.element.currentTime = 300;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("作り直すと区間 2 個とテロップ 1 件が消えます。作り直すならもう一度 IN を押してください");
+
+    clickButton("IN");
+    await flush();
+    const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+    expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+    expect(events[0]?.range?.startSec).toBe(300);
   });
 });
 

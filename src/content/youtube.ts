@@ -537,12 +537,20 @@ function abortRecording(): void {
 }
 
 /**
+ * IN で作り直す前の確かめを出した後か。もう一度 IN を押したら作り直す。状態が届いたら下ろす
+ * (別の操作を挟んだら、確かめはやり直す)
+ */
+let startOverArmed = false;
+
+/**
  * IN ボタン (ADR 0001: モードを無くし、区間が 1 つならシンプルと同じにする)。
  *
- * - **区間を組み立てている途中** (状態が ready で、この動画の区間がある): 選んでいる区間の頭だけを今の位置に動かす
- * - **それ以外** (区間が無い・録画した後・失敗・別の動画の区間しか無い): 今の位置から範囲を作り直す (`MARK_IN`。
- *   区間とテロップは置き換わる)。録り終えたら次の場面で IN、という流れを残すため。録画した後の区間は録った
- *   クリップに焼き込み済みで、頭を動かしても録り直しになるだけ
+ * - **区間が 1 つでテロップが無い**: いつも今の位置から範囲を作り直す (`MARK_IN`)。これまでのシンプルと同じ
+ *   (区間の前でも後ろでも、録画した後でも)
+ * - **区間が 2 つ以上かテロップがある**: ready / posted なら選んでいる区間の頭だけを今の位置に動かす。録画した後
+ *   (preview / degraded) は、消える区間とテロップの数を出し、もう一度押したら作り直す (手で作った区間とテロップを
+ *   確かめずに捨てない)
+ * - **この動画の区間が画面に無い** (区間が無い・失敗・別の動画の区間しか無い): 作り直す
  *
  * **IN を「区間を追加」に置き換えない。** OUT があるのに IN が無い状態になり、一度作った区間の頭を詰められなくなる
  */
@@ -553,21 +561,41 @@ function onMarkIn(): void {
     setStatus("録画中は範囲を変更できません");
     return;
   }
-  const composing =
-    lastKind === "ready" && currentSegments.length > 0 && rangeVideoId === currentVideoId();
-  if (composing) {
-    onMarkSegmentStart();
-    return;
+  const shown = currentSegments.length > 0 && rangeVideoId === currentVideoId();
+  const simple = currentSegments.length === 1 && currentTelops.length === 0;
+  if (shown && !simple) {
+    if (lastKind === "ready" || lastKind === "posted") {
+      onMarkSegmentStart();
+      return;
+    }
+    if (!startOverArmed) {
+      startOverArmed = true;
+      setStatus(
+        `作り直すと区間 ${currentSegments.length} 個とテロップ ${currentTelops.length} 件が消えます。作り直すならもう一度 IN を押してください`,
+      );
+      return;
+    }
   }
+  startOverArmed = false;
+  startOver();
+}
 
+/**
+ * 今の位置から範囲を作り直す (`MARK_IN`)。区間とテロップは置き換わる。
+ *
+ * **録画した後 (preview) からでも受け付ける。** 状態機械の「MARK_IN はどの状態からでも ready へ」を content 側で
+ * 狭めると、録り終えた後に次の切り抜きを始められなくなる。代償として、録画済みクリップへの参照 (clipId) は状態から
+ * 外れる (IndexedDB には残るが popup から辿れなくなる)。この非対称は意図したもの
+ */
+function startOver(): void {
   const video = getVideo();
   const meta = getVideoMeta();
   // 既定の長さの範囲をここで作る。状態機械は長さの決め方を知らない
   const range = makeDefaultRange(video.currentTime, video.duration, maxClipSec);
-  rangeVideoId = meta.videoId;
   // 範囲が変われば、前の範囲を見ている再生の監視は用済み (消した楽観描画が外していた)
   cancelPreviewWatch();
-  // 楽観的に描かない。状態機械の答えを待ってから描く (区間 1 つの ready になり、それが選ばれる)
+  // 楽観的に描かない。状態機械の答えを待ってから描く (区間 1 つの ready になり、それが選ばれる)。
+  // rangeVideoId も答えの meta から取る (先に書くと、答えが来なかったとき前の動画の区間に今の動画の秒を書きうる)
   send(
     { type: "MARK_IN", range, meta },
     (state) => state.kind === "ready" && state.segments.length === 1 && segmentIs(state, 0, range),
@@ -1363,6 +1391,8 @@ function applyStateToDisplay(state: ClipState): void {
   const previous = selectedSegment();
 
   busy = BUSY_KINDS.has(state.kind);
+  // 作り直しの確かめは、状態が届いたらやり直す (確かめた区間とテロップが変わっているかもしれない)
+  startOverArmed = false;
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
@@ -2403,6 +2433,7 @@ function resetModuleState(): void {
   // 覚えた配置の写し。start() の loadInitialLayout が読み直す (オフの間に別のタブで動かした位置も拾う)
   for (const id of WINDOW_IDS) delete floatLayout[id];
   lastKind = "idle";
+  startOverArmed = false;
   selectLastOnNextState = false;
   revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;
