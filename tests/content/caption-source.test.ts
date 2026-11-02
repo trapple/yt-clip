@@ -155,6 +155,24 @@ describe("fetchOfficialTranscript", () => {
     await expect(fetchOfficialTranscript("vid", d)).rejects.toThrow("広告が終わらないため字幕を取れませんでした");
   });
 
+  test("ページの中で失敗したら、頼み直さずにその理由で throw する", async () => {
+    const { deps: d, requested } = deps({
+      answers: [{ ok: false, reason: "error", message: "captionTracks の形が変わった" }],
+    });
+    await expect(fetchOfficialTranscript("vid", d)).rejects.toThrow(
+      "ページの中で失敗しました: captionTracks の形が変わった",
+    );
+    expect(requested).toHaveLength(1);
+  });
+
+  test("字幕が json3 でなければ、読めなかったことが分かる理由で throw する", async () => {
+    const { deps: d } = deps({
+      answers: [{ ok: true, tracks: [track("ja", "asr")], potUrl: POT_URL, dubbed: false }],
+      fetchText: async () => "<html>not json</html>",
+    });
+    await expect(fetchOfficialTranscript("vid", d)).rejects.toThrow("字幕 (json3) を読めませんでした");
+  });
+
   test("pot を拾えなければ throw する", async () => {
     const { deps: d } = deps({ answers: [{ ok: true, tracks: [track("ja", "asr")], potUrl: null, dubbed: false }] });
     await expect(fetchOfficialTranscript("vid", d)).rejects.toThrow("字幕の取得に要る情報を拾えませんでした");
@@ -220,6 +238,18 @@ describe("requestViaWindow", () => {
     expect(answer).toEqual({ ok: true, tracks: [], potUrl: null, dubbed: false });
     expect(posted[0]).toMatchObject({ type: BRIDGE_REQUEST, videoId: "vid", wantPot: false });
     expect(listeners.size).toBe(0);
+  });
+
+  test("ページの中の失敗の応答は、理由ごと答えにする", async () => {
+    const { win } = fakeWindow((request) => ({
+      type: BRIDGE_RESPONSE,
+      id: request.id,
+      ok: false,
+      reason: "error",
+      message: "壊れた",
+    }));
+    const answer = await requestViaWindow(win, "https://www.youtube.com")({ videoId: "vid", wantPot: false });
+    expect(answer).toEqual({ ok: false, reason: "error", message: "壊れた" });
   });
 
   test("id の違う応答・形の違う応答は無視し、上限で BridgeTimeoutError", async () => {

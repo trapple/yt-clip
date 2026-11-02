@@ -54,6 +54,11 @@ describe("isBridgeResponse", () => {
     expect(isBridgeResponse({ type: BRIDGE_RESPONSE, id: "a", ok: false, reason: "no-player" })).toBe(true);
     expect(isBridgeResponse({ type: BRIDGE_RESPONSE, id: "a", ok: false, reason: "ad-showing" })).toBe(true);
     expect(isBridgeResponse({ type: BRIDGE_RESPONSE, id: "a", ok: false, reason: "other" })).toBe(false);
+    expect(isBridgeResponse({ type: BRIDGE_RESPONSE, id: "a", ok: false, reason: "error", message: "x" })).toBe(true);
+    expect(isBridgeResponse({ type: BRIDGE_RESPONSE, id: "a", ok: false, reason: "error" })).toBe(false);
+    expect(
+      isBridgeResponse({ type: BRIDGE_RESPONSE, id: "a", ok: false, reason: "error", message: "x".repeat(501) }),
+    ).toBe(false);
   });
 
   test("字幕の形が違う・dubbed が無い応答は偽 (ページの別のスクリプトが送ったものを使わない)", () => {

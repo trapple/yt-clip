@@ -128,6 +128,8 @@ async function ask(
     try {
       const answer = await deps.request(params);
       if (answer.ok) return answer;
+      // ページの中で throw した (非公開 API が変わったなど)。頼み直しても同じなので、理由をそのまま出す
+      if (answer.reason === "error") throw new CaptionError(`ページの中で失敗しました: ${answer.message}`);
       if (answer.reason === "ad-showing") {
         // 広告は数十秒〜数分続く。回数に数えずに明けるまで待つ (上限あり)
         if (adWaited >= AD_MAX_WAIT_MS) throw new CaptionError("広告が終わらないため字幕を取れませんでした");
@@ -147,6 +149,15 @@ async function ask(
     if (attempt < BRIDGE_RETRIES) await deps.sleep(BRIDGE_RETRY_MS);
   }
   throw new CaptionError(REASON_TEXT[lastReason] ?? lastReason);
+}
+
+/** 字幕の本文を JSON として読む。読めなければ、何が起きたか分かる理由にする (素の SyntaxError では分からない) */
+function parseBody(body: string): unknown {
+  try {
+    return JSON.parse(body) as unknown;
+  } catch (error) {
+    throw new CaptionError(`字幕 (json3) を読めませんでした: ${String(error)}`);
+  }
 }
 
 export async function fetchOfficialTranscript(
@@ -170,7 +181,7 @@ export async function fetchOfficialTranscript(
       videoId,
       source,
       language: track.languageCode,
-      lines: parseJson3(JSON.parse(body) as unknown, source),
+      lines: parseJson3(parseBody(body), source),
       savedAt: deps.now(),
     },
   };
@@ -200,11 +211,9 @@ export function requestViaWindow(
         clearTimeout(timer);
         win.removeEventListener("message", onMessage);
         const data = event.data;
-        resolve(
-          data.ok
-            ? { ok: true, tracks: data.tracks, potUrl: data.potUrl, dubbed: data.dubbed }
-            : { ok: false, reason: data.reason },
-        );
+        if (data.ok) resolve({ ok: true, tracks: data.tracks, potUrl: data.potUrl, dubbed: data.dubbed });
+        else if (data.reason === "error") resolve({ ok: false, reason: "error", message: data.message });
+        else resolve({ ok: false, reason: data.reason });
       };
       const timer = setTimeout(
         () => {

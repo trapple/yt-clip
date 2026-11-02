@@ -2,13 +2,17 @@
  * 隔離された world (youtube.ts) と MAIN world (caption-bridge) の間で `window.postMessage` に載せる形 (ADR 0002)。
  *
  * **両方の world から import する。chrome API に触らないこと** (MAIN world には chrome.runtime が無い)。
- * `window.postMessage` はページの他のスクリプトからも届くので、受け手は必ず判定 (isBridge…) を通す
+ * `window.postMessage` はページの他のスクリプトからも届くので、受け手は必ず判定 (isBridge…) を通す。
+ * **頼みの id は秘密ではない** (ページのどのスクリプトも読める)。応答の中身はページが偽れる前提で、取りに行く URL の
+ * 検査 (caption-source の isTimedtextUrl) と保存値の検証 (transcript-cache の isTranscript) で守る
  */
 
 export const BRIDGE_REQUEST = "yt-clip/captions-request" as const;
 export const BRIDGE_RESPONSE = "yt-clip/captions-response" as const;
 /** プレイヤーが字幕を取りに行くのを待つ上限。頼む側の待ちはこれより長くする */
 export const POT_WAIT_MS = 5000;
+/** 失敗の理由の文字数の上限。応答はページの他のスクリプトも偽れるので、巨大な文字列を受け取らない */
+export const MAX_ERROR_MESSAGE_LENGTH = 500;
 
 export type CaptionTrack = {
   baseUrl: string;
@@ -32,7 +36,9 @@ export type BridgeAnswer =
    * no-player: プレイヤーがまだ無い。video-mismatch: プレイヤーの動画がまだ切り替わっていない (SPA 遷移の直後)。
    * ad-showing: 広告が流れている (広告の間はプレイヤーの動画も字幕も本編のものにならない)
    */
-  | { ok: false; reason: "no-player" | "video-mismatch" | "ad-showing" };
+  | { ok: false; reason: "no-player" | "video-mismatch" | "ad-showing" }
+  /** ページの中で throw した (YouTube の非公開 API が変わったなど)。頼み直さずに理由を出す */
+  | { ok: false; reason: "error"; message: string };
 
 export type BridgeResponse = BridgeAnswer & { type: typeof BRIDGE_RESPONSE; id: string };
 
@@ -69,10 +75,11 @@ export function isBridgeResponse(value: unknown): value is BridgeResponse {
       typeof value.dubbed === "boolean"
     );
   }
-  return (
-    value.ok === false &&
-    (value.reason === "no-player" || value.reason === "video-mismatch" || value.reason === "ad-showing")
-  );
+  if (value.ok !== false) return false;
+  if (value.reason === "error") {
+    return typeof value.message === "string" && value.message.length <= MAX_ERROR_MESSAGE_LENGTH;
+  }
+  return value.reason === "no-player" || value.reason === "video-mismatch" || value.reason === "ad-showing";
 }
 
 /**

@@ -93,6 +93,19 @@ describe("saveTranscript / loadTranscript", () => {
     ]);
   });
 
+  test("容量以外の失敗では、古いものを消さずにそのまま throw する", async () => {
+    const { storage, data } = memoryStorage();
+    await saveTranscript(transcript("a", 1), storage);
+    const failing: TranscriptStorage = {
+      ...storage,
+      set: async () => {
+        throw new Error("Extension context invalidated.");
+      },
+    };
+    await expect(saveTranscript(transcript("b", 2), failing)).rejects.toThrow("Extension context invalidated.");
+    expect(data["transcript:a"]).toBeDefined();
+  });
+
   test("消せるものが無くても入らなければ throw する", async () => {
     const { storage } = memoryStorage({}, 0);
     await expect(saveTranscript(transcript("a", 1), storage)).rejects.toThrow("QUOTA");

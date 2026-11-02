@@ -1,5 +1,6 @@
 import {
   BRIDGE_RESPONSE,
+  MAX_ERROR_MESSAGE_LENGTH,
   POT_WAIT_MS,
   isBridgeRequest,
   isDubbedTrackId,
@@ -80,19 +81,23 @@ function videoOf(url: string): string | null {
   }
 }
 
-/** 字幕がオンか (getOption の track が言語を持つ) */
-function isSelectedTrack(value: unknown): value is { languageCode: string } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { languageCode?: unknown }).languageCode === "string" &&
-    (value as { languageCode: string }).languageCode !== ""
-  );
+/**
+ * 字幕のオン / オフ (getOption の track)。オフは未定義か空のオブジェクト、オンは言語を持つもの。
+ * **それ以外の形は「分からない」**: 推し量ってオフと読むと、取った後にオンの人の字幕をオフにしてしまう
+ */
+function captionState(value: unknown): "on" | "off" | "unknown" {
+  if (value === undefined || value === null) return "off";
+  if (typeof value !== "object") return "unknown";
+  if (Object.keys(value).length === 0) return "off";
+  const language = (value as { languageCode?: unknown }).languageCode;
+  return typeof language === "string" && language !== "" ? "on" : "unknown";
 }
 
 /**
- * プレイヤーに字幕を取りに行かせ、その URL (pot 付き) を拾う。**字幕の状態は必ず戻す**:
- * オフだった人はオフに (モジュールも外す)、オンだった人は同じ字幕のまま
+ * プレイヤーに字幕を取りに行かせ、その URL (pot 付き) を拾う。**字幕の状態と表示は必ず戻す**:
+ * オフだった人はオフに (モジュールも外す)、オンだった人は同じ字幕のまま。途中で throw しても、隠した表示と
+ * 見張りはページに残さない (残ると、オフにしても読み直すまでそのタブで字幕が出ない)。
+ * 字幕のオン / オフが読めない形なら取りに行かせない (null を返す)
  */
 async function capturePot(
   player: Player,
@@ -100,15 +105,20 @@ async function capturePot(
   videoId: string,
   deps: BridgeDeps,
 ): Promise<string | null> {
-  let found: string | null = null;
-  const stopObserving = deps.observeTimedtext((url) => {
-    // 同じ時に別の動画 (広告など) の字幕を取りに行くことがある。その pot は効かないので、頼まれた動画のものだけ
-    if (found === null && /[?&]pot=/.test(url) && videoOf(url) === videoId) found = url;
-  });
-  const showCaptions = deps.hideCaptions();
+  // 表示を隠す前に読む。ここで throw しても、まだページに何も足していない
   const previous = player.getOption?.("captions", "track");
-  const wasOn = isSelectedTrack(previous);
+  const state = captionState(previous);
+  if (state === "unknown") return null;
+  const wasOn = state === "on";
+  let found: string | null = null;
+  let stopObserving: (() => void) | undefined;
+  let showCaptions: (() => void) | undefined;
   try {
+    stopObserving = deps.observeTimedtext((url) => {
+      // 同じ時に別の動画 (広告など) の字幕を取りに行くことがある。その pot は効かないので、頼まれた動画のものだけ
+      if (found === null && /[?&]pot=/.test(url) && videoOf(url) === videoId) found = url;
+    });
+    showCaptions = deps.hideCaptions();
     player.loadModule?.("captions");
     // 一度外してから選ぶ。同じ字幕を選び直すだけでは、プレイヤーが取り直さない
     player.setOption?.("captions", "track", {});
@@ -121,12 +131,16 @@ async function capturePot(
       await deps.sleep(POLL_MS);
     }
   } finally {
-    stopObserving();
-    if (!wasOn) {
-      player.setOption?.("captions", "track", {});
-      player.unloadModule?.("captions");
+    try {
+      stopObserving?.();
+      if (!wasOn) {
+        player.setOption?.("captions", "track", {});
+        player.unloadModule?.("captions");
+      }
+    } finally {
+      // 字幕を戻すところで throw しても、隠した表示だけは必ず戻す
+      showCaptions?.();
     }
-    showCaptions();
   }
   return found;
 }
@@ -162,7 +176,18 @@ export function handleBridgeMessage(
   const { id, videoId, wantPot } = event.data;
   const run = inFlight.then(() => answer({ videoId, wantPot }, deps));
   inFlight = run.catch(() => undefined);
-  void run.then((result) => reply({ ...result, type: BRIDGE_RESPONSE, id }));
+  void run.then(
+    (result) => reply({ ...result, type: BRIDGE_RESPONSE, id }),
+    // 返事をしないと、頼む側は「ページからの応答がありません」で頼み直し続け、本当の理由が分からなくなる
+    (error: unknown) =>
+      reply({
+        type: BRIDGE_RESPONSE,
+        id,
+        ok: false,
+        reason: "error",
+        message: (error instanceof Error ? error.message : String(error)).slice(0, MAX_ERROR_MESSAGE_LENGTH),
+      }),
+  );
 }
 
 function defaultDeps(): BridgeDeps {

@@ -74,7 +74,8 @@ describe("createTranscriptLoader", () => {
     expect(statuses.at(-1)).toEqual({ kind: "ready", videoId: "a", transcript: transcript("a"), dubbed: true });
   });
 
-  test("保存から読んだとき、吹き替えの判定が読めなければ偽にする", async () => {
+  test("保存から読んだとき、吹き替えの判定が読めなければ偽にし、warn を残す", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { loader, statuses } = setup({
       loadCached: async (id) => transcript(id),
       readDubbed: async () => {
@@ -84,6 +85,7 @@ describe("createTranscriptLoader", () => {
     loader.load("a");
     await flush();
     expect(statuses.at(-1)).toMatchObject({ kind: "ready", dubbed: false });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("吹き替えの判定を読めませんでした: Error: no player"));
   });
 
   test("同じ動画で何度呼ばれても 1 回だけ (mount は DOM の変化のたびに呼ばれる)。失敗しても繰り返さない", async () => {

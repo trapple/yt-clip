@@ -115,6 +115,11 @@ export async function loadTranscript(
   return stored;
 }
 
+/** chrome.storage の容量超過 (`QUOTA_BYTES quota exceeded`) */
+function isQuotaError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("QUOTA_BYTES");
+}
+
 /**
  * 保存する。索引の先頭に入れ、30 本を超えた分を消す。容量が足りなければ古いものから 1 本ずつ消して入れ直す。
  * 消せるものが無くなっても入らなければ throw する
@@ -138,8 +143,9 @@ export async function saveTranscript(
       await storage.set({ [keyOf(transcript.videoId)]: fitted, [TRANSCRIPT_INDEX_KEY]: kept });
       return;
     } catch (error) {
+      // 古いものを消して入れ直すのは容量が足りないときだけ。ほかの失敗で消すと、30 本ぜんぶ消してから throw する
       const oldest = kept[kept.length - 1];
-      if (kept.length <= 1 || oldest === undefined) throw error;
+      if (!isQuotaError(error) || kept.length <= 1 || oldest === undefined) throw error;
       kept = kept.slice(0, -1);
       await storage.remove([keyOf(oldest.videoId)]);
     }
