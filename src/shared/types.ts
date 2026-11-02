@@ -16,6 +16,11 @@ export type Telop = {
   endSec: number;
   /** 改行を含んでよい。空文字は「まだ書いていない」テロップで、描かない */
   text: string;
+  /**
+   * どの文字起こしの行から作ったか (`TranscriptLine.id`)。手で足したテロップには無い。
+   * 文字起こしの欄は、これで行とテロップを結び付ける (行を外すとテロップも消え、直した文字は残る)
+   */
+  lineId?: string;
 };
 
 export type VideoMeta = {
@@ -188,6 +193,12 @@ export type ClipEvent =
   /** 指したテロップを丸ごと差し替える。取りこぼしでずれないよう常に全項目を送る */
   | { type: "UPDATE_TELOP"; index: number; telop: Telop }
   | { type: "REMOVE_TELOP"; index: number }
+  /**
+   * 区間とテロップをまとめて差し替える (文字起こしの欄で行を入れた / 外した)。区間が空なら idle に戻る。
+   * idle / ready / posted と、区間を持たない failed だけが受ける (posted はクリップが外れる)。区間を持つ failed は
+   * RETRY で戻れる区間とテロップを持っているので受けない (画面の写しは failed では空なので、丸ごと差し替えると消える)
+   */
+  | { type: "SET_CLIP"; segments: ClipRange[]; telops: Telop[]; meta: VideoMeta }
   | { type: "RESET_MARKS" }
   | { type: "START_RECORDING" }
   | { type: "SEEK_DONE" }

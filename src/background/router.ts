@@ -24,6 +24,7 @@ const TAB_OWNING_EVENTS: ReadonlySet<ClipEvent["type"]> = new Set<ClipEvent["typ
   "ADD_TELOP",
   "UPDATE_TELOP",
   "REMOVE_TELOP",
+  "SET_CLIP",
   "START_RECORDING",
 ]);
 

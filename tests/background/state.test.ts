@@ -406,12 +406,12 @@ describe("複数区間", () => {
     });
   });
 
-  test("足した区間は拾った順に並ぶ。時間順へ並べ替えない", () => {
-    // 「オチを先に見せる」ような並べ方ができる
+  test("足した区間は時間順に並ぶ。前の場面を後から足しても前に入る", () => {
+    // 区間は動画の時間順に繋ぐ (ADR 0001)
     const earlier: ClipRange = { startSec: 1, endSec: 5 };
     expect(reduce(ready, { type: "ADD_SEGMENT", range: earlier, meta })).toEqual({
       kind: "ready",
-      segments: [range, earlier],
+      segments: [earlier, range],
       telops: [],
       meta,
     });
@@ -803,5 +803,124 @@ describe("テロップ", () => {
         reason: "internal-error",
       });
     });
+  });
+});
+
+describe("区間は時間順 (ADR 0001)", () => {
+  const meta = makeVideoMeta();
+
+  test("後から前の場面を足しても、開始の早い順に並ぶ", () => {
+    let state = reduce(INITIAL_STATE, { type: "ADD_SEGMENT", range: { startSec: 100, endSec: 110 }, meta });
+    state = reduce(state, { type: "ADD_SEGMENT", range: { startSec: 10, endSec: 20 }, meta });
+    expect(state).toMatchObject({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 100, endSec: 110 },
+      ],
+    });
+  });
+
+  test("頭を動かして順が入れ替わっても並び直す", () => {
+    let state = reduce(INITIAL_STATE, { type: "ADD_SEGMENT", range: { startSec: 10, endSec: 20 }, meta });
+    state = reduce(state, { type: "ADD_SEGMENT", range: { startSec: 30, endSec: 40 }, meta });
+    state = reduce(state, { type: "ADJUST_SEGMENT", index: 1, range: { startSec: 5, endSec: 40 } });
+    expect(state).toMatchObject({
+      segments: [
+        { startSec: 5, endSec: 40 },
+        { startSec: 10, endSec: 20 },
+      ],
+    });
+  });
+});
+
+describe("SET_CLIP (文字起こしの欄から区間とテロップをまとめて差し替える)", () => {
+  const meta = makeVideoMeta();
+  const telop = { startSec: 11, endSec: 14, text: "こんにちは", lineId: "youtube-asr:11.00" };
+
+  test("idle から区間とテロップの ready になる。区間は時間順に並べる", () => {
+    const state = reduce(INITIAL_STATE, {
+      type: "SET_CLIP",
+      segments: [
+        { startSec: 50, endSec: 60 },
+        { startSec: 10.8, endSec: 14.3 },
+      ],
+      telops: [telop],
+      meta,
+    });
+    expect(state).toEqual({
+      kind: "ready",
+      segments: [
+        { startSec: 10.8, endSec: 14.3 },
+        { startSec: 50, endSec: 60 },
+      ],
+      telops: [telop],
+      meta,
+    });
+  });
+
+  test("区間が空なら idle に戻る (最後の行を外した)", () => {
+    const ready = reduce(INITIAL_STATE, { type: "SET_CLIP", segments: [{ startSec: 1, endSec: 2 }], telops: [], meta });
+    expect(reduce(ready, { type: "SET_CLIP", segments: [], telops: [], meta })).toEqual({ kind: "idle" });
+  });
+
+  test("投稿した後 (posted) からも受け、クリップは外れる", () => {
+    const posted: ClipState = {
+      kind: "posted",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [{ startSec: 1, endSec: 2 }],
+      telops: [],
+      meta,
+    };
+    expect(reduce(posted, { type: "SET_CLIP", segments: [{ startSec: 3, endSec: 4 }], telops: [], meta })).toEqual({
+      kind: "ready",
+      segments: [{ startSec: 3, endSec: 4 }],
+      telops: [],
+      meta,
+    });
+  });
+
+  test("区間を作る前に落ちた failed からは受け、渡された区間で作り直す", () => {
+    const failed: ClipState = { kind: "failed", reason: "recording-aborted", segments: [], telops: [], meta: null };
+    expect(reduce(failed, { type: "SET_CLIP", segments: [{ startSec: 3, endSec: 4 }], telops: [], meta })).toEqual({
+      kind: "ready",
+      segments: [{ startSec: 3, endSec: 4 }],
+      telops: [],
+      meta,
+    });
+  });
+
+  test("やり直せる区間を持つ failed は受けない (RETRY で戻れる区間とテロップを消さない)", () => {
+    const failed: ClipState = {
+      kind: "failed",
+      reason: "recording-aborted",
+      segments: [{ startSec: 1, endSec: 2 }],
+      telops: [{ startSec: 1, endSec: 2, text: "手" }],
+      meta,
+    };
+    expect(reduce(failed, { type: "SET_CLIP", segments: [{ startSec: 3, endSec: 4 }], telops: [], meta })).toMatchObject({
+      kind: "failed",
+      reason: "internal-error",
+    });
+  });
+
+  test("録画中・録画した後 (preview) は受けない (invalid)", () => {
+    const base = { segments: [{ startSec: 1, endSec: 2 }], telops: [], meta };
+    for (const state of [
+      { kind: "recording", ...base },
+      { kind: "preview", clipId: "c", mimeType: "video/mp4", ...base },
+    ] as ClipState[]) {
+      expect(reduce(state, { type: "SET_CLIP", segments: [], telops: [], meta })).toMatchObject({
+        kind: "failed",
+        reason: "internal-error",
+      });
+    }
+  });
+
+  test("不正な区間は invalid にせず throw する (今の readyWith と同じ。UI のバグ)", () => {
+    expect(() =>
+      reduce(INITIAL_STATE, { type: "SET_CLIP", segments: [{ startSec: 5, endSec: 1 }], telops: [], meta }),
+    ).toThrow();
   });
 });

@@ -44,7 +44,7 @@ function invalid(state: ClipState): ClipState {
  * 漏れたときに不正な `segments` が状態に入る。`reduce` は純粋関数のままなので、
  * ここに置いても副作用はない。
  *
- * **並べ替えもマージもしない。** 拾った順がそのまま出力順になる (spec §2.3)
+ * **開始の早い順に並べる** (ADR 0001: 区間は動画の時間順に繋ぐ)。マージはしない (重なった区間はそのまま残る)
  */
 function readyWith(
   segments: ClipRange[],
@@ -53,11 +53,13 @@ function readyWith(
 ): ClipState {
   assertValidSegments(segments);
   assertValidTelops(telops);
+  // 同じ開始なら元の順を保つ (Array.prototype.sort は安定)
+  const ordered = [...segments].sort((a, b) => a.startSec - b.startSec);
   // 区間が 0 個の ready は録画に進めない死に状態なので作らない。
   // **テロップもここで消える。** `idle` は何も持たない。手入力の文言を ✕ 1 回で
   // 失わないよう、最後の区間の削除は UI 側で止めている (テロップ spec §2.2)
-  if (segments.length === 0) return { kind: "idle" };
-  return { kind: "ready", segments, meta, telops };
+  if (ordered.length === 0) return { kind: "idle" };
+  return { kind: "ready", segments: ordered, meta, telops };
 }
 
 /** UI から届いた index が実在するか。実在しなければ UI のバグ */
@@ -202,6 +204,21 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
       event.meta,
       telopsOf(state),
     );
+  }
+
+  if (event.type === "SET_CLIP") {
+    // 録画中・録画した後 (preview / composing / degraded) と、やり直せる区間を持つ failed は受けない。
+    // 文字起こしの欄も、その間は押せない (UI と同じ規則)
+    const open =
+      state.kind === "idle" ||
+      state.kind === "ready" ||
+      state.kind === "posted" ||
+      (state.kind === "failed" && state.segments.length === 0);
+    if (!open) {
+      return invalid(state);
+    }
+    // 別の動画の区間は持ち越さない (渡された区間とテロップで丸ごと置き換えるので、meta も渡されたもの)
+    return readyWith(event.segments, event.meta, event.telops);
   }
 
   switch (state.kind) {

@@ -28,6 +28,9 @@ export function assertValidTelops(telops: Telop[]): void {
     if (typeof telop.text !== "string") {
       throw new TypeError(`テロップの文言が文字列ではありません: ${String(telop.text)}`);
     }
+    if (telop.lineId !== undefined && typeof telop.lineId !== "string") {
+      throw new TypeError(`テロップの行の id が文字列ではありません: ${String(telop.lineId)}`);
+    }
     // UI (onTelopText) が送る前に止めている。ここに来るのは UI のバグ
     if (telop.text.length > MAX_TELOP_TEXT_LENGTH) {
       throw new RangeError(

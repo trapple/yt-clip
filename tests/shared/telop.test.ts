@@ -13,6 +13,13 @@ const world: Telop = { startSec: 12, endSec: 15, text: "世界" };
 const blank: Telop = { startSec: 10, endSec: 13, text: "  " };
 
 describe("assertValidTelops", () => {
+  test("lineId は文字列なら通し、文字列でなければ throw する", () => {
+    expect(() => assertValidTelops([{ startSec: 1, endSec: 2, text: "a", lineId: "youtube-asr:1.00" }])).not.toThrow();
+    expect(() =>
+      assertValidTelops([{ startSec: 1, endSec: 2, text: "a", lineId: 3 } as unknown as Telop]),
+    ).toThrow(TypeError);
+  });
+
   test("正しいテロップは通す", () => {
     expect(() => assertValidTelops([hello, world])).not.toThrow();
   });

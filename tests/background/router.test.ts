@@ -1123,6 +1123,16 @@ describe("content script の読み込み", () => {
 });
 
 describe("区間の追加での録画対象タブ", () => {
+  test("文字起こしの欄で区間を作った (SET_CLIP) タブが録画対象になる", async () => {
+    const h = makeHarness();
+    await h.router.handle(
+      { type: "clip/event", event: { type: "SET_CLIP", segments: [range], telops: [], meta } },
+      11,
+    );
+    await h.router.handle({ type: "clip/event", event: { type: "START_RECORDING" } }, 11);
+    expect(h.sentToTab).toContainEqual(expect.objectContaining({ tabId: 11 }));
+  });
+
   test("区間を足したタブが録画対象になる", async () => {
     // ＋ 区間を追加で作った最初の区間は MARK_IN ではなく ADD_SEGMENT で作られる。
     // ここでタブを覚えないと、新しいブラウザセッション (session storage が空)
