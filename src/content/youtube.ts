@@ -50,6 +50,12 @@ import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
 import { YT_SELECTORS } from "@/content/selectors";
 import { createSwitchDriver } from "@/content/switch-driver";
 import {
+  createDefaultTranscriptLoader,
+  transcriptLogLine,
+  type TranscriptLoader,
+  type TranscriptStatus,
+} from "@/content/transcript-loader";
+import {
   TelopRenderError,
   assertTelopRenderable,
   startCompositor,
@@ -2074,12 +2080,28 @@ function watchPlayerSize(): void {
   if (player !== null) playerObserver.observe(player);
 }
 
+/** 文字起こしの用意 (ADR 0002)。オンの間だけある (start() が作り、stop() が外す) */
+let transcriptLoader: TranscriptLoader | null = null;
+
+/**
+ * 文字起こしの状態が変わった。段階 1a では表示する欄がまだ無いので、結末だけをコンソールに 1 行残す
+ * (確かめ方は docs/manual-check.md の「文字起こし (公式字幕)」)。オフの後に届いたものは出さない
+ */
+function onTranscriptStatus(status: TranscriptStatus): void {
+  if (!running) return;
+  const line = transcriptLogLine(status);
+  if (line !== null) console.info(line);
+}
+
 function mount(): void {
+  const videoId = currentVideoId();
   // 動画ページ以外ではページに何も差さない (C2.7 の spa-inject の追記)。バーも組み立てない (タイトルもプレイヤーも無い)
-  if (currentVideoId() === null) {
+  if (videoId === null) {
     refreshWindows();
     return;
   }
+  // 文字起こしを用意する (ADR 0002)。同じ動画なら loader が何もしない (mount は DOM の変化のたびに呼ばれる)
+  transcriptLoader?.load(videoId);
   // ドック枠を差す先に付け直す (C2.7)。YouTube が子を作り直すと枠ごと外れる。使えるかが変わったら
   // (1 列表示になった・戻った・差す先が消えた) 窓を出し直す (退避 / 枠へ戻す)。**バーの有無より先に見る**
   if (dockManager.attach(dockAnchors())) refreshWindows();
@@ -2511,6 +2533,7 @@ export function start(): void {
   window.addEventListener("resize", placeUnmovedWindows);
   pageObserver = new MutationObserver(onPageMutated);
   pageObserver.observe(document.body, { childList: true, subtree: true });
+  transcriptLoader = createDefaultTranscriptLoader(onTranscriptStatus);
   mount();
   loadInitialSettings();
   loadInitialLayout();
@@ -2554,7 +2577,9 @@ export function stop(): void {
   telopTrack?.destroy();
   barWindow.destroy();
   listWindow.destroy();
-  // 6. 写しを最初の値に戻す
+  // 6. 文字起こしの取得 (走っている取得の結末は捨てる) と、写しを最初の値に戻す
+  transcriptLoader?.reset();
+  transcriptLoader = null;
   resetModuleState();
 }
 
