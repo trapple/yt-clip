@@ -123,6 +123,15 @@ describe("saveTranscript / loadTranscript", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("保存された文字起こしが読めない"));
   });
 
+  test("行の id が重なった保存 (古い版で保存した) は読まない。取り直させる", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const base = transcript("a", 1, 2);
+    const doubled: Transcript = { ...base, lines: base.lines.map((line) => ({ ...line, id: "youtube-asr:0.00" })) };
+    expect(isTranscript(doubled)).toBe(false);
+    const { storage } = memoryStorage({ "transcript:a": doubled });
+    expect(await loadTranscript("a", storage)).toBeNull();
+  });
+
   test("索引が壊れていても保存できる (索引を作り直す)", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { storage, data } = memoryStorage({ [TRANSCRIPT_INDEX_KEY]: "broken" });

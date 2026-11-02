@@ -56,7 +56,8 @@ export function isTranscript(value: unknown): value is Transcript {
     typeof value.language === "string" &&
     isFiniteNumber(value.savedAt) &&
     Array.isArray(value.lines) &&
-    value.lines.every(isLine)
+    value.lines.every(isLine) &&
+    new Set(value.lines.map((line) => line.id)).size === value.lines.length
   );
 }
 

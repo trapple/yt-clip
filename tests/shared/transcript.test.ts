@@ -2,6 +2,19 @@ import { describe, expect, test } from "vitest";
 import { ASR_LINE_MAX_CHARS, parseJson3 } from "@/shared/transcript";
 
 describe("parseJson3 (手動字幕)", () => {
+  test("同じ開始の行が 2 つあっても、id は重ねない (#2 を付ける)", () => {
+    const lines = parseJson3(
+      {
+        events: [
+          { tStartMs: 1000, dDurationMs: 1000, segs: [{ utf8: "上" }] },
+          { tStartMs: 1000, dDurationMs: 1000, segs: [{ utf8: "下" }] },
+        ],
+      },
+      "youtube-manual",
+    );
+    expect(lines.map((line) => line.id)).toEqual(["youtube-manual:1.00", "youtube-manual:1.00#2"]);
+  });
+
   test("event 1 つを 1 行にする。改行は空白、時刻は秒", () => {
     const lines = parseJson3(
       {

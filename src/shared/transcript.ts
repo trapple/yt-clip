@@ -148,5 +148,18 @@ function parseAsr(events: Json3Event[]): TranscriptLine[] {
  */
 export function parseJson3(json: unknown, source: TranscriptSource): TranscriptLine[] {
   const events = eventsOf(json);
-  return source === "youtube-asr" ? parseAsr(events) : parseManual(events);
+  return uniqueIds(source === "youtube-asr" ? parseAsr(events) : parseManual(events));
+}
+
+/**
+ * 行の id を重ねない。id は開始の秒から作るので、手動字幕で同じ開始の event が 2 つあると重なる。
+ * 文字起こしの欄は id で行とテロップを結ぶので、重なると別の行のテロップを動かす
+ */
+function uniqueIds(lines: TranscriptLine[]): TranscriptLine[] {
+  const seen = new Map<string, number>();
+  return lines.map((line) => {
+    const count = (seen.get(line.id) ?? 0) + 1;
+    seen.set(line.id, count);
+    return count === 1 ? line : { ...line, id: `${line.id}#${count}` };
+  });
 }
