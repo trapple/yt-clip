@@ -1377,7 +1377,7 @@ function applyStateToDisplay(state: ClipState): void {
   //
   // **別の動画を見ているタブでは取り込まない。** 状態機械の範囲は他の動画の
   // ものなので、覚えてしまうとステータス行に別動画の範囲が出るうえ、
-  // 「範囲を再生」でこの動画をその位置へ飛ばしてしまう (canAdjustRange と同じ規則)
+  // 「▶ 区間を見る」でこの動画をその位置へ飛ばしてしまう (canAdjustRange と同じ規則)
   const liveSegments =
     state.kind === "idle" ||
     state.kind === "failed" ||
@@ -1503,7 +1503,7 @@ async function playRange(): Promise<void> {
   if (video === null) return;
 
   try {
-    setStatus(`範囲を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
+    setStatus(`区間を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
     cancelPreview = onReachTime(video, range.endSec, () => {
       cancelPreview = null;
       // 登録したときの範囲を今も使っているかを確かめる。解除が漏れていた
@@ -1516,7 +1516,7 @@ async function playRange(): Promise<void> {
       setStatus(rangeLabel(range));
     });
   } catch (error) {
-    setStatus(`範囲を再生できませんでした: ${String(error)}`);
+    setStatus(`区間を再生できませんでした: ${String(error)}`);
   }
 }
 
@@ -2403,6 +2403,12 @@ function onPageMutated(): void {
     // 一覧も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
     // 動画ページ以外へ移ったら、窓もドック枠もページから外れる (refreshWindows → leaveVideoPage)
     refreshLists();
+    // 状態の欄も同じ。B では最初の案内、A へ戻ったら選んでいる区間の範囲 (状態は SPA で移っても届かない)。
+    // 録画中と失敗の文言は上書きしない (それぞれの経路が出している)
+    if (!busy && lastKind !== "failed") {
+      const segment = selectedSegment();
+      setStatus(segment !== null && rangeVideoId === currentVideoId() ? rangeLabel(segment) : INITIAL_STATUS);
+    }
   } else if (!lastHrefIsVideoPage) {
     // 動画ページ以外で URL が変わっていない。外すものは移ったときに外してある (ホームの DOM の変化で毎回何もしない)
     return;

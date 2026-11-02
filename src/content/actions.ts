@@ -3,7 +3,7 @@ import type { ClipEvent, ClipState } from "@/shared/types";
 /**
  * ページ内バーに出す操作。
  *
- * IN / OUT / 範囲を見る は状態に関わらず常に出ている別枠なので、ここには
+ * ＋ 区間を追加 / IN / OUT / ▶ 区間を見る は状態に関わらず常に出ている別枠なので、ここには
  * 含めない。ここに並ぶのは「いまの状態でだけ意味を持つ操作」。
  */
 export type BarAction =

@@ -830,7 +830,7 @@ describe("範囲再生の監視", () => {
   test("範囲を変えた後は、前の範囲の監視で録画が止まらない", async () => {
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
 
-    // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
+    // 区間を再生する。OUT (20 秒) の到達待ちが 1 本張られる
     clickButton("▶ 区間を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
@@ -904,7 +904,7 @@ describe("動画の入れ替わり", () => {
   test("別の動画のタブでは、状態機械の範囲を取り込まない", async () => {
     // 動画 B のタブが読み込み時に問い合わせると、動画 A の範囲を持つ状態が
     // 返ってくる。取り込むと、B のステータス行に A の範囲が出るうえ、
-    // 「範囲を再生」で B を A の開始位置へ飛ばしてしまう
+    // 「▶ 区間を見る」で B を A の開始位置へ飛ばしてしまう
     history.pushState({}, "", "/watch?v=video-b");
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
@@ -913,7 +913,7 @@ describe("動画の入れ替わり", () => {
     expect(rangeBarElement().style.pointerEvents).toBe("none");
     expect(overlay()).toBeNull();
 
-    // 「範囲を再生」を押しても、この動画は動かない
+    // 「▶ 区間を見る」を押しても、この動画は動かない
     const beforeSec = video.element.currentTime;
     clickButton("▶ 区間を見る");
     await flush();
@@ -1239,7 +1239,7 @@ describe("設定 (popup へ移した)", () => {
     // 設定は popup に出す (settings-in-popup spec §3)。窓もドックのタブも作らない
     expect(document.getElementById("yt-clip-settings")).toBeNull();
     expect(document.getElementById("yt-clip-settings-body")).toBeNull();
-    expect(document.getElementById("yt-clip-setting-mode")).toBeNull();
+    expect(document.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
   });
 
   test("channel/get に、動画ページではいま開いている動画のチャンネルを返す", () => {
@@ -1892,6 +1892,44 @@ describe("IN", () => {
 
     expect(clipEvents()).toEqual([]);
     expect(statusText()).toBe("IN が区間の尻 (0:25) より後ろです。新しい区間は ＋ 区間を追加 で作れます");
+  });
+
+  test("区間が無くなったら (idle)、状態の欄を最初の案内に戻す", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:25 (15秒)");
+
+    // 最後の区間を ✕ で消した答え
+    emit({ kind: "idle" });
+    await flush();
+    expect(statusText()).toBe("IN を押して開始位置を指定");
+  });
+
+  test("SPA で別の動画へ移ると状態の欄を最初の案内に戻し、戻ると選んでいる区間の範囲を出す", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+
+    history.pushState({}, "", "/watch?v=video-b");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(statusText()).toBe("IN を押して開始位置を指定");
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:25 (15秒)");
+  });
+
+  test("区間が無いときの OUT は「先に区間を追加してください」と出し、何も送らない", async () => {
+    emit({ kind: "idle" });
+    await flush();
+    sent = [];
+
+    clickButton("OUT");
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("先に区間を追加してください");
   });
 
   test("区間が 1 つでテロップが無ければ、区間の前でも後ろでも IN は作り直す (これまでのシンプルと同じ)", async () => {
@@ -2566,9 +2604,7 @@ describe("拡大バーの下のテロップの帯", () => {
   async function showReady(
     telops: Telop[],
     segments: ClipRange[] = [RANGE],
-    clipMode: "edit" | "simple" = "edit",
   ): Promise<void> {
-    changeSettings({ mode: clipMode });
     emit({ kind: "ready", segments, meta: META_A, telops });
     await flush();
     sent = [];
@@ -2755,12 +2791,12 @@ describe("区間・テロップの窓", () => {
     expect(body.children[0]?.querySelectorAll("[data-role='segment']").length).toBe(1);
     expect(body.children[1]?.querySelector("[data-role='add-telop']")).not.toBeNull();
     expect(body.children[1]?.querySelectorAll("[data-role='telop']").length).toBe(1);
-    expect(body.querySelector("#yt-clip-setting-mode")).toBeNull();
+    expect(body.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
 
     const bar = barElement();
     expect(bar.querySelector("[data-role='segment']")).toBeNull();
     expect(bar.querySelector("[data-role='add-telop']")).toBeNull();
-    expect(bar.querySelector("#yt-clip-setting-mode")).toBeNull();
+    expect(bar.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
     // 並び: 拡大バー → テロップの帯の段 (フロートの窓の spec B.3) → 操作の行
     expect(bar.children.length).toBe(3);
     expect(bar.firstElementChild?.id).toBe("yt-clip-range");
@@ -2783,6 +2819,21 @@ describe("区間・テロップの窓", () => {
   test("区間が 0 個なら区間・テロップの窓を出さない", async () => {
     await flush();
     expect(listElement().hidden).toBe(true);
+  });
+
+  test("バーを 2 回作り直しても、区間・テロップの窓と一覧は 1 つずつ", async () => {
+    await showEdit([TELOP]);
+
+    // YouTube の再描画でバーが外れる場面を 2 回。一覧を足すだけにしていると、作り直すたびに 2 重になる
+    for (let round = 0; round < 2; round += 1) {
+      barElement().remove();
+      document.body.append(document.createElement("div"));
+      await flush();
+    }
+
+    expect(document.querySelectorAll("#yt-clip-list")).toHaveLength(1);
+    expect(listBody().querySelectorAll("[data-role='add-telop']")).toHaveLength(1);
+    expect(listBody().querySelectorAll("[data-role='segment']")).toHaveLength(1);
   });
 
   test("バーを作り直しても、手元の区間で一覧を描き直す", async () => {

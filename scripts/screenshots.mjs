@@ -76,7 +76,10 @@ try {
   });
 
   await bar.getByRole("button", { name: "IN" }).click();
-  await page.locator("#yt-clip-bar-status").waitFor({ timeout: WAIT_TIMEOUT_MS });
+  // IN は状態機械の答えを待って描く (モードを無くした版から楽観描画をやめた)。状態の欄が範囲 (「…秒)」) になり、
+  // 区間・テロップの窓が出るまで待つ。欄そのものは初めからあるので、要素の有無だけを待つとすぐ返って撮り損ねる
+  await page.locator("#yt-clip-bar-status", { hasText: "秒)" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  await page.locator("#yt-clip-list").waitFor({ state: "visible", timeout: WAIT_TIMEOUT_MS });
 
   /**
    * ページの先頭へ戻す。最初の配置ではバーはプレイヤーの直下 (#below の先頭の枠) に
