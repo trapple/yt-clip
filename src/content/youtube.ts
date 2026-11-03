@@ -632,15 +632,19 @@ function applyStateToSelection(): void {
   // (refreshTranscript は 8000 行の比べ直しと placeTranscriptItems を通る)
   const { segments } = listedItems();
   transcriptPanel?.setTrimmingIndex(segments.length === 0 ? -1 : selectedIndex);
-  refreshTrimPanel();
 
+  // 詰める欄は paintRangeBar が新しい区間の窓で描く。先に描くと前の区間の窓の単語で一度描き、単語の段が余分に出入りする
   const segment = selectedSegment();
-  if (segment === null) return;
+  if (segment === null) {
+    refreshTrimPanel();
+    return;
+  }
   try {
     paintRangeBar(segment, getVideo().duration);
     setStatus(rangeLabel(segment));
   } catch (error) {
-    // 選択は変わっている。拡大バーを描けないことは操作を止める理由にならない
+    // 選択は変わっている。拡大バーを描けないことは操作を止める理由にならない。詰める欄は今の窓で描いておく
+    refreshTrimPanel();
     console.warn(`拡大バーを選択に合わせられませんでした: ${String(error)}`);
   }
 }
