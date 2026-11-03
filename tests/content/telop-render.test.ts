@@ -4,6 +4,7 @@ import {
   layoutTelops,
   resolveTelopStyle,
   wrapRow,
+  wrapWidth,
 } from "@/content/telop-render";
 import { TELOP_FONT_PRESETS, type TelopStyle } from "@/shared/telop-style";
 import type { Telop } from "@/shared/types";
@@ -54,14 +55,17 @@ function makeContext() {
 }
 
 describe("layoutTelops", () => {
+  /** 改行だけで行に分ける (折り返しは drawTelops と wrapRow で見る) */
+  const byNewline = (text: string): string[] => text.split("\n");
+
   test("1 行は下中央、下端から高さの 8% 空けた位置に置く", () => {
-    expect(layoutTelops(["a"], 1920, 1080, 64)).toEqual([
+    expect(layoutTelops(["a"], 1920, 1080, 64, byNewline)).toEqual([
       { text: "a", x: 960, y: 1080 - 1080 * 0.08 },
     ]);
   });
 
   test("改行で行を分け、行間は文字サイズの 1.2 倍", () => {
-    const lines = layoutTelops(["上\n下"], 1920, 1080, 100);
+    const lines = layoutTelops(["上\n下"], 1920, 1080, 100, byNewline);
     const bottom = 1080 - 1080 * 0.08;
     expect(lines).toEqual([
       { text: "上", x: 960, y: bottom - 120 },
@@ -70,7 +74,7 @@ describe("layoutTelops", () => {
   });
 
   test("複数のテロップは作った順に下から積む", () => {
-    const lines = layoutTelops(["先", "後"], 1920, 1080, 100);
+    const lines = layoutTelops(["先", "後"], 1920, 1080, 100, byNewline);
     const bottom = 1080 - 1080 * 0.08;
     expect(lines).toEqual([
       { text: "先", x: 960, y: bottom },
@@ -80,21 +84,19 @@ describe("layoutTelops", () => {
 
   test("大きさは動画の高さに比例する (1080 基準)", () => {
     // 540p では 1080p の半分の大きさで、見た目の比率が同じになる
-    const lines = layoutTelops(["上\n下"], 960, 540, 100);
+    const lines = layoutTelops(["上\n下"], 960, 540, 100, byNewline);
     const bottom = 540 - 540 * 0.08;
     expect(lines[0]?.y).toBeCloseTo(bottom - 60);
   });
 
-  test("幅を渡すと、左右に 5% ずつ空けた幅で折り返す", () => {
-    // 幅 1000 の 90% = 900。1 文字 100 なら 9 文字で折り返す
-    const lines = layoutTelops(["一二三四五六七八九十"], 1000, 1080, 100, (text) => [...text].length * 100);
-    expect(lines.map((line) => line.text)).toEqual(["一二三四五六七八九", "十"]);
+  test("折り返す幅は、左右に 5% ずつ空けて縁取りの太さを引いたもの", () => {
+    expect(wrapWidth(1000, 16)).toBe(884);
   });
 
   test("canvas の上に完全に出た行は返さない", () => {
     // 改行だらけの文言でも、描く行数は高さ ÷ 行間で頭打ちになる
     const text = Array.from({ length: 500 }, (_, i) => `行${i}`).join("\n");
-    const lines = layoutTelops([text, "後"], 1920, 1080, 100);
+    const lines = layoutTelops([text, "後"], 1920, 1080, 100, byNewline);
     // 行間 120px、下端 993.6。y > 0 の行だけ残るので 9 行
     expect(lines.length).toBe(9);
     expect(lines.every((line) => line.y > 0)).toBe(true);
@@ -191,7 +193,7 @@ describe("drawTelops", () => {
   });
 
   test("画面の幅に収まらない行は折り返して描く (縁取りの太さも幅に入れる)", () => {
-    // 幅 1920 の 90% = 1728。1 文字 100 + 縁取り 16 なので 17 文字で 1716、18 文字で 1816 を超える
+    // 幅 1920 の 90% = 1728 から縁取り 16 を引いて 1712。1 文字 100 なので 17 文字で 1700、18 文字で 1800 を超える
     const ctx = makeContext();
     const long: Telop = { startSec: 10, endSec: 13, text: "あ".repeat(20) };
     drawTelops(ctx as unknown as CanvasRenderingContext2D, [long], 11, STYLE, 1920, 1080);
@@ -199,7 +201,7 @@ describe("drawTelops", () => {
     expect(filled).toEqual([`fill:${"あ".repeat(17)}`, `fill:${"あ".repeat(3)}`]);
   });
 
-  test("同じ文字の幅は毎フレーム測り直さない", () => {
+  test("同じ文言は毎フレーム折り返し直さない (幅を測り直さない)", () => {
     const ctx = makeContext();
     let measured = 0;
     const measure = ctx.measureText;
