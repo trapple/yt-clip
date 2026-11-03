@@ -46,7 +46,6 @@ import {
   type PanelWindow,
 } from "@/content/panel-window";
 import { createTelopPreview, type TelopPreview } from "@/content/telop-preview";
-import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
 import { YT_SELECTORS } from "@/content/selectors";
 import { createSwitchDriver } from "@/content/switch-driver";
 import {
@@ -300,12 +299,7 @@ let rangeEditable = false;
 let cancelWatch: (() => void) | null = null;
 let cancelPreview: (() => void) | null = null;
 let rangeBar: RangeBar | null = null;
-/**
- * 拡大バーの下のテロップの帯の段 (フロートの窓の spec B)。拡大バーと同じ時間の軸で描くので、
- * 拡大バーと一緒に buildBar が作り直す
- */
-let telopTrack: TelopTrack | null = null;
-/** 詰める欄 (ADR 0001)。拡大バーとテロップの帯を中に抱える。バーと一緒に作り直す */
+/** 詰める欄 (ADR 0001)。拡大バーを中に抱える。バーと一緒に作り直す */
 let trimPanel: TrimPanel | null = null;
 /** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
 let playheadWatched = false;
@@ -759,27 +753,6 @@ async function playTelop(index: number): Promise<void> {
   cancelPreviewWatch();
   if ((await seekAndPlay(telop.startSec)) === null) return;
   setStatus(`テロップ ${index + 1} の頭から再生中…`);
-}
-
-/**
- * 帯のドラッグが確定した (フロートの窓の spec B.2)。帯の段は指を離したときに 1 回だけ、時刻が
- * 変わったときだけ呼ぶ。
- *
- * **応答の状態で受理を確かめる。** 帯は動かした場所に楽観的に描かれているので、拒まれたまま
- * にすると画面と状態が食い違う。拒まれたら正の状態で描き直す (`send` の作法)。テロップは並べ
- * 替えもマージもしないので、受理されれば送った時刻がそのまま載る
- */
-function onTelopDragged(index: number, startSec: number, endSec: number): void {
-  const telop = currentTelops[index];
-  if (telop === undefined || !canEditTelops()) return;
-  if (telop.startSec === startSec && telop.endSec === endSec) return;
-  send(
-    { type: "UPDATE_TELOP", index, telop: { ...telop, startSec, endSec } },
-    (state) =>
-      "telops" in state &&
-      state.telops[index]?.startSec === startSec &&
-      state.telops[index]?.endSec === endSec,
-  );
 }
 
 /**
@@ -1378,12 +1351,11 @@ function attachWindowsToBody(): void {
 }
 
 /**
- * 拡大バーを描き直し、同じ時間の軸で帯の段と詰める欄の単語も描き直す。**拡大バーの窓が変わる経路はここを通す**
- * (帯や単語だけが古い窓のまま残らないように)
+ * 拡大バーを描き直し、同じ時間の軸で詰める欄の単語も描き直す。**拡大バーの窓が変わる経路はここを通す**
+ * (単語だけが古い窓のまま残らないように)
  */
 function paintRangeBar(range: ClipRange, videoDurationSec: number): void {
   rangeBar?.update(range, videoDurationSec);
-  refreshTelopTrack();
   refreshTrimPanel();
 }
 
@@ -1409,38 +1381,11 @@ function refreshTrimPanel(): void {
 }
 
 /**
- * 拡大バーの下のテロップの帯を描き直す (フロートの窓の spec B)。拡大バーを描き直したとき
- * (`paintRangeBar`) と、テロップや出す条件が変わったとき (`refreshLists`) に呼ぶ。
- *
- * 出すテロップは一覧と同じ規則 (`listedItems`: 範囲を作った動画を見ている
- * とき)。拡大バーがまだ窓を持たない (範囲を描く前) ときは渡さない (時間の軸が無い)。
- * 動かせる条件も一覧と同じ (`canEditTelops`)。
- *
- * **1 回の状態通知で 2 回呼ばれうる** (`applyStateToDisplay` が `refreshLists` の後に、拡大バーが
- * ずれていれば `paintRangeBar` も呼ぶ)。同じ入力なら同じ絵になる (冪等) ので、二重呼び出しは不具合ではない
- */
-function refreshTelopTrack(): void {
-  if (telopTrack === null) return;
-  const timeWindow = rangeBar?.window() ?? null;
-  const wasHidden = telopTrack.element.hidden;
-  telopTrack.setEnabled(canEditTelops());
-  telopTrack.update(
-    timeWindow === null ? [] : listedItems().telops,
-    timeWindow ?? { startSec: 0, endSec: 0 },
-  );
-  // 段が出る・消えるとバーの窓の高さが 34px 変わる。つまみ (操作の行) が画面の下へ押し出され
-  // ないよう、置いた場所から詰め直す。**最初の位置は取り直さない** (取り直すきっかけは resize と
-  // プレイヤーの大きさの変化だけ。spec A.2)
-  if (wasHidden !== telopTrack.element.hidden) barWindow.refit();
-}
-
-/**
- * 欄 (区間の見出しと手入力の行)・帯の段・詰める欄を手元の写しに合わせて描き直し、窓を出すかを決め直す。
+ * 欄 (区間の見出しと手入力の行)・詰める欄を手元の写しに合わせて描き直し、窓を出すかを決め直す。
  * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ。詰める欄は refreshTranscript が最後に描く
  */
 function refreshLists(): void {
   refreshTranscript();
-  refreshTelopTrack();
   refreshWindows();
 }
 
@@ -2097,17 +2042,9 @@ function buildBar(): HTMLElement {
   });
   rangeBar.element.id = RANGE_ID;
 
-  // 拡大バーの下のテロップの帯。拡大バーと同じ時間の軸で描くので、拡大バーと一緒に作り直す。
-  // ドラッグ中のシークは拡大バーと同じ onScrub、押して離したときは一覧の ▶ と同じ再生
-  telopTrack = createTelopTrack({
-    onScrub,
-    onCommit: onTelopDragged,
-    onPlay: (index) => void playTelop(index),
-  });
-
-  // 詰める欄 (第 2 版のモック)。拡大バーとテロップの帯はここに入る
+  // 詰める欄 (第 2 版のモック)。拡大バーはここに入る
   trimPanel = createTrimPanel(
-    { rangeBar: rangeBar.element, telopTrack: telopTrack.element },
+    { rangeBar: rangeBar.element },
     {
       onSelect: selectSegment,
       onNudge,
@@ -2132,13 +2069,11 @@ function buildBar(): HTMLElement {
     onRetry: () => transcriptLoader?.retry(),
   });
 
-  // バーは詰める欄 (見出しの行 → 拡大バー → テロップの帯の段 → 単語) → 操作の行。拡大バーは幅がそのまま精度になるので、
-  // 一覧の窓の幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の
-  // spec A.1)。帯の段は拡大バーのトラックの**下**に置く: トラックの中に重ねると、区間のハンドルと
-  // 帯の当たり判定が重なる (spec B.1)
+  // バーは詰める欄 (見出しの行 → 拡大バー → 単語) → 操作の行。拡大バーは幅がそのまま精度になるので、
+  // 一覧の窓の幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の spec A.1)
   bar.append(trimPanel.element, row);
-  // 一覧は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
-  // 足すだけにすると、バーを作り直すたびに古い一覧が残って 2 重になる
+  // 文字起こしの欄は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
+  // 足すだけにすると、バーを作り直すたびに 2 重になる
   listWindow.body.replaceChildren(transcriptPanel.element);
   return bar;
 }
@@ -2470,12 +2405,9 @@ function mount(): void {
   // 前のバーが外されていることがある (YouTube の再描画で枠ごと外れた)。参照だけ差し替えると
   // rAF とリスナを抱えた古いインスタンスが解放されないまま残る
   const previousBar = rangeBar;
-  const previousTrack = telopTrack;
-  // buildBar が rangeBar と telopTrack を新しいインスタンスに差し替える
+  // buildBar が rangeBar を新しいインスタンスに差し替える
   const bar = buildBar();
   previousBar?.destroy();
-  // 帯の段も rAF (シークの間引き) とドラッグのリスナを抱えうる。拡大バーと同じく捨てる
-  previousTrack?.destroy();
 
   // 窓の中身だけを入れ替える。窓は作り直さないので、位置も大きさも変わらない (spec A.3)
   barWindow.body.replaceChildren(bar);
@@ -2832,7 +2764,6 @@ function resetModuleState(): void {
   recordingTelops = null;
   selectedIndex = -1;
   rangeBar = null;
-  telopTrack = null;
   trimPanel = null;
   layoutReady = false;
   // 覚えた配置の写し。start() の loadInitialLayout が読み直す (オフの間に別のタブで動かした位置も拾う)
@@ -2929,11 +2860,10 @@ export function stop(): void {
   // 4. YouTube の要素の中に差したもの: プレイヤーの上の canvas (video の seeked・rVFC・ResizeObserver も) とシークバーの帯
   telopPreview.destroy();
   clearOverlay();
-  // 5. ドック枠 (中の窓ごと外れる) → 拡大バーと帯の段 (rAF と捕捉) → 窓 (resize の listener)。**枠を窓より先に**:
+  // 5. ドック枠 (中の窓ごと外れる) → 拡大バー (rAF と捕捉) → 窓 (resize の listener)。**枠を窓より先に**:
   //    ドック中の窓は枠の根の中にあり、窓の destroy は自分の要素しか外さない
   dockManager.destroy();
   rangeBar?.destroy();
-  telopTrack?.destroy();
   barWindow.destroy();
   listWindow.destroy();
   // 6. 文字起こしの取得 (走っている取得の結末は捨てる) と、写しを最初の値に戻す

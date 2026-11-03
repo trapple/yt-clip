@@ -16,7 +16,7 @@ function wordsOf(line: TranscriptLine): TrimWord[] {
     : [{ startSec: line.startSec, endSec: line.endSec, text: line.text }];
 }
 
-/** 窓に一部でも入る単語。端が接するだけのものは入れない (テロップの帯の `telopsInWindow` と同じ半開区間) */
+/** 窓に一部でも入る単語。端が接するだけのものは入れない (半開区間) */
 export function wordsInWindow(lines: readonly TranscriptLine[], window: TimeWindow): TrimWord[] {
   const words: TrimWord[] = [];
   for (const line of lines) {

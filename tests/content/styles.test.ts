@@ -6,7 +6,7 @@ import {
   FLOATING_WINDOW_STYLE,
   PANEL_WINDOW_STYLE,
   RANGE_STYLE,
-  TELOP_TRACK_STYLE,
+  TRIM_STYLE,
   applyPalette,
   isDarkTheme,
 } from "@/content/styles";
@@ -187,28 +187,14 @@ describe("バーの窓", () => {
   });
 });
 
-describe("テロップの帯の段", () => {
-  test("拡大バーのトラックとの間を 4px に詰め、高さは 2 段ぶん (14 + 2 + 14) に固定する", () => {
-    // バーの縦の並びは gap:10px。-6px で 4px になる (spec B.3。予算 34px)
-    expect(BAR_STYLE.root).toContain("gap:10px");
-    expect(TELOP_TRACK_STYLE.root).toContain("margin-top:-6px");
-    expect(TELOP_TRACK_STYLE.root).toContain("height:30px");
-    expect(TELOP_TRACK_STYLE.band).toContain("height:14px");
-    // 「+N」は 2 段目の高さ (14 + 2) に置く
-    expect(TELOP_TRACK_STYLE.overflow).toContain("top:16px");
-  });
-
-  test("根は display を持たない (出し入れは telop-track.ts が決める)", () => {
-    expect(TELOP_TRACK_STYLE.root).not.toContain("display");
-  });
-
+describe("詰める欄の単語の段", () => {
   test("左右の見えない時刻は、拡大バーのラベルと同じ文字の大きさ・数字の幅・間で並ぶ", () => {
-    // 同じでないと、帯の段の左右が拡大バーのトラックの左右とずれる
+    // 同じでないと、単語の段の左右が拡大バーのトラックの左右とずれる
     for (const rule of ["gap:10px", "font-size:12px", "font-variant-numeric:tabular-nums"]) {
       expect(RANGE_STYLE.root).toContain(rule);
-      expect(TELOP_TRACK_STYLE.root).toContain(rule);
+      expect(TRIM_STYLE.words).toContain(rule);
     }
-    expect(TELOP_TRACK_STYLE.ghost).toContain("visibility:hidden");
+    expect(TRIM_STYLE.ghost).toContain("visibility:hidden");
   });
 });
 

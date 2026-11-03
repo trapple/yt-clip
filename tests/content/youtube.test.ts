@@ -2647,191 +2647,6 @@ describe("テロップの一覧", () => {
 
 });
 
-describe("拡大バーの下のテロップの帯", () => {
-  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
-
-  function track(): HTMLElement {
-    const element = document.querySelector<HTMLElement>(
-      "#yt-clip-bar [data-role='telop-track']",
-    );
-    if (element === null) throw new Error("帯の段がありません");
-    return element;
-  }
-
-  function bands(): HTMLElement[] {
-    return [...track().querySelectorAll<HTMLElement>("[data-role='telop-band']")];
-  }
-
-  function firstBand(): HTMLElement {
-    const band = bands()[0];
-    if (band === undefined) throw new Error("帯がありません");
-    return band;
-  }
-
-  function segmentRows(): HTMLElement[] {
-    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
-  }
-
-  async function showReady(
-    telops: Telop[],
-    segments: ClipRange[] = [RANGE],
-  ): Promise<void> {
-    emit({ kind: "ready", segments, meta: META_A, telops });
-    await flush();
-    sent = [];
-  }
-
-  /**
-   * 拡大バーの窓は 8〜22 秒 (範囲 10〜20 の前後 2 秒)。帯の段の箱を幅 280px (20px/秒) に、
-   * テロップ (11〜14 秒) の帯を 60〜120px に決め打ちする。ほかの要素は 0
-   */
-  function stubLayout() {
-    return vi
-      .spyOn(Element.prototype, "getBoundingClientRect")
-      .mockImplementation(function (this: Element) {
-        const role = this instanceof HTMLElement ? this.dataset.role : undefined;
-        if (role === "telop-lanes") return boxAt(0, 0, 280, 30);
-        if (role === "telop-band") return boxAt(60, 0, 60, 14);
-        return boxAt(0, 0, 0, 0);
-      });
-  }
-
-  function updateTelopEvents(): unknown[] {
-    return clipEvents().filter(
-      (event) => (event as { type: string }).type === "UPDATE_TELOP",
-    );
-  }
-
-  test("拡大バーの窓に入るテロップを拡大バーの直下に帯で出す", async () => {
-    await showReady([TELOP, { startSec: 100, endSec: 103, text: "窓の外" }]);
-
-    expect(track().hidden).toBe(false);
-    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
-    expect(track().previousElementSibling?.id).toBe("yt-clip-range");
-  });
-
-  test("テロップが 1 つも無ければ段ごと出さない (バーを高くしない)", async () => {
-    await showReady([]);
-
-    expect(track().hidden).toBe(true);
-  });
-
-  test("区間を選び直すと、選んだ区間の拡大バーの窓で帯を描き直す", async () => {
-    await showReady(
-      [TELOP, { startSec: 205, endSec: 208, text: "二つ目" }],
-      [RANGE, { startSec: 200, endSec: 215 }],
-    );
-    // 状態の通知では選択は動かない (selectedIndex はテストをまたいで残り、index 0 = RANGE のまま)。
-    // 行を押して区間 2 (200〜215、窓 198〜217) を選ぶ
-    segmentRows()[1]?.click();
-    expect(bands().map((band) => band.textContent)).toEqual(["二つ目"]);
-
-    segmentRows()[0]?.click();
-
-    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
-  });
-
-  test("帯の中をドラッグすると、指を離したときに UPDATE_TELOP を 1 回だけ送る", async () => {
-    await showReady([TELOP]);
-    const spy = stubLayout();
-    try {
-      const band = firstBand();
-      pointer(band, "pointerdown", 90, 5);
-      pointer(band, "pointermove", 110, 5);
-      pointer(band, "pointermove", 130, 5);
-      // 動かしている間は送らない (区間の拡大バーと同じ。往復を増やさない)
-      expect(updateTelopEvents()).toEqual([]);
-      pointer(band, "pointerup", 130, 5);
-    } finally {
-      spy.mockRestore();
-    }
-
-    // 40px = 2 秒。長さ (3 秒) と文言は保つ
-    expect(updateTelopEvents()).toEqual([
-      {
-        type: "UPDATE_TELOP",
-        index: 0,
-        telop: { startSec: 13, endSec: 16, text: "こんにちは" },
-      },
-    ]);
-  });
-
-  test("帯のドラッグが拒否されたとき、帯を状態機械側の時刻へ戻す", async () => {
-    await showReady([TELOP]);
-    const spy = stubLayout();
-    const before = firstBand().style.left;
-    try {
-      const band = firstBand();
-      pointer(band, "pointerdown", 90, 5);
-      pointer(band, "pointermove", 130, 5);
-      // 指を離す直前に、別タブで録画が始まって service worker 側の状態だけが進んだ場面を作る。
-      // emit は使わない (content script にも通知してしまい、このレースを起こせない)
-      swState = { kind: "recording", segments: [RANGE], telops: [TELOP], meta: META_A };
-      pointer(band, "pointerup", 130, 5);
-    } finally {
-      spy.mockRestore();
-    }
-    await flush();
-
-    // 状態機械は録画中で UPDATE_TELOP を受け付けない。応答の状態 (recording・元の時刻) は
-    // 変わらないので、拒まれたことが応答でしか分からない (state/changed は飛んでこない)
-    expect(swState.kind).toBe("recording");
-    expect(statusText()).toContain("受け付けられませんでした");
-    // 送った時刻 (13〜16 秒) ではなく、状態機械が持つ元の時刻 (11〜14 秒) へ戻る
-    expect(firstBand().style.left).toBe(before);
-  });
-
-  test("帯を押して動かさずに離すと、そのテロップの頭から再生する", async () => {
-    await showReady([TELOP]);
-    const spy = stubLayout();
-    try {
-      const band = firstBand();
-      pointer(band, "pointerdown", 90, 5);
-      pointer(band, "pointerup", 91, 5);
-    } finally {
-      spy.mockRestore();
-    }
-    await flush();
-
-    expect(updateTelopEvents()).toEqual([]);
-    expect(video.element.currentTime).toBe(11);
-    expect(statusText()).toBe("テロップ 1 の頭から再生中…");
-  });
-
-  test("preview では帯を薄く出し、動かしも再生もしない", async () => {
-    // 区間の拡大バーと同じ条件 (canEditTelops)。テロップだけ触れる非対称を作らない
-    emit({
-      kind: "preview",
-      clipId: "clip-1",
-      mimeType: "video/mp4",
-      segments: [RANGE],
-      meta: META_A,
-      telops: [TELOP],
-    });
-    await flush();
-    sent = [];
-
-    expect(track().hidden).toBe(false);
-    expect(track().style.opacity).toBe("0.4");
-
-    const spy = stubLayout();
-    try {
-      const band = firstBand();
-      pointer(band, "pointerdown", 90, 5);
-      pointer(band, "pointermove", 130, 5);
-      pointer(band, "pointerup", 130, 5);
-      pointer(band, "pointerdown", 90, 5);
-      pointer(band, "pointerup", 90, 5);
-    } finally {
-      spy.mockRestore();
-    }
-    await flush();
-
-    expect(clipEvents()).toEqual([]);
-    expect(statusText()).not.toBe("テロップ 1 の頭から再生中…");
-  });
-});
-
 describe("区間・テロップの窓", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
 
@@ -2869,12 +2684,13 @@ describe("区間・テロップの窓", () => {
     expect(bar.querySelector("[data-role='segment']")).toBeNull();
     expect(bar.querySelector("[data-role='add-telop']")).toBeNull();
     expect(bar.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
-    // 並び: 詰める欄 (見出しの行 → 拡大バー → テロップの帯の段 (フロートの窓の spec B.3) → 単語) → 操作の行
+    // 並び: 詰める欄 (見出しの行 → 拡大バー → 単語) → 操作の行
     expect(bar.children.length).toBe(2);
     const trim = bar.firstElementChild as HTMLElement;
     expect(trim.dataset.role).toBe("trim");
     expect(trim.children[1]?.id).toBe("yt-clip-range");
-    expect(trim.children[2]?.getAttribute("data-role")).toBe("telop-track");
+    expect(trim.children[2]?.getAttribute("data-role")).toBe("trim-words");
+    expect(document.querySelector("[data-role='telop-track']")).toBeNull();
     expect(
       bar.lastElementChild?.contains(document.getElementById("yt-clip-bar-status")),
     ).toBe(true);
@@ -4657,12 +4473,12 @@ describe("詰める欄", () => {
     sent = [];
   }
 
-  test("バーの窓は詰める欄と操作の行。詰める欄の中に拡大バーとテロップの帯が入る", async () => {
+  test("バーの窓は詰める欄と操作の行。詰める欄の中に拡大バーが入り、テロップの帯は無い", async () => {
     await showTwo();
     const trim = trimPart("trim");
     expect(trim.parentElement?.id).toBe("yt-clip-bar");
     expect(trim.contains(rangeBarElement())).toBe(true);
-    expect(trim.querySelector("[data-role='telop-track']")).not.toBeNull();
+    expect(trim.querySelector("[data-role='telop-track']")).toBeNull();
   });
 
   test("選んでいる区間を見出しに出し、‹ で前の区間へ移る", async () => {

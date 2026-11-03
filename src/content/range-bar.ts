@@ -56,7 +56,7 @@ export type RangeBar = {
   setPlayhead(sec: number | null): void;
   /**
    * 今映している時間の窓。**まだ update していなければ null** (初期値の 0〜0 は軸にならない)。
-   * 拡大バーの下のテロップの帯が、同じ時間の軸で帯を置くために読む (フロートの窓の spec B.3)
+   * 詰める欄が、同じ時間の軸で単語を並べるために読む
    */
   window(): TimeWindow | null;
   destroy(): void;
@@ -68,9 +68,9 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
   // 初期状態は無効。見た目 (薄さ) と実際の操作可否を最初から一致させる
   element.style.cssText = `${RANGE_STYLE.root}${RANGE_STYLE.disabled}`;
 
-  // 窓の左端・右端の時刻。**素の span のまま、見た目は RANGE_STYLE.root から継ぐ。** telop-track.ts が
-  // 同じ時刻を同じ幅の見えない span で左右に置き、帯の段をトラックの左右に揃えている。ここに style を
-  // 足すなら、TELOP_TRACK_STYLE.ghost にも同じものを足す (足さないと帯とトラックの左右がずれる)
+  // 窓の左端・右端の時刻。**素の span のまま、見た目は RANGE_STYLE.root から継ぐ。** 詰める欄の単語の段
+  // (trim-panel.ts) が同じ時刻を同じ幅の見えない span で左右に置き、トラックの左右に揃えている。ここに style を
+  // 足すなら、TRIM_STYLE.ghost にも同じものを足す (足さないと単語の段とトラックの左右がずれる)
   const startLabel = document.createElement("span");
   const endLabel = document.createElement("span");
 

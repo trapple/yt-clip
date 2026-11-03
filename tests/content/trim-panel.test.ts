@@ -22,9 +22,7 @@ function mount(view: TrimView = VIEW) {
   const callbacks = { onSelect: vi.fn(), onNudge: vi.fn(), onPlayAround: vi.fn() };
   const rangeBar = document.createElement("div");
   rangeBar.id = "range";
-  const telopTrack = document.createElement("div");
-  telopTrack.id = "track";
-  const panel = createTrimPanel({ rangeBar, telopTrack }, callbacks);
+  const panel = createTrimPanel({ rangeBar }, callbacks);
   document.body.append(panel.element);
   panel.update(view);
   panel.setEnabled(true);
@@ -105,10 +103,10 @@ describe("見出しの行", () => {
 });
 
 describe("中身の並び", () => {
-  test("見出しの行 → 拡大バー → テロップの帯 → 単語", () => {
+  test("見出しの行 → 拡大バー → 単語", () => {
     const { panel } = mount();
     const ids = [...panel.element.children].map((child) => child.id || (child as HTMLElement).dataset.role);
-    expect(ids).toEqual(["trim-head", "range", "track", "trim-words"]);
+    expect(ids).toEqual(["trim-head", "range", "trim-words"]);
   });
 });
 
