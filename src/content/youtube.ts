@@ -469,6 +469,12 @@ function rangeLabel(range: ClipRange): string {
 /** 状態の欄の最初の案内。区間が無いときに出す */
 const INITIAL_STATUS = "IN を押して開始位置を指定";
 
+/** 操作が通ったときの状態の欄。選んでいる区間があればその範囲、無ければ最初の案内 (前の操作の理由を残さない) */
+function restingStatus(): string {
+  const segment = selectedSegment();
+  return segment === null ? INITIAL_STATUS : rangeLabel(segment);
+}
+
 /** 同じ範囲を指しているか。別のオブジェクトでも値が同じなら同じ範囲 */
 function sameRange(a: ClipRange, b: ClipRange): boolean {
   return a.startSec === b.startSec && a.endSec === b.endSec;
@@ -622,17 +628,23 @@ function startOver(): void {
  * 選び直しは状態の変化ではないので、`send` を通すと往復のぶん反応が遅れる
  */
 function applyStateToSelection(): void {
-  // 欄に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
-  // 欄の見出しの「· 詰めている」を選び直した区間に合わせる (refreshTranscript は最後に詰める欄も描く)
-  refreshTranscript();
+  // 選び直しで変わるのは「· 詰めている」と詰める欄だけ。欄の行は区間から決まり、選択では変わらない
+  // (refreshTranscript は 8000 行の比べ直しと placeTranscriptItems を通る)
+  const { segments } = listedItems();
+  transcriptPanel?.setTrimmingIndex(segments.length === 0 ? -1 : selectedIndex);
 
+  // 詰める欄は paintRangeBar が新しい区間の窓で描く。先に描くと前の区間の窓の単語で一度描き、単語の段が余分に出入りする
   const segment = selectedSegment();
-  if (segment === null) return;
+  if (segment === null) {
+    refreshTrimPanel();
+    return;
+  }
   try {
     paintRangeBar(segment, getVideo().duration);
     setStatus(rangeLabel(segment));
   } catch (error) {
-    // 選択は変わっている。拡大バーを描けないことは操作を止める理由にならない
+    // 選択は変わっている。拡大バーを描けないことは操作を止める理由にならない。詰める欄は今の窓で描いておく
+    refreshTrimPanel();
     console.warn(`拡大バーを選択に合わせられませんでした: ${String(error)}`);
   }
 }
@@ -714,7 +726,8 @@ function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
     setStatus("開始は終了より前にしてください");
     return;
   }
-  sendIndexed({ type: "UPDATE_TELOP", index, telop: next });
+  // 送れたら、前の操作の理由 (「開始は終了より前に」・「答えを待っています」) を消す
+  if (sendIndexed({ type: "UPDATE_TELOP", index, telop: next })) setStatus(restingStatus());
 }
 
 /**
@@ -2088,6 +2101,8 @@ function buildBar(): HTMLElement {
       onSelect: selectSegment,
       onNudge,
       onPlayAround: (kind) => void playAround(kind),
+      // 単語の段の出し入れでバーの背が 20px ほど変わる。浮いた窓が画面の下からはみ出さないよう詰め直す (枠の中では何もしない)
+      onHeightChange: () => barWindow.refit(),
     },
   );
 

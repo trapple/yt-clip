@@ -453,3 +453,230 @@ describe("区間の見出しと手入力の行 (段階 1c-2)", () => {
     expect(header()).toBe(before);
   });
 });
+
+describe("検索 (ADR 0004)", () => {
+  const searchInput = (): HTMLInputElement => role("search-input") as HTMLInputElement;
+  const type = (text: string): void => {
+    searchInput().value = text;
+    searchInput().dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const hits = (): (string | undefined)[] => rows().map((row) => row.dataset.hit);
+  const marks = (index: number): string[] =>
+    [...(rows()[index]?.querySelectorAll("[data-role='search-mark']") ?? [])].map((mark) => mark.textContent ?? "");
+  const many = (): TranscriptView =>
+    view({
+      rows: [
+        { id: "a", startSec: 1, text: "右から回る", selected: false, hidden: false, hasTelop: false },
+        { id: "b", startSec: 5, text: "左に寄せた", selected: false, hidden: false, hasTelop: false },
+        { id: "c", startSec: 9, text: "やっぱり右、右", selected: false, hidden: false, hasTelop: false },
+      ],
+    });
+
+  test("検索欄は欄の見出しの下にあり、モックの文言を出す", () => {
+    const { panel } = setup();
+    panel.update(view());
+    expect(searchInput().placeholder).toBe("⌕ 文字起こしを検索");
+    const children = [...panel.element.children];
+    expect(children.indexOf(role("transcript-search")!)).toBe(1);
+  });
+
+  test("打つと当たった語に印を付け、行で数える。1 件目が今の当たり", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    expect(hits()).toEqual(["current", undefined, "true"]);
+    expect(marks(0)).toEqual(["右"]);
+    expect(marks(2)).toEqual(["右", "右"]);
+    expect(role("search-count")?.textContent).toBe("1 / 2");
+    // 印の外の文字も残る
+    expect(part(2, "line-text")?.textContent).toBe("やっぱり右、右");
+  });
+
+  test("Enter で次、Shift + Enter で前。端で反対の端へ戻る", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    key(searchInput(), { key: "Enter" });
+    expect(hits()).toEqual(["true", undefined, "current"]);
+    expect(role("search-count")?.textContent).toBe("2 / 2");
+    key(searchInput(), { key: "Enter" });
+    expect(hits()).toEqual(["current", undefined, "true"]);
+    key(searchInput(), { key: "Enter", shiftKey: true });
+    expect(hits()).toEqual(["true", undefined, "current"]);
+  });
+
+  test("↑ ↓ のボタンでも移る", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    role("search-next")?.click();
+    expect(role("search-count")?.textContent).toBe("2 / 2");
+    role("search-prev")?.click();
+    expect(role("search-count")?.textContent).toBe("1 / 2");
+  });
+
+  test("↓ ↑ のキーでも移る", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    key(searchInput(), { key: "ArrowDown" });
+    expect(role("search-count")?.textContent).toBe("2 / 2");
+    key(searchInput(), { key: "ArrowUp" });
+    expect(role("search-count")?.textContent).toBe("1 / 2");
+  });
+
+  test("修飾キー付きの ↑ ↓ は文字の選択に渡し、当たりを移らない", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    // 1 回ごとに見る (偶数回まとめて押すと、2 件を 1 周して同じ所に戻り見分けられない)
+    for (const init of [{ shiftKey: true }, { metaKey: true }, { ctrlKey: true }, { altKey: true }]) {
+      key(searchInput(), { key: "ArrowDown", ...init });
+      expect(role("search-count")?.textContent).toBe("1 / 2");
+    }
+  });
+
+  test("揃えると同じ文字 (後ろに空白を打った) なら、今の当たりを 1 件目へ戻さない", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    key(searchInput(), { key: "Enter" });
+    type("右 ");
+    expect(role("search-count")?.textContent).toBe("2 / 2");
+  });
+
+  test("当たらなければ「0 件」で、↑ ↓ は押せない", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("上");
+    expect(role("search-count")?.textContent).toBe("0 件");
+    expect((role("search-next") as HTMLButtonElement).disabled).toBe(true);
+    expect((role("search-prev") as HTMLButtonElement).disabled).toBe(true);
+    expect(hits()).toEqual([undefined, undefined, undefined]);
+  });
+
+  test("全角で打っても半角に当たる", () => {
+    const { panel } = setup();
+    panel.update(view({ rows: [{ id: "a", startSec: 1, text: "Game Over", selected: false, hidden: false, hasTelop: false }] }));
+    type("ｇａｍｅ");
+    expect(marks(0)).toEqual(["Game"]);
+  });
+
+  test("Esc と ✕ で消し、印を外す", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    key(searchInput(), { key: "Escape" });
+    expect(searchInput().value).toBe("");
+    expect(hits()).toEqual([undefined, undefined, undefined]);
+    expect(role("search-count")?.textContent).toBe("");
+    type("右");
+    role("search-clear")?.click();
+    expect(searchInput().value).toBe("");
+    expect(marks(0)).toEqual([]);
+  });
+
+  test("検索欄のキーは YouTube へ渡さない。IME の変換中の Enter では移らない", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    const onDocument = vi.fn();
+    document.addEventListener("keydown", onDocument);
+    key(searchInput(), { key: "k" });
+    key(searchInput(), { key: "Enter", isComposing: true });
+    document.removeEventListener("keydown", onDocument);
+    expect(onDocument).not.toHaveBeenCalled();
+    expect(role("search-count")?.textContent).toBe("1 / 2");
+  });
+
+  test("飛んだ行を欄の中で見える所へ送る (ページは動かさない)", () => {
+    const { panel } = setup();
+    panel.update(many());
+    const list = role("transcript-lines")!;
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 300 });
+    Object.defineProperty(rows()[2]!, "offsetTop", { configurable: true, value: 1000 });
+    type("右");
+    key(searchInput(), { key: "Enter" });
+    expect(list.scrollTop).toBe(900);
+  });
+
+  test("状態が届いて文字が変わっても検索は残り、今の当たりは行の id で保つ", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    key(searchInput(), { key: "Enter" });
+    const next = many();
+    next.rows[0] = { ...next.rows[0]!, text: "上から回る", selected: true, hasTelop: true };
+    panel.update(next);
+    expect(searchInput().value).toBe("右");
+    expect(hits()).toEqual([undefined, undefined, "current"]);
+    expect(role("search-count")?.textContent).toBe("1 / 1");
+  });
+
+  test("印の文字もタグとして解釈しない", () => {
+    const { panel } = setup();
+    panel.update(view({ rows: [{ id: "x", startSec: 0, text: "<b>右</b>", selected: false, hidden: false, hasTelop: false }] }));
+    type("右");
+    expect(document.querySelector("b")).toBeNull();
+    expect(part(0, "line-text")?.textContent).toBe("<b>右</b>");
+  });
+
+  test("直している行は直す欄を出し、印は付けない (検索を消すと直す欄のまま)", () => {
+    const { panel } = setup();
+    panel.update(view());
+    part(1, "line-edit-button")?.click();
+    type("右");
+    expect(rows()[1]?.querySelector("[data-role='line-edit']")).not.toBeNull();
+    expect(marks(1)).toEqual([]);
+  });
+
+  test("文字起こしが無い・取っている間・取れなかったときは押せず、検索の文字を消す", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    panel.update(view({ header: { kind: "loading" }, rows: [] }));
+    expect(searchInput().disabled).toBe(true);
+    expect(searchInput().value).toBe("");
+    panel.update(view({ header: { kind: "none" }, rows: [] }));
+    expect(searchInput().disabled).toBe(true);
+    panel.update(view({ header: { kind: "failed", reason: "x" }, rows: [] }));
+    expect(searchInput().disabled).toBe(true);
+    panel.update(many());
+    expect(searchInput().disabled).toBe(false);
+  });
+
+  test("録画中 (enabled: false) も探せる", () => {
+    const { panel } = setup();
+    panel.update({ ...many(), enabled: false });
+    expect(searchInput().disabled).toBe(false);
+    type("右");
+    expect(role("search-count")?.textContent).toBe("1 / 2");
+  });
+});
+
+describe("setTrimmingIndex", () => {
+  const segmentItems = (): TranscriptView["items"] => [
+    { kind: "segment", index: 0, startSec: 0.8, endSec: 2, before: 0 },
+    { kind: "segment", index: 1, startSec: 64.8, endSec: 73.3, before: 1 },
+  ];
+
+  test("見出しの「· 詰めている」だけを付け替え、行の要素は描き直さない", () => {
+    const { panel } = setup();
+    panel.update(view({ items: segmentItems(), trimmingIndex: 0 }));
+    const lineText = part(1, "line-text");
+    const titles = (): (string | null)[] =>
+      [...document.querySelectorAll("[data-role='segment-title']")].map((title) => title.textContent);
+    expect(titles()).toEqual(["区間 1 · 詰めている", "区間 2"]);
+    panel.setTrimmingIndex(1);
+    expect(titles()).toEqual(["区間 1", "区間 2 · 詰めている"]);
+    expect(part(1, "line-text")).toBe(lineText);
+  });
+
+  test("同じ index なら見出しも作り直さない", () => {
+    const { panel } = setup();
+    panel.update(view({ items: segmentItems(), trimmingIndex: 0 }));
+    const header = document.querySelector("[data-role='segment']");
+    panel.setTrimmingIndex(0);
+    expect(document.querySelector("[data-role='segment']")).toBe(header);
+  });
+});

@@ -198,6 +198,15 @@ export const TRANSCRIPT_STYLE = {
   outside: "color:var(--ytc-text-sub);font-size:11px;",
   edit: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;user-select:text;`,
   textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
+  /** 検索欄の行。見出しの下に置く */
+  search: "display:flex;align-items:center;gap:4px;",
+  searchInput: `flex:1;min-width:0;height:26px;box-sizing:border-box;border:1px solid var(--ytc-border);border-radius:13px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:12px;padding:0 10px;user-select:text;`,
+  searchCount: "color:var(--ytc-text-sub);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;min-width:3.5em;text-align:right;",
+  /** 当たった語。地の色は区間に入った行 (surface) の上でも見えるよう accent を薄く重ねる */
+  searchMark: "background:color-mix(in srgb, var(--ytc-accent) 30%, transparent);color:inherit;border-radius:2px;padding:0;",
+  /** 当たりの行と今の当たりの行。区間の印 (左の線・地) と重ねて付ける */
+  rowHit: "box-shadow:inset 0 0 0 1px var(--ytc-border);",
+  rowCurrentHit: "box-shadow:inset 0 0 0 2px var(--ytc-accent);",
 } as const;
 
 /**

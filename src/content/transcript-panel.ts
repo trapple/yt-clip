@@ -1,5 +1,6 @@
 import { TRANSCRIPT_STYLE } from "@/content/styles";
 import type { ManualTelopItem, SegmentHeaderItem, TranscriptItem } from "@/content/transcript-items";
+import { findMatches, normalizeForSearch, normalizeQuery, type MatchRange, type NormalizedText } from "@/content/transcript-search";
 import { formatSecTenths, formatTime, formatTimeCentis } from "@/shared/time";
 
 /**
@@ -81,6 +82,8 @@ export type TranscriptPanel = {
   editManual(telopIndex: number): void;
   /** 見出しか手入力の行を欄の中で見える所へ送り、その要素を返す (無ければ null)。窓のスクロールは youtube.ts が決める */
   reveal(target: RevealTarget): HTMLElement | null;
+  /** 詰めている区間だけが変わった (見出しや ‹ › で選び直した)。見出しだけを描き直す (8000 行を比べ直さない) */
+  setTrimmingIndex(index: number): void;
 };
 
 /** 手でスクロールした後、自動で追わない時間 (ミリ秒) */
@@ -102,6 +105,9 @@ const manualIndexOf = (id: string): number | null => (id.startsWith("manual:") ?
 const manualOrder = (items: readonly TranscriptItem[]): string =>
   JSON.stringify(items.flatMap((item) => (item.kind === "manual" ? [item.telopIndex] : [])));
 
+/** 検索の当たり (ADR 0004)。今の当たりはほかの当たりより強い印 */
+type Hit = "none" | "hit" | "current";
+
 /** 行 1 つ分の要素。描いた中身 (`row`) を覚えておき、変わったところだけ直す */
 type RowParts = {
   element: HTMLElement;
@@ -110,6 +116,10 @@ type RowParts = {
   body: HTMLElement;
   actions: HTMLElement;
   row: TranscriptRow | null;
+  /** 描いたときの当たり (印の出し直しが要るかを見る) */
+  hit: Hit;
+  /** 描いたときの検索の文字 (当たりの行だけ。ほかは "") */
+  query: string;
 };
 
 function sameIds(parts: RowParts[], rows: TranscriptRow[]): boolean {
@@ -138,6 +148,23 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
   });
   header.append(title, source, addManual);
 
+  // 検索欄 (ADR 0004)。行は全部残し、当たりに印を付けて飛ぶ
+  const search = document.createElement("div");
+  search.dataset.role = "transcript-search";
+  search.style.cssText = TRANSCRIPT_STYLE.search;
+  const searchInput = document.createElement("input");
+  searchInput.type = "text";
+  searchInput.dataset.role = "search-input";
+  searchInput.placeholder = "⌕ 文字起こしを検索";
+  searchInput.style.cssText = TRANSCRIPT_STYLE.searchInput;
+  const searchCount = document.createElement("span");
+  searchCount.dataset.role = "search-count";
+  searchCount.style.cssText = TRANSCRIPT_STYLE.searchCount;
+  const searchPrev = makeButton("search-prev", "↑", "前の当たり (Shift + Enter)");
+  const searchNext = makeButton("search-next", "↓", "次の当たり (Enter)");
+  const searchClear = makeButton("search-clear", "✕", "検索を消す (Esc)");
+  search.append(searchInput, searchCount, searchPrev, searchNext, searchClear);
+
   const notice = document.createElement("div");
   notice.dataset.role = "transcript-notice";
   notice.style.cssText = TRANSCRIPT_STYLE.notice;
@@ -147,7 +174,7 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
   list.dataset.role = "transcript-lines";
   list.style.cssText = TRANSCRIPT_STYLE.lines;
 
-  element.append(header, notice, dubbedBox, list);
+  element.append(header, search, notice, dubbedBox, list);
 
   let view: TranscriptView = {
     header: { kind: "loading" },
@@ -175,6 +202,121 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
   let parts: RowParts[] = [];
   let userScrolledAt = Number.NEGATIVE_INFINITY;
   let scrollingByUs = false;
+
+  /** 揃えた検索の文字。"" なら探していない */
+  let query = "";
+  /** 当たった行の位置 (view.rows の index。早い順) */
+  let hits: number[] = [];
+  /** 当たった行の index → 当たりの範囲 (元の文字の位置)。数えたときの範囲を描くときにも使う (2 度探さない) */
+  let hitRanges = new Map<number, MatchRange[]>();
+  /** 今の当たり (hits の index)。無ければ -1 */
+  let hitIndex = -1;
+  /** 行の文字を揃えたもの。打つたびに 8000 行を揃え直さない。行の並びが変わったら捨てる */
+  let normalizedCache = new Map<string, NormalizedText>();
+
+  function normalized(text: string): NormalizedText {
+    let found = normalizedCache.get(text);
+    if (found === undefined) {
+      found = normalizeForSearch(text);
+      normalizedCache.set(text, found);
+    }
+    return found;
+  }
+
+  function currentHitId(): string | null {
+    return hitIndex < 0 ? null : (view.rows[hits[hitIndex]!]?.id ?? null);
+  }
+
+  /** 当たりを数え直す。keepId の行がまだ当たっていればそこを今の当たりにし、無ければ 1 件目 */
+  function recomputeHits(keepId: string | null): void {
+    hits = [];
+    hitRanges = new Map();
+    if (query !== "") {
+      view.rows.forEach((row, i) => {
+        const ranges = findMatches(normalized(row.text), query);
+        if (ranges.length === 0) return;
+        hits.push(i);
+        hitRanges.set(i, ranges);
+      });
+    }
+    const kept = keepId === null ? -1 : hits.findIndex((i) => view.rows[i]!.id === keepId);
+    hitIndex = hits.length === 0 ? -1 : Math.max(kept, 0);
+  }
+
+  /** その行の当たり。描く側 (paintRow) が使う */
+  function hitOf(index: number): Hit {
+    if (!hitRanges.has(index)) return "none";
+    return hits[hitIndex] === index ? "current" : "hit";
+  }
+
+  function renderSearch(): void {
+    searchInput.disabled = view.header.kind !== "ready" || view.rows.length === 0;
+    searchCount.textContent = query === "" ? "" : hits.length === 0 ? "0 件" : `${hitIndex + 1} / ${hits.length}`;
+    searchPrev.disabled = hits.length === 0;
+    searchNext.disabled = hits.length === 0;
+    searchClear.disabled = searchInput.value === "";
+  }
+
+  function jumpToHit(): void {
+    const row = hitIndex < 0 ? undefined : parts[hits[hitIndex]!]?.element;
+    if (row !== undefined) scrollIntoList(row);
+  }
+
+  function setQuery(raw: string): void {
+    const next = normalizeQuery(raw);
+    // 揃えると前と同じ (前後の空白を打った・消した、IME の確定の後の input)。今の当たりを 1 件目へ戻さない
+    if (next === query) {
+      renderSearch();
+      return;
+    }
+    query = next;
+    recomputeHits(null);
+    patchRows();
+    renderSearch();
+    jumpToHit();
+  }
+
+  /** 次・前の当たりへ。印が変わるのは前の今の当たりと新しい今の当たりの 2 行だけなので、その 2 行だけ描く */
+  function step(delta: number): void {
+    if (hits.length === 0) return;
+    const previous = hits[hitIndex]!;
+    hitIndex = (hitIndex + delta + hits.length) % hits.length;
+    for (const index of [previous, hits[hitIndex]!]) {
+      const part = parts[index];
+      const row = view.rows[index];
+      if (part !== undefined && row !== undefined) paintRow(part, row, index);
+    }
+    renderSearch();
+    jumpToHit();
+  }
+
+  function clearSearch(): void {
+    searchInput.value = "";
+    setQuery("");
+  }
+
+  searchInput.addEventListener("input", () => setQuery(searchInput.value));
+  searchInput.addEventListener("keydown", (event) => {
+    // ページのショートカット (YouTube の k / j など) に流さない
+    event.stopPropagation();
+    // IME の変換を確かめる Enter / 取り消す Esc / 候補を選ぶ ↑↓ は、検索欄のものではない
+    if (event.isComposing || event.keyCode === 229) return;
+    // 修飾キー付きの ↑ ↓ (Shift で選ぶ・Cmd で端へ) は検索欄の文字の操作に渡す
+    const plainArrow = !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey;
+    if ((event.key === "Enter" && !event.shiftKey) || (event.key === "ArrowDown" && plainArrow)) {
+      event.preventDefault();
+      step(1);
+    } else if ((event.key === "Enter" && event.shiftKey) || (event.key === "ArrowUp" && plainArrow)) {
+      event.preventDefault();
+      step(-1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      clearSearch();
+    }
+  });
+  searchPrev.addEventListener("click", () => step(-1));
+  searchNext.addEventListener("click", () => step(1));
+  searchClear.addEventListener("click", () => clearSearch());
 
   list.addEventListener("scroll", () => {
     if (scrollingByUs) {
@@ -336,7 +478,7 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     const actions = document.createElement("span");
     actions.style.cssText = TRANSCRIPT_STYLE.actions;
     rowElement.append(now, time, body, actions);
-    return { element: rowElement, now, time, body, actions, row: null };
+    return { element: rowElement, now, time, body, actions, row: null, hit: "none", query: "" };
   }
 
   function paintCurrent(part: RowParts, current: boolean): void {
@@ -345,27 +487,52 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     part.time.style.cssText = current ? TRANSCRIPT_STYLE.timeCurrent : TRANSCRIPT_STYLE.time;
   }
 
-  /** 1 行を描く。前に描いた中身と同じ (直す欄の出し入れも無い) なら何もしない */
-  function paintRow(part: RowParts, row: TranscriptRow): void {
+  /** 当たりの印 (行の data-hit と地・線) を付ける */
+  function paintHitMark(part: RowParts, row: TranscriptRow, hit: Hit): void {
+    if (hit === "none") delete part.element.dataset.hit;
+    else part.element.dataset.hit = hit === "current" ? "current" : "true";
+    const hitStyle = hit === "current" ? TRANSCRIPT_STYLE.rowCurrentHit : hit === "hit" ? TRANSCRIPT_STYLE.rowHit : "";
+    part.element.style.cssText = (row.selected ? TRANSCRIPT_STYLE.rowSelected : TRANSCRIPT_STYLE.row) + hitStyle;
+  }
+
+  function paintBodyText(part: RowParts, row: TranscriptRow, index: number, hit: Hit): void {
+    part.body.dataset.role = "line-text";
+    paintText(part.body, row.text, hit === "none" ? [] : (hitRanges.get(index) ?? []));
+    part.body.style.cssText = row.hidden ? TRANSCRIPT_STYLE.textHidden : TRANSCRIPT_STYLE.text;
+  }
+
+  /** 1 行を描く。前に描いた中身と同じ (直す欄の出し入れも当たりも同じ) なら何もしない */
+  function paintRow(part: RowParts, row: TranscriptRow, index: number): void {
     const before = part.row;
     const isEditing = editing?.id === row.id;
     const wasEditing = part.body.dataset.role === "line-edit";
-    if (
+    const hit = hitOf(index);
+    const hitQuery = hit === "none" ? "" : query;
+    const sameRow =
       before !== null &&
       before.selected === row.selected &&
       before.hidden === row.hidden &&
       before.text === row.text &&
       before.hasTelop === row.hasTelop &&
-      isEditing === wasEditing
-    ) {
+      isEditing === wasEditing;
+    if (sameRow && part.hit === hit && part.query === hitQuery) {
       if (isEditing) editor = part.body as HTMLTextAreaElement;
+      return;
+    }
+    part.hit = hit;
+    part.query = hitQuery;
+    if (sameRow) {
+      // 当たりだけが変わった (検索を打った・次へ移った)。印と文字だけを直し、ボタンは作り直さない
+      paintHitMark(part, row, hit);
+      if (isEditing) editor = part.body as HTMLTextAreaElement;
+      else paintBodyText(part, row, index, hit);
       return;
     }
     part.row = row;
     part.element.dataset.lineId = row.id;
     part.element.dataset.selected = row.selected ? "true" : "false";
     part.element.dataset.hidden = row.hidden ? "true" : "false";
-    part.element.style.cssText = row.selected ? TRANSCRIPT_STYLE.rowSelected : TRANSCRIPT_STYLE.row;
+    paintHitMark(part, row, hit);
     if (before === null || before.startSec !== row.startSec) part.time.textContent = formatTime(row.startSec);
 
     if (isEditing) {
@@ -381,9 +548,7 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
         part.body.replaceWith(span);
         part.body = span;
       }
-      part.body.dataset.role = "line-text";
-      part.body.textContent = row.text;
-      part.body.style.cssText = row.hidden ? TRANSCRIPT_STYLE.textHidden : TRANSCRIPT_STYLE.text;
+      paintBodyText(part, row, index, hit);
     }
 
     part.actions.replaceChildren();
@@ -393,6 +558,27 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
         makeButton("hide-telop", row.hidden ? "字幕に出す" : "字幕に出さない", "区間に残したまま、テロップだけ出さない / 出す"),
       );
     }
+  }
+
+  /** 文字を入れ、当たった所だけ印の要素に包む。どちらも textContent / text node で入れる (タグとして解釈しない) */
+  function paintText(body: HTMLElement, text: string, ranges: readonly MatchRange[]): void {
+    if (ranges.length === 0) {
+      body.textContent = text;
+      return;
+    }
+    const nodes: Node[] = [];
+    let at = 0;
+    for (const range of ranges) {
+      if (range.start > at) nodes.push(document.createTextNode(text.slice(at, range.start)));
+      const mark = document.createElement("mark");
+      mark.dataset.role = "search-mark";
+      mark.style.cssText = TRANSCRIPT_STYLE.searchMark;
+      mark.textContent = text.slice(range.start, range.end);
+      nodes.push(mark);
+      at = range.end;
+    }
+    if (at < text.length) nodes.push(document.createTextNode(text.slice(at)));
+    body.replaceChildren(...nodes);
   }
 
   function buildSegmentHeader(item: SegmentHeaderItem): HTMLElement {
@@ -489,12 +675,24 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     if (!sameIds(parts, view.rows)) {
       parts = view.rows.map(() => buildRow());
       list.replaceChildren(...parts.map((part) => part.element));
+      normalizedCache = new Map();
       for (const part of parts) paintCurrent(part, false);
       currentIndex = -1;
     }
     editor = null;
-    view.rows.forEach((row, i) => paintRow(parts[i]!, row));
+    view.rows.forEach((row, i) => paintRow(parts[i]!, row, i));
     placeExtras();
+  }
+
+  /**
+   * 行の箱の中だけをスクロールして、target を上から 1/3 の所へ送る (scrollIntoView はページまで動かす)。
+   * 送った後しばらくは、再生位置を追う動き (follow) で引き戻さない
+   */
+  function scrollIntoList(target: HTMLElement): void {
+    const before = list.scrollTop;
+    list.scrollTop = Math.max(0, target.offsetTop - list.clientHeight / 3);
+    if (list.scrollTop !== before) scrollingByUs = true;
+    userScrolledAt = Date.now();
   }
 
   /** 行の箱の中だけをスクロールして、今の行を見える所に入れる (scrollIntoView はページまで動かす) */
@@ -515,7 +713,14 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     update(next): void {
       // 書きかけは input を待たずに取り込む (IME の途中や、input が来ないまま描き直されたとき)
       if (editing !== null && editor !== null) editing.draft = editor.value;
+      const keepHit = currentHitId();
       view = next;
+      // 文字起こしが無くなった (別の動画・取っている間・取れなかった) ら、検索の文字を消す
+      if (next.header.kind !== "ready" && searchInput.value !== "") {
+        searchInput.value = "";
+        query = "";
+      }
+      recomputeHits(keepHit);
       // 直している行が区間から外れたら、直す欄を閉じる。手入力の行は、手入力の行の telopIndex の並びが変わった
       // (位置がずれて別のテロップに書き込みうる) ら閉じる
       if (editing !== null) {
@@ -529,6 +734,7 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
       element.style.opacity = next.enabled ? "1" : "0.5";
       renderHeader();
       patchRows();
+      renderSearch();
     },
     setCurrentTime(sec): void {
       // 行は開始の早い順。sec より前で最後に始まる行
@@ -557,6 +763,11 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     editManual(telopIndex): void {
       startEdit(manualId(telopIndex));
     },
+    setTrimmingIndex(index): void {
+      if (index === view.trimmingIndex) return;
+      view = { ...view, trimmingIndex: index };
+      placeExtras();
+    },
     reveal(target): HTMLElement | null {
       const selector =
         target.kind === "segment"
@@ -564,11 +775,7 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
           : `[data-role='telop'][data-telop-index='${target.telopIndex}']`;
       const found = list.querySelector<HTMLElement>(selector);
       if (found === null) return null;
-      const before = list.scrollTop;
-      list.scrollTop = Math.max(0, found.offsetTop - list.clientHeight / 3);
-      if (list.scrollTop !== before) scrollingByUs = true;
-      // 再生位置を追う動き (follow) で、見せた所から引き戻さない
-      userScrolledAt = Date.now();
+      scrollIntoList(found);
       return found;
     },
   };
