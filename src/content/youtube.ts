@@ -1401,9 +1401,8 @@ function applyStateToDisplay(state: ClipState): void {
       ? []
       : stateSegments;
 
-  // **並べ替えとマージで index は動く。** いま触っていた区間の開始秒で
-  // 引き直せば、マージで消えた区間を選んでいた場合もマージ先が返るので、
-  // 選択が迷子にならない (区間に ID を振らずに済ませる代わりの仕掛け)
+  // 届く前に選んでいた区間。選んでいる区間が変わったか (drifted) を見るためだけに覚える。
+  // 時間順の並べ替えで位置が動いても選び続けるのは selectRangeOnNextState の役目
   const previous = selectedSegment();
 
   busy = BUSY_KINDS.has(state.kind);

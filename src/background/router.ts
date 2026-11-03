@@ -15,7 +15,6 @@ import {
   type FailureReason,
 } from "@/shared/types";
 
-/** router が使う外部依存。テストではフェイクを渡す */
 /** タブから届いたとき、そのタブを録画対象にするイベント (MARK_IN / ADD_SEGMENT は上で別に扱う) */
 const TAB_OWNING_EVENTS: ReadonlySet<ClipEvent["type"]> = new Set<ClipEvent["type"]>([
   "MARK_OUT",
@@ -28,6 +27,7 @@ const TAB_OWNING_EVENTS: ReadonlySet<ClipEvent["type"]> = new Set<ClipEvent["typ
   "START_RECORDING",
 ]);
 
+/** router が使う外部依存。テストではフェイクを渡す */
 export type RouterDeps = {
   saveClip(clip: StoredClip): Promise<void>;
   getClip(id: string): Promise<StoredClip>;

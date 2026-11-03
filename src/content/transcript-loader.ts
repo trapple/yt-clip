@@ -129,7 +129,7 @@ export const TRANSCRIPT_SOURCE_LABEL: Record<Transcript["source"], string> = {
   "youtube-asr": "公式字幕 (自動)",
 };
 
-/** 結末をコンソールに出す 1 行。段階 1a では表示する場所が無いので、確かめる手段はこれだけ (manual-check) */
+/** 結末をコンソールに出す 1 行。欄の見出しと合わせて、取れたか・取れなかった理由を確かめる手がかり (manual-check) */
 export function transcriptLogLine(status: TranscriptStatus): string | null {
   switch (status.kind) {
     case "idle":
