@@ -500,6 +500,21 @@ describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
   const lineEditor = (): HTMLTextAreaElement | null => document.querySelector<HTMLTextAreaElement>("[data-role='line-edit']");
   const video = (): HTMLVideoElement => document.querySelector<HTMLVideoElement>("video")!;
 
+  test("頭を尻より後ろにして理由を出した後、正しく頭を今にすると、理由を消して区間の範囲の文言に戻す", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    const setStart = (): HTMLElement => manualRows()[0]!.querySelector<HTMLElement>("[data-role='set-start']")!;
+    const status = (): string | null => document.querySelector("#yt-clip-bar-status")?.textContent ?? null;
+    video().currentTime = 9;
+    setStart().click();
+    expect(status()).toBe("開始は終了より前にしてください");
+    video().currentTime = 6;
+    setStart().click();
+    expect(status()).toBe("0:00 〜 0:09 (9秒)");
+    // 答え (setTimeout で届く ready) を描き終えてから次へ。残すと次のテストの idle を上書きする
+    await flush();
+  });
+
   test("区間が無いと押せない", async () => {
     ready();
     await flush();

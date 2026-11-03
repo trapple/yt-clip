@@ -469,6 +469,12 @@ function rangeLabel(range: ClipRange): string {
 /** 状態の欄の最初の案内。区間が無いときに出す */
 const INITIAL_STATUS = "IN を押して開始位置を指定";
 
+/** 操作が通ったときの状態の欄。選んでいる区間があればその範囲、無ければ最初の案内 (前の操作の理由を残さない) */
+function restingStatus(): string {
+  const segment = selectedSegment();
+  return segment === null ? INITIAL_STATUS : rangeLabel(segment);
+}
+
 /** 同じ範囲を指しているか。別のオブジェクトでも値が同じなら同じ範囲 */
 function sameRange(a: ClipRange, b: ClipRange): boolean {
   return a.startSec === b.startSec && a.endSec === b.endSec;
@@ -716,7 +722,8 @@ function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
     setStatus("開始は終了より前にしてください");
     return;
   }
-  sendIndexed({ type: "UPDATE_TELOP", index, telop: next });
+  // 送れたら、前の操作の理由 (「開始は終了より前に」・「答えを待っています」) を消す
+  if (sendIndexed({ type: "UPDATE_TELOP", index, telop: next })) setStatus(restingStatus());
 }
 
 /**
