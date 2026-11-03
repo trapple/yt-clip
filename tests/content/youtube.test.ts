@@ -26,6 +26,7 @@ import type { Message } from "@/shared/messages";
 import type { WindowId, WindowLayout } from "@/content/window-layout";
 import {
   FAILURE_MESSAGES,
+  type ClipEvent,
   type ClipRange,
   type ClipState,
   type Telop,
@@ -2055,6 +2056,10 @@ describe("IN", () => {
       const events = clipEvents() as { type: string; range?: { startSec: number } }[];
       expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
       expect(events[0]?.range?.startSec).toBe(at);
+      // 作り直しは答えを待つ (1c-4)。router と同じく、作り直した区間の状態を通知してから次を押す
+      const made = (clipEvents()[0] as Extract<ClipEvent, { type: "MARK_IN" }>).range;
+      emit({ kind: "ready", segments: [made], telops: [], meta: META_A });
+      await flush();
     }
   });
 

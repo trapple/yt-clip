@@ -900,6 +900,52 @@ describe("区間とテロップを変える操作の待ち (1c-4)", () => {
     });
   });
 
+  test("欄の組 (SET_CLIP) の通知が落ちても、上限の後に答えを描いて IN が効く (whole-branch review)", async () => {
+    await withDuration(async () => {
+      ready();
+      await flush();
+      vi.useFakeTimers();
+      try {
+        dropBroadcast = true;
+        events = [];
+        rows()[0]!.click();
+        await vi.advanceTimersByTimeAsync(10);
+        dropBroadcast = false;
+        barButton("IN").click();
+        expect(status()).toBe(BUSY);
+        await vi.advanceTimersByTimeAsync(1600);
+        // 答えを描いたので、詰める欄にその区間が出て、IN が通る
+        expect(document.querySelector("#yt-clip-bar [data-role='trim-title']")?.textContent).toBe("区間 1 を詰める");
+        events = [];
+        video().currentTime = 1.5;
+        barButton("IN").click();
+        expect(events.map((event) => event.type)).toEqual(["ADJUST_SEGMENT"]);
+        await vi.advanceTimersByTimeAsync(10);
+      } finally {
+        dropBroadcast = false;
+        vi.useRealTimers();
+      }
+      await flush();
+    });
+  });
+
+  test("作り直しの IN の答えの前に OUT を押しても送らない (古い頭で OUT を作らない)", async () => {
+    await withDuration(async () => {
+      ready();
+      // 字幕の行 (1〜9 秒) の無い区間にする (行が入ると、行のテロップを揃える組が先に走って IN が待たされる)
+      emit({ kind: "ready", segments: [{ startSec: 20, endSec: 30 }], telops: [], meta: META });
+      await flush();
+      events = [];
+      video().currentTime = 100;
+      barButton("IN").click();
+      video().currentTime = 105;
+      barButton("OUT").click();
+      expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+      expect(status()).toBe(BUSY);
+      await flush();
+    });
+  });
+
   test("±0.1 が受け入れられたのに状態の通知が落ちても、上限の後に答えを描いて次の ±0.1 が効く", async () => {
     await withDuration(async () => {
       ready();

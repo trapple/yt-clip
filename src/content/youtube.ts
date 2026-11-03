@@ -646,8 +646,10 @@ function startOver(): void {
   cancelPreviewWatch();
   // 楽観的に描かない。状態機械の答えを待ってから描く (区間 1 つの ready になり、それが選ばれる)。
   // rangeVideoId も答えの meta から取る (先に書くと、答えが来なかったとき前の動画の区間に今の動画の秒を書きうる)
-  send(
+  // 作り直しも答えを待つ (待たずに OUT を押すと、古い頭で OUT を作って「受け付けられませんでした」になる)
+  sendRange(
     { type: "MARK_IN", range, meta },
+    range,
     (state) => state.kind === "ready" && state.segments.length === 1 && hasSegment(state, range),
   );
 }
@@ -935,6 +937,8 @@ function onRangeCommitted(range: ClipRange): boolean {
     const current = selectedSegment();
     if (current !== null && (sameRange(current, range) || clipOpBusy())) {
       paintRangeBar(current, durationSec);
+      // 待っている間のドラッグは戻す。黙って戻すと無反応に見えるので理由を出す (±0.1 と揃える)
+      if (!sameRange(current, range)) setStatus(CLIP_BUSY_MESSAGE);
       return false;
     }
 
@@ -966,7 +970,12 @@ let rangeAwaiting: ClipRange | null = null;
  * (待ち続けると ±0.1 が二度と効かない。下ろすのは send が応答の状態を描くより前)。受け入れられたのに通知が来ないまま
  * 上限が過ぎたら、答えの状態を描いて下ろす (`drawAnswerIfSilent`)
  */
-function sendRange(event: ClipEvent, range: ClipRange): void {
+function sendRange(
+  event: ClipEvent,
+  range: ClipRange,
+  /** 受け入れられたかの判定。既定は「送った範囲の区間がある」 */
+  accepted: (state: ClipState) => boolean = (state) => hasSegment(state, range),
+): void {
   rangeAwaiting = range;
   const sentAt = drawCount;
   const settle = (): void => {
@@ -975,7 +984,7 @@ function sendRange(event: ClipEvent, range: ClipRange): void {
   send(
     event,
     (state) => {
-      if (!hasSegment(state, range)) {
+      if (!accepted(state)) {
         settle();
         return false;
       }
@@ -988,15 +997,16 @@ function sendRange(event: ClipEvent, range: ClipRange): void {
 
 /**
  * 送った操作の答え (応答の状態) を、通知が来ないときの代わりに描く。router は通知を応答より先に送るので、ふつうは
- * もう描いている。送ってから何も描いていないまま上限が過ぎたら答えの状態を描く (描けば待ちが下りる)。何か描いて
- * いれば、描いたのは答えの通知かそれより新しい状態なので、古い答えで戻さず待ちを下ろすだけにする
+ * もう描いている。上限が過ぎてもまだ待っていたら待ちを下ろし、送ってから何も描いていなければ答えの状態を描く。
+ * 何か描いていれば、描いたのは答えの通知かそれより新しい状態なので、古い答えで戻さない
  */
 function drawAnswerIfSilent(state: ClipState, sentAt: number, still: () => boolean, release: () => void): void {
   const id = runId;
   setTimeout(() => {
     if (!isCurrentRun(id) || !still()) return;
+    // 先に下ろす。描いて下ろすのに任せると、別の動画へ移った後 (答えを取り込まない) には永久に下りない
+    release();
     if (drawCount === sentAt) applyStateToDisplay(state);
-    else release();
   }, INDEXED_ANSWER_WAIT_MS);
 }
 
@@ -2454,6 +2464,7 @@ function isClipOf(state: ClipState, clip: Clip): boolean {
 function sendClip(next: Clip): void {
   pendingClip = next;
   cancelPreviewWatch();
+  const sentAt = drawCount;
   const drop = (): void => {
     if (pendingClip === next) pendingClip = null;
   };
@@ -2462,6 +2473,8 @@ function sendClip(next: Clip): void {
     (state) => {
       const ok = isClipOf(state, next);
       if (!ok) drop();
+      // 受け入れられたのに通知が落ちたら、上限の後に答えを描く (下りないと、IN / OUT・±0.1 まで待ったままになる)
+      else drawAnswerIfSilent(state, sentAt, () => pendingClip === next, drop);
       return ok;
     },
     drop,
