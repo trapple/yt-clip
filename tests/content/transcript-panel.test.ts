@@ -642,3 +642,30 @@ describe("検索 (ADR 0004)", () => {
     expect(role("search-count")?.textContent).toBe("1 / 2");
   });
 });
+
+describe("setTrimmingIndex", () => {
+  const segmentItems = (): TranscriptView["items"] => [
+    { kind: "segment", index: 0, startSec: 0.8, endSec: 2, before: 0 },
+    { kind: "segment", index: 1, startSec: 64.8, endSec: 73.3, before: 1 },
+  ];
+
+  test("見出しの「· 詰めている」だけを付け替え、行の要素は描き直さない", () => {
+    const { panel } = setup();
+    panel.update(view({ items: segmentItems(), trimmingIndex: 0 }));
+    const lineText = part(1, "line-text");
+    const titles = (): (string | null)[] =>
+      [...document.querySelectorAll("[data-role='segment-title']")].map((title) => title.textContent);
+    expect(titles()).toEqual(["区間 1 · 詰めている", "区間 2"]);
+    panel.setTrimmingIndex(1);
+    expect(titles()).toEqual(["区間 1", "区間 2 · 詰めている"]);
+    expect(part(1, "line-text")).toBe(lineText);
+  });
+
+  test("同じ index なら見出しも作り直さない", () => {
+    const { panel } = setup();
+    panel.update(view({ items: segmentItems(), trimmingIndex: 0 }));
+    const header = document.querySelector("[data-role='segment']");
+    panel.setTrimmingIndex(0);
+    expect(document.querySelector("[data-role='segment']")).toBe(header);
+  });
+});

@@ -622,9 +622,11 @@ function startOver(): void {
  * 選び直しは状態の変化ではないので、`send` を通すと往復のぶん反応が遅れる
  */
 function applyStateToSelection(): void {
-  // 欄に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
-  // 欄の見出しの「· 詰めている」を選び直した区間に合わせる (refreshTranscript は最後に詰める欄も描く)
-  refreshTranscript();
+  // 選び直しで変わるのは「· 詰めている」と詰める欄だけ。欄の行は区間から決まり、選択では変わらない
+  // (refreshTranscript は 8000 行の比べ直しと placeTranscriptItems を通る)
+  const { segments } = listedItems();
+  transcriptPanel?.setTrimmingIndex(segments.length === 0 ? -1 : selectedIndex);
+  refreshTrimPanel();
 
   const segment = selectedSegment();
   if (segment === null) return;

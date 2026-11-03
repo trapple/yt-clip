@@ -82,6 +82,8 @@ export type TranscriptPanel = {
   editManual(telopIndex: number): void;
   /** 見出しか手入力の行を欄の中で見える所へ送り、その要素を返す (無ければ null)。窓のスクロールは youtube.ts が決める */
   reveal(target: RevealTarget): HTMLElement | null;
+  /** 詰めている区間だけが変わった (見出しや ‹ › で選び直した)。見出しだけを描き直す (8000 行を比べ直さない) */
+  setTrimmingIndex(index: number): void;
 };
 
 /** 手でスクロールした後、自動で追わない時間 (ミリ秒) */
@@ -758,6 +760,11 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     },
     editManual(telopIndex): void {
       startEdit(manualId(telopIndex));
+    },
+    setTrimmingIndex(index): void {
+      if (index === view.trimmingIndex) return;
+      view = { ...view, trimmingIndex: index };
+      placeExtras();
     },
     reveal(target): HTMLElement | null {
       const selector =
