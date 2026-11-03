@@ -245,6 +245,13 @@ describe("キー", () => {
     expect(callbacks.onPlayAround).not.toHaveBeenCalled();
   });
 
+  test("focus() で欄にフォーカスを移す (拡大バーのトラックを押した後もキーが届くように)", () => {
+    const { panel } = mount();
+    (document.activeElement as HTMLElement | null)?.blur();
+    panel.focus();
+    expect(document.activeElement).toBe(panel.element);
+  });
+
   test("掴んだら欄にフォーカスを移す (キーが届くように)", () => {
     const { panel } = mount();
     panel.setActiveEdge("in");

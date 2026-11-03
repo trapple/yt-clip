@@ -2165,7 +2165,11 @@ function buildBar(): HTMLElement {
   rangeBar = createRangeBar({
     onScrub,
     onCommit: onRangeCommitted,
-    onSeekPlay: (sec) => void onSeekPlay(sec),
+    // トラックを押したら詰める欄にフォーカスを移す (ハンドルを掴んだときと同じく、続く , . が欄に届くように)
+    onSeekPlay: (sec) => {
+      trimPanel?.focus();
+      void onSeekPlay(sec);
+    },
     maxClipSec: () => maxClipSec,
     // 吸い付き先は今の動画の文字起こしの単語の切れ目 (別の動画の行は transcriptLines が返さない)
     snapPoints: (window) => snapPointsIn(transcriptLines(), window),

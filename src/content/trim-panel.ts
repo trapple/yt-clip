@@ -48,6 +48,8 @@ export type TrimPanel = {
   setEnabled(enabled: boolean): void;
   /** キーで動かす端。拡大バーのハンドルを掴んだら呼ぶ */
   setActiveEdge(kind: HandleKind): void;
+  /** 欄にフォーカスを移す (`,` `.` を受けるため)。ページは動かさない。拡大バーのトラックを押して再生したときに呼ぶ */
+  focus(): void;
 };
 
 /** 押されたキーが文字を打つ欄の中か。打っている文字を横取りしない */
@@ -247,6 +249,9 @@ export function createTrimPanel(
     },
     setActiveEdge(kind: HandleKind): void {
       setActive(kind);
+      element.focus({ preventScroll: true });
+    },
+    focus(): void {
       element.focus({ preventScroll: true });
     },
   };
