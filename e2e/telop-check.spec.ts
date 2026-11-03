@@ -51,10 +51,8 @@ const SEGMENTS = [
  */
 const LAYOUT_SEGMENT_STARTS = [200, 230, 260, 290, 320];
 /**
- * 受け入れ条件の確認で足す 5 つのテロップの頭 (フロートの窓の spec A.4 / B)。**後ろの 3 つは同じ時刻に
- * 重ねる**: 最後に足した区間 (320〜335) が拡大バーに選ばれていて、その窓 (前後 2 秒の 318〜337) に 3 つが
- * 重なって入るので、帯の段が最大 (2 段 + 「+1」) になる。前の 2 つのうち 201 は帯の確認 (区間 1 を
- * 選び直して動かす) に使う。231 は区間 2 の中に置き、5 つの数を揃えるだけ
+ * 受け入れ条件の確認で足す 5 つの手入力の行の頭 (フロートの窓の spec A.4)。区間・テロップの窓に 5 つ並べた
+ * 状態で測る (帯の段は 1c-2 で外したので、重ねてもバーの背は変わらない。前の版の値をそのまま使う)
  */
 const LAYOUT_TELOP_STARTS = [201, 231, 321, 321, 321];
 /** 1 つは 2 行にして、行の積み方も画像で見られるようにする */
@@ -370,7 +368,7 @@ test("テロップの実機確認", async () => {
   ).not.toBeEmpty({ timeout: 30_000 });
 
   const button = (name: string) => bar.getByRole("button", { name, exact: true });
-  // 区間とテロップの一覧は区間・テロップの窓にある (窓の分割の spec C1.1)。バーには詰める欄と操作の行だけ。
+  // 区間の見出しと手入力の行は、区間・テロップの窓の文字起こしの欄にある (ADR 0003)。バーには詰める欄と操作の行だけ。
   // 設定はページに無く、popup にある (settings-in-popup spec)
   const listWindow = page.locator("#yt-clip-list");
   const segmentRows = listWindow.locator("[data-role=segment]");
@@ -470,14 +468,17 @@ test("テロップの実機確認", async () => {
     return current;
   }
 
-  /** テロップの文言を入れて確定する (change は blur で送られる) */
+  /**
+   * 手入力の行の文字を入れて確定する (✎ で直す欄を開き、Enter)。`telopRows.nth(i)` は欄の時刻順 (前はテロップの
+   * index 順)。`TELOPS` が時刻の昇順なので同じ順になる (`TELOPS` の順を変えるなら直す)
+   */
   async function setTelopText(index: number, text: string): Promise<void> {
-    const textarea = telopRows.nth(index).locator("textarea");
-    await textarea.fill(text);
-    await textarea.blur();
-    // 状態機械からの通知が返ってくるのを待つ。文言そのものは textarea に残って
-    // いるので DOM では見分けられない
-    await page.waitForTimeout(500);
+    await telopRows.nth(index).locator("[data-role=manual-edit-button]").click();
+    const editor = telopRows.nth(index).locator("[data-role=line-edit]");
+    await editor.fill(text);
+    await editor.press("Enter");
+    // 状態機械からの通知で、行の文字が打った文字になるのを待つ
+    await expect(telopRows.nth(index).locator("[data-role=manual-text]")).toHaveText(text);
   }
 
   async function buildSegments(): Promise<void> {
@@ -487,7 +488,7 @@ test("テロップの実機確認", async () => {
       await expect(segmentRows).toHaveCount(i + 1);
       await seekPaused(segment.endSec);
       await button("OUT").click();
-      await expect(segmentRows.nth(i)).toContainText("(3秒)");
+      await expect(segmentRows.nth(i)).toContainText("3.0 秒");
     }
   }
 
@@ -587,8 +588,8 @@ test("テロップの実機確認", async () => {
   // --- 入力中にショートカットが発火しない ------------------------------------
   await check("入力中にショートカットが発火しない", async () => {
     await seekPaused(61);
-    const textarea = telopRows.nth(0).locator("textarea");
-    const original = await textarea.inputValue();
+    await telopRows.nth(0).locator("[data-role=manual-edit-button]").click();
+    const textarea = telopRows.nth(0).locator("[data-role=line-edit]");
     const before = await videoState();
     await textarea.focus();
     await page.keyboard.press("f");
@@ -598,8 +599,8 @@ test("テロップの実機確認", async () => {
     const fullscreen = await page.evaluate(() => document.fullscreenElement !== null);
     const typed = await textarea.inputValue();
     // 打った文字は捨てる。blur 前に元に戻せば change は起きない
-    await textarea.fill(original);
-    await textarea.blur();
+    // Esc で直す前に戻して閉じる (送らない)
+    await textarea.press("Escape");
     record(
       "入力中にショートカットが発火しない",
       !fullscreen && before.paused === after.paused,
@@ -726,9 +727,7 @@ test("テロップの実機確認", async () => {
       await retry.click();
       await expect(button("● 録画")).toBeVisible();
       segmentsAfter = await segmentRows.count();
-      telopTexts = await telopRows.locator("textarea").evaluateAll((els) =>
-        els.map((el) => (el as HTMLTextAreaElement).value),
-      );
+      telopTexts = await telopRows.locator("[data-role=manual-text]").allTextContents();
     } else {
       await button("取り直す").click();
     }
@@ -855,15 +854,15 @@ test("テロップの実機確認", async () => {
   // 右の枠 (#secondary-inner の先頭) に入ってプレイヤーに重ならない ---------------------------------------------------
   // 1920x1080 の確認がすべて済んでから切り替え、最後に戻す
   const ACCEPTANCE_1440 =
-    "受け入れ条件 1440x795: 最初の配置 (ドック) のまま帯の段が最大 (2 段 + 「+N」) でも、下の枠のバーがプレイヤーの下で画面に収まり、右の枠の区間・テロップがプレイヤーに重ならない";
+    "受け入れ条件 1440x795: 最初の配置 (ドック) のまま区間 5 つ・手入力の行 5 つでも、下の枠のバーがプレイヤーの下で画面に収まり、右の枠の区間・テロップがプレイヤーに重ならない";
   await check(ACCEPTANCE_1440, async () => {
     // 前提を自分で作る: 覚えた配置を消して読み込み直す (最初の配置になる)。区間とテロップはここで空にした
-    // (読み込み直した後は一覧が出ていないので reloadAndWaitList は使わない)
+    // (読み込み直した後は見出しと手入力の行が出ていないので reloadAndWaitList は使わない)
     const worker = await getWorker();
     await worker.evaluate(() => chrome.storage.local.remove("windowLayout"));
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.setViewportSize({ width: 1440, height: 795 });
-    // page.reload より前に置く (今のページに一覧が出ている間に消す。reload の後だと、一覧が描かれる前に
+    // page.reload より前に置く (今のページに見出しと手入力の行が出ている間に消す。reload の後だと、それが描かれる前に
     // count() が 0 を返して空振りする)。前の確認が残した区間とテロップを空にする (モードの切り替えで捨てていた分)。
     // テロップを先に消す: テロップが残っていると最後の区間は ✕ できない
     while ((await telopRows.count()) > 0) {
@@ -886,7 +885,7 @@ test("テロップの実機確認", async () => {
         await button("＋ 区間を追加").click();
         await expect(segmentRows).toHaveCount(i + 1);
       }
-      // 3 つを同じ時刻に重ねて、帯の段を最大 (2 段 + 「+1」) にしてから測る (spec A.4)
+      // 手入力の行を 5 つ足してから測る (spec A.4)
       for (const [i, startSec] of LAYOUT_TELOP_STARTS.entries()) {
         await seekPaused(startSec);
         await listWindow.locator("[data-role=add-telop]").click();
@@ -943,16 +942,6 @@ test("テロップの実機確認", async () => {
           belowTop: document.getElementById("below")?.getBoundingClientRect().top ?? null,
           secondaryInnerWidth:
             document.getElementById("secondary-inner")?.getBoundingClientRect().width ?? null,
-          // 帯の段 (spec B): 出ている帯の数・使っている段の数・「+N」。最大 (2 段 + 「+1」) の
-          // 状態で測っていることを確かめる (段が出ていないまま通ると、B の予算を測っていない)
-          telopBands: document.querySelectorAll("#yt-clip-bar [data-role=telop-band]").length,
-          telopLanes: new Set(
-            [
-              ...document.querySelectorAll<HTMLElement>("#yt-clip-bar [data-role=telop-band]"),
-            ].map((band) => band.dataset.lane),
-          ).size,
-          telopOverflow:
-            document.querySelector("#yt-clip-bar [data-role=telop-overflow]")?.textContent ?? "",
         };
       });
       // **記録だけ (合否には入れない)。** 落ちたときに、覚えた配置が本当に消えていたか (最初の配置か) を後から読めるようにする
@@ -975,10 +964,7 @@ test("テロップの実機確認", async () => {
           measured.side.left >= measured.playerRight &&
           measured.side.top >= (measured.mastheadBottom ?? Number.POSITIVE_INFINITY) &&
           JSON.stringify(measured.sideLabels) === JSON.stringify(["区間・テロップ"]) &&
-          measured.sideActive === "区間・テロップ" &&
-          measured.telopBands === 2 &&
-          measured.telopLanes === 2 &&
-          measured.telopOverflow === "+1",
+          measured.sideActive === "区間・テロップ",
         {
           ...measured,
           belowGap: measured.belowTop === null ? null : measured.belowTop - measured.playerBottom,
@@ -1355,123 +1341,8 @@ test("テロップの実機確認", async () => {
     );
   });
 
-  // --- 拡大バー上のテロップの帯 (フロートの窓の spec B.4) ---------------------------------
-  // 窓の確認の後 (2 つの窓は最初の配置の枠に入っている)。受け入れ条件の確認で足した区間 5 つと
-  // テロップ 5 つ (201・231・321×3) が残っている。区間 1 (200〜215) を選び直すと拡大バーの窓は
-  // 前後 2 秒の 198〜217 になり、テロップ 1 (201〜204) だけが帯で出る (ほかの帯と重ならない)
-  type TelopTimes = { startSec: number; endSec: number; text: string };
-
-  /** 状態機械が持つテロップ (service worker が chrome.storage.session に置く写し。sw.ts の SESSION_KEY) */
-  async function readTelops(): Promise<TelopTimes[]> {
-    const worker = await getWorker();
-    return worker.evaluate(async () => {
-      const stored = await chrome.storage.session.get("router-snapshot");
-      const snapshot = stored["router-snapshot"] as
-        | { state?: { telops?: { startSec: number; endSec: number; text: string }[] } }
-        | undefined;
-      return snapshot?.state?.telops ?? [];
-    });
-  }
-
-  async function firstTelop(): Promise<TelopTimes> {
-    const telop = (await readTelops())[0];
-    if (telop === undefined) throw new Error("テロップ 1 がありません");
-    return telop;
-  }
-
-  /**
-   * テロップ 1 の時刻が before から変わるまで待って返す (10 秒で諦めて、その時点の値を返す。合否は
-   * 呼び出し側の record が決める)。**dragFromTo の末尾の 500ms は窓の位置の保存 (chrome.storage.local)
-   * を待つためのもの**で、帯の UPDATE_TELOP が状態機械に届いて chrome.storage.session に保存される
-   * までを待つ保証にはならない。遅い環境で古い値を読まないよう、変わるまで読み直す
-   */
-  async function waitTelopChanged(before: TelopTimes): Promise<TelopTimes> {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      const now = await firstTelop();
-      if (now.startSec !== before.startSec || now.endSec !== before.endSec) return now;
-      if (Date.now() > deadline) return now;
-      await page.waitForTimeout(200);
-    }
-  }
-
-  /** m:ss (拡大バー・一覧と同じ書き方。この動画は 1 時間未満) */
-  const clock = (sec: number) =>
-    `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
-  const firstBand = bar.locator("[data-role=telop-band][data-index='0']");
-
-  await check("帯の中をドラッグすると長さを保って動き、一覧の時刻も変わる", async () => {
-    await page.evaluate(() => window.scrollTo(0, 0));
-    // 区間 1 を選ぶ。行の左の文字 (区間の時刻) を押す。右の ▶ / ✕ を押すと再生・削除になる
-    await segmentRows.nth(0).locator("span").first().click();
-    await expect(firstBand).toBeVisible({ timeout: 10_000 });
-    // 帯のドラッグ中のシークは video.currentTime への直接の書き込み (拡大バーのハンドルと同じ onScrub)。
-    // 直前の項目でページを読み込み直しているので、読み込んでいない位置へ直接飛ぶと YouTube のプレイヤーが
-    // 止まりうる (seekPaused のコメント)。先にプレイヤーの seekTo で近くを読み込ませておく
-    await seekPaused(201);
-    const before = await firstTelop();
-    const box = await boxOf(firstBand);
-    const from = centerOf(box);
-    // 帯の段は約 1180px で 19 秒 (約 62px/秒)。60px で 1 秒ほど後ろへ (判定は 0.5 秒より動いたか)
-    await dragFromTo(from, { x: from.x + 60, y: from.y });
-    const after = await waitTelopChanged(before);
-    // 一覧の行の文言も状態の通知で描き直される。変わるまで待ってから読む (待ちきれなくても合否は record で見る)
-    await expect(telopRows.nth(0))
-      .toContainText(`${clock(after.startSec)} 〜 ${clock(after.endSec)}`, { timeout: 10_000 })
-      .catch(() => undefined);
-    const label = (await telopRows.nth(0).textContent()) ?? "";
-    record(
-      "帯の中をドラッグすると長さを保って動き、一覧の時刻も変わる",
-      after.startSec > before.startSec + 0.5 &&
-        Math.abs(after.endSec - after.startSec - (before.endSec - before.startSec)) < 0.01 &&
-        label.includes(`${clock(after.startSec)} 〜 ${clock(after.endSec)}`),
-      { before, after, label, box },
-    );
-  });
-
-  await check("帯の端をドラッグすると開始 / 終了だけが変わる", async () => {
-    const before = await firstTelop();
-    // 右端。端として掴めるのは min(6px, 帯の幅の 1/3)。端から 2px の所を掴む
-    const endBox = await boxOf(firstBand);
-    const endAt = { x: endBox.x + endBox.width - 2, y: endBox.y + endBox.height / 2 };
-    await dragFromTo(endAt, { x: endAt.x + 60, y: endAt.y });
-    const afterEnd = await waitTelopChanged(before);
-    // 左端
-    const startBox = await boxOf(firstBand);
-    const startAt = { x: startBox.x + 2, y: startBox.y + startBox.height / 2 };
-    await dragFromTo(startAt, { x: startAt.x - 40, y: startAt.y });
-    const afterStart = await waitTelopChanged(afterEnd);
-    record(
-      "帯の端をドラッグすると開始 / 終了だけが変わる",
-      afterEnd.startSec === before.startSec &&
-        afterEnd.endSec > before.endSec + 0.5 &&
-        afterStart.endSec === afterEnd.endSec &&
-        afterStart.startSec < afterEnd.startSec - 0.5,
-      { before, afterEnd, afterStart, endBox, startBox },
-    );
-  });
-
-  await check("帯を押して離すと、そのテロップの頭から再生する", async () => {
-    const telop = await firstTelop();
-    // テロップから離れた位置で止めておく (再生が始まった場所で、頭から再生したことを見分ける)
-    await seekPaused(212);
-    await firstBand.click();
-    await page.waitForTimeout(1000);
-    const played = await videoState();
-    await page.evaluate(() =>
-      document.querySelector<HTMLVideoElement>("video.html5-main-video")?.pause(),
-    );
-    record(
-      "帯を押して離すと、そのテロップの頭から再生する",
-      !played.paused &&
-        played.currentTime >= telop.startSec - 0.1 &&
-        played.currentTime < telop.startSec + 3,
-      { telop, ...played },
-    );
-  });
-
   // --- ドック枠とタブ (窓の分割の spec C2.10) ---------------------------------------------------------------
-  // 帯の確認の後 (末尾) に行う。受け入れ条件の確認で足した区間 5 つ・テロップ 5 つが残っている。**各項目は前提 (覚えた
+  // 窓の確認の後 (末尾) に行う。受け入れ条件の確認で足した区間 5 つ・手入力の行 5 つが残っている。**各項目は前提 (覚えた
   // 配置・画面の大きさ) を自分で作る**: 覚えた配置を書いて (消して) から読み込み直す
   const DOCK_NO_SUCK =
     "ドック: 浮いた窓を少し動かしてもドックされない (見出しを 20px 下・⠿ を 20px 右。1440x795)";
@@ -1624,7 +1495,7 @@ test("テロップの実機確認", async () => {
     await dropInto(centerOf(await boxOf(tabIn(sideSlot, "区間・テロップ"))), detour, belowSlot);
     const below = await slotState("below");
     const side = await slotState("side");
-    // バーのタブを押すとバーが出て、一覧が隠れる
+    // バーのタブを押すとバーが出て、区間・テロップの窓が隠れる
     await tabIn(belowSlot, "バー").click();
     await page.waitForTimeout(500);
     const barFront = {

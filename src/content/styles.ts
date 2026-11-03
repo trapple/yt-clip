@@ -122,14 +122,13 @@ export const RANGE_STYLE = {
 } as const;
 
 /**
- * 詰める欄 (`trim-panel.ts`。第 2 版のモック)。拡大バーとテロップの帯を中に抱える。
+ * 詰める欄 (`trim-panel.ts`。第 2 版のモック)。拡大バーを中に抱える。
  *
- * **根の gap はバーと同じ 10px。** テロップの帯の段は `margin-top:-6px` で拡大バーのトラックとの間を 4px に詰める
- * 前提で作ってある (`TELOP_TRACK_STYLE`)。gap を狭めると帯がハンドルの当たり判定 (トラックの上下 4px) に重なる。
- * 単語の段も同じ `margin-top:-6px` で上の段に寄せ、バーの背を伸ばしすぎない。
+ * **根の gap はバーと同じ 10px。** 単語の段は `margin-top:-6px` で拡大バーのトラックに寄せ、バーの背を伸ばしすぎない
+ * (トラックとの間は 4px。ハンドルの当たり判定はトラックの上下 4px)。
  *
  * **単語の段は拡大バーと同じ左右の余白を持つ。** 拡大バーはトラックの左右に時刻を置くので、単語の段も同じ文字の
- * 見えない時刻 (`ghost`) を左右に置き、トラックと同じ幅に揃える (テロップの帯の段と同じやり方)
+ * 見えない時刻 (`ghost`) を左右に置き、トラックと同じ幅に揃える
  */
 export const TRIM_STYLE = {
   /** `outline:none`: フォーカスはキーを受けるためだけ。枠を出すとバーの見た目が揺れる */
@@ -138,6 +137,8 @@ export const TRIM_STYLE = {
   head: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;",
   title: "font-weight:500;color:var(--ytc-text);white-space:nowrap;",
   range: "color:var(--ytc-text-sub);font-variant-numeric:tabular-nums;white-space:nowrap;",
+  /** 合計が上限を超えた。色だけで伝えない (「/ 60 秒」の文言と太さでも分かる) */
+  rangeOver: "color:#f28b82;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;",
   grow: "flex:1;",
   group: "display:inline-flex;gap:3px;align-items:center;color:var(--ytc-text-sub);padding:0 2px;border-radius:6px;",
   /** キーで動く端の組。文字を濃くして下線を引く (色だけに頼らない) */
@@ -153,70 +154,17 @@ export const TRIM_STYLE = {
 } as const;
 
 /**
- * 拡大バーの下のテロップの帯の段 (`telop-track.ts`。フロートの窓の spec B)。
- *
- * **根は display を持たない。** 出し入れは telop-track.ts が `style.display` で行う (ここに display を
- * 書くと、`hidden` を立てても inline の display が勝って出たままになる)。高さは 2 段ぶん
- * (14 + 2 + 14 = 30px) に固定し、重なりの有無でバーの高さを揺らさない。`margin-top:-6px` で、バーの
- * 縦の並びの gap (10px) を拡大バーのトラックとの間 4px に詰める (spec B.3。予算 34px)。
- *
- * `gap`・文字の大きさ・数字の幅は拡大バー (`RANGE_STYLE.root`) に揃える。左右に置く見えない時刻
- * (`ghost`) の幅が拡大バーのラベルの幅と同じになり、帯の段がトラックの左右に揃う
- */
-export const TELOP_TRACK_STYLE = {
-  root: "gap:10px;height:30px;margin-top:-6px;font-size:12px;font-variant-numeric:tabular-nums;",
-  ghost: "visibility:hidden;white-space:nowrap;",
-  lanes: "position:relative;flex:1;min-width:0;",
-  /** 右の見えない時刻の箱。「+N」をこの中の 2 段目の高さに置く (帯と重ねない。spec B.3) */
-  endCell: "position:relative;",
-  /**
-   * 帯 1 本。位置 (left / width / top) は telop-track.ts が決める。文字を選べると、掴んだつもりで
-   * 選択が始まる。`touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
-   */
-  band: "position:absolute;height:14px;box-sizing:border-box;min-width:4px;padding:0 4px;border:1px solid var(--ytc-accent);border-radius:3px;background:var(--ytc-surface);color:var(--ytc-text);font-size:10px;line-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;touch-action:none;user-select:none;",
-  /** 2 段に入らない分の数。押しても何もしないので、掴めそうなカーソルを出さない */
-  overflow:
-    "position:absolute;left:0;top:16px;height:14px;line-height:14px;font-size:11px;color:var(--ytc-text-sub);white-space:nowrap;cursor:default;",
-} as const;
-
-/** 区間の一覧。行は押せるので、押せることが分かる見た目にする */
-export const SEGMENT_STYLE = {
-  root: "display:flex;flex-direction:column;gap:4px;",
-  row: "display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;cursor:pointer;background:transparent;",
-  rowSelected:
-    "display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;cursor:pointer;background:var(--ytc-surface);",
-  label: "color:var(--ytc-text);font-size:12px;flex:1;",
-  // 行のクリックと混ざらないよう、小さくても押せる大きさを確保する
-  iconButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;min-width:28px;cursor:pointer;font-family:${FONT};font-size:12px;`,
-  total: "color:var(--ytc-text-sub);font-size:11px;text-align:right;",
-  // 超過は色だけで伝えない。文言でも「/ 60秒」と出しているので、
-  // 色が見えない環境でも判断できる
-  totalOver: "color:#f28b82;font-size:11px;text-align:right;font-weight:600;",
-} as const;
-
-/** テロップの一覧。区間の一覧と並ぶので見た目を揃える */
-export const TELOP_STYLE = {
-  root: "display:flex;flex-direction:column;gap:4px;",
-  header: "display:flex;align-items:center;gap:8px;",
-  title: "color:var(--ytc-text);font-size:12px;font-weight:600;flex:1;",
-  row: "display:flex;flex-direction:column;gap:4px;padding:4px 8px;border-radius:6px;background:var(--ytc-surface);",
-  rowHead: "display:flex;gap:8px;align-items:center;",
-  label: "color:var(--ytc-text);font-size:12px;flex:1;",
-  outside: "color:var(--ytc-text-sub);font-size:11px;",
-  iconButton: SEGMENT_STYLE.iconButton,
-  textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
-  textarea: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;`,
-} as const;
-
-/**
- * 文字起こしの欄 (`transcript-panel.ts`)。区間とテロップの一覧の上に並ぶので見た目を揃える。
- * **行の箱だけがスクロールする** (欄の下の一覧に手が届くよう、高さに上限を持つ)。
+ * 文字起こしの欄 (`transcript-panel.ts`)。区間の見出しと手入力の行もこの中に出る。
+ * **行の箱だけがスクロールする** (窓の中で欄の見出しの行が流れて消えないよう、高さに上限を持つ)。
  * 行は文字を選べなくする (Shift + クリックで文字が選ばれて、まとめて選ぶ操作の邪魔をしない)
  */
 const TRANSCRIPT_ROW =
   "display:grid;grid-template-columns:12px 40px 1fr auto;gap:4px;align-items:start;padding:3px 6px;border-radius:6px;cursor:pointer;user-select:none;";
 const TRANSCRIPT_TIME = `border:none;background:transparent;font-family:${FONT};font-size:11px;padding:2px 0;cursor:pointer;text-align:left;font-variant-numeric:tabular-nums;`;
 const TRANSCRIPT_TEXT = "font-size:12px;white-space:pre-wrap;word-break:break-word;";
+/** 手入力の行。時刻・印・文字の 3 列で、操作は次の段 (2 列目から) に折り返して並べる */
+const TRANSCRIPT_MANUAL =
+  "display:grid;grid-template-columns:12px 40px 1fr;gap:4px;align-items:start;padding:3px 6px;border-radius:6px;user-select:none;";
 export const TRANSCRIPT_STYLE = {
   root: "display:flex;flex-direction:column;gap:6px;",
   header: "display:flex;align-items:center;gap:8px;",
@@ -233,8 +181,23 @@ export const TRANSCRIPT_STYLE = {
   text: `${TRANSCRIPT_TEXT}color:var(--ytc-text);`,
   textHidden: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);text-decoration:line-through;`,
   actions: "display:flex;gap:4px;",
-  edit: `${TELOP_STYLE.textarea}user-select:text;`,
-  textButton: TELOP_STYLE.textButton,
+  /** 区間の見出し。押せる (その区間を詰める)。区間の境目が分かるよう上に線を引く */
+  segment:
+    "display:flex;gap:8px;align-items:center;padding:6px 6px 2px;margin-top:4px;border-top:1px solid var(--ytc-border);cursor:pointer;user-select:none;font-size:11px;",
+  segmentTitle: "color:var(--ytc-accent);font-weight:700;white-space:nowrap;",
+  segmentRange:
+    "color:var(--ytc-text-sub);font-variant-numeric:tabular-nums;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+  /** 手入力の行。字幕の行と見分けるため、左の線を点線にする。区間の外は薄く */
+  manual: `${TRANSCRIPT_MANUAL}background:var(--ytc-surface);border-left:3px dashed var(--ytc-accent);`,
+  manualOutside: `${TRANSCRIPT_MANUAL}background:transparent;border-left:3px dashed var(--ytc-border);opacity:0.7;`,
+  manualMark: "color:var(--ytc-accent);font-size:10px;padding-top:3px;",
+  manualEmpty: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);font-style:italic;`,
+  /** 改行だらけの文字 (500 文字まで入る) でも欄を埋めないよう、4 行ぶんで切る (全文は ✎ で見る) */
+  manualText: `${TRANSCRIPT_TEXT}color:var(--ytc-text);max-height:6em;overflow:hidden;`,
+  manualActions: "grid-column:2 / -1;display:flex;gap:4px;flex-wrap:wrap;align-items:center;",
+  outside: "color:var(--ytc-text-sub);font-size:11px;",
+  edit: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;user-select:text;`,
+  textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
 } as const;
 
 /**

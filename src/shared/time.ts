@@ -52,6 +52,11 @@ export function formatTimeCentis(totalSec: number): string {
   return `${formatTime(whole)}.${fraction}`;
 }
 
+/** 秒を 0.1 秒の桁で出す (`8.36` → `"8.4"`)。詰める欄の長さと合計、欄の区間の見出しの長さ */
+export function formatSecTenths(sec: number): string {
+  return (Math.round(sec * 10) / 10).toFixed(1);
+}
+
 /** YouTube URL の t= に載せる整数秒へ変換する */
 export function toUrlSeconds(sec: number): number {
   assertPlayableSeconds(sec, "再生位置");

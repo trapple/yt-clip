@@ -32,7 +32,6 @@ import {
   startRecording,
   type RecorderHandle,
 } from "@/content/recorder";
-import { createSegmentList, type SegmentList } from "@/content/segment-list";
 import { createDockManager, type DockManager } from "@/content/dock";
 import {
   createFloatingWindow,
@@ -46,9 +45,7 @@ import {
   initialListRect,
   type PanelWindow,
 } from "@/content/panel-window";
-import { createTelopList, type TelopList } from "@/content/telop-list";
 import { createTelopPreview, type TelopPreview } from "@/content/telop-preview";
-import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
 import { YT_SELECTORS } from "@/content/selectors";
 import { createSwitchDriver } from "@/content/switch-driver";
 import {
@@ -58,11 +55,13 @@ import {
   type TranscriptLoader,
   type TranscriptStatus,
 } from "@/content/transcript-loader";
+import { placeTranscriptItems } from "@/content/transcript-items";
 import { createTranscriptPanel, type TranscriptPanel, type TranscriptView } from "@/content/transcript-panel";
 import {
   isLineInSegments,
   lineIdsBetween,
   setLinesSelected,
+  syncLineTelops,
   toggleTelopHidden,
   type Clip,
 } from "@/content/transcript-selection";
@@ -159,12 +158,10 @@ let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
 /**
  * 拡大バーがいま編集している区間の位置。区間が無ければ -1。
  *
- * **ここが選択の唯一の持ち主。** 一覧にも持たせると同期が要る。
+ * **ここが選択の唯一の持ち主。** 欄の見出しや詰める欄にも持たせると同期が要る。
  * 状態機械は区間を時間順に並べるので、足した・動かした直後は範囲で引き直す (selectRangeOnNextState)。それ以外は数が変わったときだけ詰める
  */
 let selectedIndex = -1;
-let segmentList: SegmentList | null = null;
-let telopList: TelopList | null = null;
 /**
  * プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため)。
  * **オンの間だけある** (マスタースイッチの spec §2.1): start() が作り、stop() が destroy する (canvas・video の seeked・
@@ -194,7 +191,7 @@ let layoutReady = false;
  */
 const floatLayout: Partial<Record<WindowId, WindowRect>> = {};
 /**
- * 区間・テロップの窓。区間の一覧とテロップの一覧を入れる (窓の分割の spec C1.1)。
+ * 区間・テロップの窓。文字起こしの欄 (区間の見出しと手入力の行もこの中) を入れる (窓の分割の spec C1.1)。
  *
  * **オンの間は 1 つを使い回す。** 窓の位置を持つので、バーを作り直すたびに作り直さない。中身の入れ替えは
  * `buildBar`、body への付け直しは `mount`、出すかの判定は `refreshWindows` が行う。
@@ -282,12 +279,11 @@ let selectRangeOnNextState: ClipRange | null = null;
 /** 次に状態が届いたとき、選んだ区間の行を区間・テロップの窓の見える範囲に入れる (区間を足した直後) */
 let revealSegmentOnNextState = false;
 /**
- * 次に状態が届いたとき、テロップの一覧の末尾の行を区間・テロップの窓の見える範囲に入れる。
- *
- * `revealSegmentOnNextState` と同じ形。**クリックの時点では行がまだ無い** (状態機械の
- * 答えを待って描く) ので、応答を描いた後に 1 回だけ送る
+ * ＋ ここに字幕を足すで足したテロップ。それが載った状態が届いたら、その手入力の行の直す欄を開き、区間・テロップの窓の
+ * 見える範囲に入れる。**クリックの時点では行がまだ無い** (状態機械の答えを待って描く) ので、応答を描いた後に 1 回だけ。
+ * 載っていない状態 (拒まれた・前の操作の答え) では開かない (末尾の別のテロップの直す欄を開いてフォーカスを奪わない)
  */
-let revealLastTelopOnNextState = false;
+let revealTelopOnNextState: Telop | null = null;
 /**
  * 次に状態が届いたとき、この位置が消えたものとして選択を詰める。
  *
@@ -303,12 +299,7 @@ let rangeEditable = false;
 let cancelWatch: (() => void) | null = null;
 let cancelPreview: (() => void) | null = null;
 let rangeBar: RangeBar | null = null;
-/**
- * 拡大バーの下のテロップの帯の段 (フロートの窓の spec B)。拡大バーと同じ時間の軸で描くので、
- * 拡大バーと一緒に buildBar が作り直す
- */
-let telopTrack: TelopTrack | null = null;
-/** 詰める欄 (ADR 0001)。拡大バーとテロップの帯を中に抱える。バーと一緒に作り直す */
+/** 詰める欄 (ADR 0001)。拡大バーを中に抱える。バーと一緒に作り直す */
 let trimPanel: TrimPanel | null = null;
 /** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
 let playheadWatched = false;
@@ -631,9 +622,9 @@ function startOver(): void {
  * 選び直しは状態の変化ではないので、`send` を通すと往復のぶん反応が遅れる
  */
 function applyStateToSelection(): void {
-  // 一覧に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
-  segmentList?.update(listedItems().segments, selectedIndex, maxClipSec);
-  refreshTrimPanel();
+  // 欄に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
+  // 欄の見出しの「· 詰めている」を選び直した区間に合わせる (refreshTranscript は最後に詰める欄も描く)
+  refreshTranscript();
 
   const segment = selectedSegment();
   if (segment === null) return;
@@ -701,9 +692,10 @@ function onAddTelop(): void {
     setStatus("動画の終わりにはテロップを足せません");
     return;
   }
-  // 足した行を区間・テロップの窓の見える範囲に入れる (右側パネルの spec §3)
-  revealLastTelopOnNextState = true;
-  send({ type: "ADD_TELOP", telop: { startSec, endSec, text: "" } });
+  const telop = { startSec, endSec, text: "" };
+  if (!sendIndexed({ type: "ADD_TELOP", telop })) return;
+  // 足した行を区間・テロップの窓の見える範囲に入れ、直す欄を開く (右側パネルの spec §3)。足したテロップが載った状態で開く
+  revealTelopOnNextState = telop;
 }
 
 /**
@@ -722,11 +714,11 @@ function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
     setStatus("開始は終了より前にしてください");
     return;
   }
-  send({ type: "UPDATE_TELOP", index, telop: next });
+  sendIndexed({ type: "UPDATE_TELOP", index, telop: next });
 }
 
 /**
- * 文言の確定。改行はそのまま持つ。**送らなかったら false** (一覧はその入力欄を下書きとして
+ * 文言の確定。改行はそのまま持つ。**送らなかったら false** (欄は直す欄を閉じずに書きかけを
  * 残し、次の描き直しで前の文言に戻さない)
  */
 function onTelopText(index: number, text: string): boolean {
@@ -736,8 +728,7 @@ function onTelopText(index: number, text: string): boolean {
   // 状態機械は上限を超えた文言を UI のバグとして拒む。送る前に止めて理由を出す。
   // 入力欄は消さない (削って直してもらう)
   if (rejectLongTelopText(text)) return false;
-  send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
-  return true;
+  return sendIndexed({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
 }
 
 /** そのテロップの頭から再生する。範囲再生の監視は解く (押した場所からの再生が止まる) */
@@ -751,7 +742,20 @@ function rejectLongTelopText(text: string): boolean {
   return true;
 }
 
-/** 最後の区間を消すとテロップも消えるので止める、の理由 (区間の一覧の ✕ と欄で同じ文言) */
+/** 最後の区間を消すとテロップも消えるので止める、の理由 (見出しの ✕ と欄の行で同じ文言) */
+/**
+ * 最後の区間と一緒に消えると作り直せないテロップの数。手入力の行・直した (字幕に出さないにした) 行・行が無い (取り直した、
+ * 取っている間) もの。**直していない行のテロップは数えない** (区間に入れ直せば syncLineTelops がまた作る)
+ */
+function irreplaceableTelops(telops: Telop[]): number {
+  const byId = new Map(transcriptLines().map((line) => [line.id, line]));
+  return telops.filter((telop) => {
+    if (telop.lineId === undefined) return true;
+    const line = byId.get(telop.lineId);
+    return line === undefined || telop.text !== line.text.slice(0, MAX_TELOP_TEXT_LENGTH);
+  }).length;
+}
+
 function telopsRemainMessage(count: number): string {
   return `テロップが ${count} 件残っています。先にテロップを消してください`;
 }
@@ -762,27 +766,6 @@ async function playTelop(index: number): Promise<void> {
   cancelPreviewWatch();
   if ((await seekAndPlay(telop.startSec)) === null) return;
   setStatus(`テロップ ${index + 1} の頭から再生中…`);
-}
-
-/**
- * 帯のドラッグが確定した (フロートの窓の spec B.2)。帯の段は指を離したときに 1 回だけ、時刻が
- * 変わったときだけ呼ぶ。
- *
- * **応答の状態で受理を確かめる。** 帯は動かした場所に楽観的に描かれているので、拒まれたまま
- * にすると画面と状態が食い違う。拒まれたら正の状態で描き直す (`send` の作法)。テロップは並べ
- * 替えもマージもしないので、受理されれば送った時刻がそのまま載る
- */
-function onTelopDragged(index: number, startSec: number, endSec: number): void {
-  const telop = currentTelops[index];
-  if (telop === undefined || !canEditTelops()) return;
-  if (telop.startSec === startSec && telop.endSec === endSec) return;
-  send(
-    { type: "UPDATE_TELOP", index, telop: { ...telop, startSec, endSec } },
-    (state) =>
-      "telops" in state &&
-      state.telops[index]?.startSec === startSec &&
-      state.telops[index]?.endSec === endSec,
-  );
 }
 
 /**
@@ -839,9 +822,8 @@ function onMarkOut(): void {
   }
 
   // IN を打った後に別の動画へ移動していた場合、その区間はもう意味を持たない。
-  // **ここで RESET_MARKS を送らない。** この画面の表示を畳むだけで足り、
-  // 状態機械が持っている区間とクリップまで捨てる理由がない (別のタブで
-  // 元の動画を開いていれば、そちらでは今も使える)
+  // **この画面の表示を畳むだけにする。** 状態機械が持っている区間とクリップまで捨てる理由がない
+  // (別のタブで元の動画を開いていれば、そちらでは今も使える)
   if (getVideoMeta().videoId !== rangeVideoId) {
     currentSegments = [];
     selectedIndex = -1;
@@ -1134,7 +1116,7 @@ function renderActions(kind: ClipState["kind"]): void {
           send(ACTION_EVENTS[action]);
         },
       );
-      // 押しても弾かれるだけの録画は押させない。一覧の合計表示と理由を揃える
+      // 押しても弾かれるだけの録画は押させない。詰める欄の合計の警告と理由を揃える
       if (action === "record" && isOverLimit(currentSegments, maxClipSec)) {
         button.disabled = true;
         button.title = `合計が上限 ${maxClipSec} 秒を超えています`;
@@ -1145,7 +1127,7 @@ function renderActions(kind: ClipState["kind"]): void {
 }
 
 /**
- * 一覧に出す区間とテロップ。**範囲を作った動画を見ているときだけ。**
+ * 欄と詰める欄に出す区間とテロップ。**範囲を作った動画を見ているときだけ。**
  *
  * 別の動画の区間は出さない
  * (帯・プレビューと同じ規則)。画面に浮いた窓に出すので、SPA で動画 B へ移ったのに
@@ -1381,12 +1363,11 @@ function attachWindowsToBody(): void {
 }
 
 /**
- * 拡大バーを描き直し、同じ時間の軸で帯の段と詰める欄の単語も描き直す。**拡大バーの窓が変わる経路はここを通す**
- * (帯や単語だけが古い窓のまま残らないように)
+ * 拡大バーを描き直し、同じ時間の軸で詰める欄の単語も描き直す。**拡大バーの窓が変わる経路はここを通す**
+ * (単語だけが古い窓のまま残らないように)
  */
 function paintRangeBar(range: ClipRange, videoDurationSec: number): void {
   rangeBar?.update(range, videoDurationSec);
-  refreshTelopTrack();
   refreshTrimPanel();
 }
 
@@ -1405,50 +1386,19 @@ function refreshTrimPanel(): void {
     count: segments.length,
     range,
     totalSec: totalSec(segments),
+    maxClipSec,
+    over: isOverLimit(segments, maxClipSec),
     window,
     words: window === null ? [] : wordsInWindow(transcriptLines(), window),
   });
 }
 
 /**
- * 拡大バーの下のテロップの帯を描き直す (フロートの窓の spec B)。拡大バーを描き直したとき
- * (`paintRangeBar`) と、テロップや出す条件が変わったとき (`refreshLists`) に呼ぶ。
- *
- * 出すテロップは一覧と同じ規則 (`listedItems`: 範囲を作った動画を見ている
- * とき)。拡大バーがまだ窓を持たない (範囲を描く前) ときは渡さない (時間の軸が無い)。
- * 動かせる条件も一覧と同じ (`canEditTelops`)。
- *
- * **1 回の状態通知で 2 回呼ばれうる** (`applyStateToDisplay` が `refreshLists` の後に、拡大バーが
- * ずれていれば `paintRangeBar` も呼ぶ)。同じ入力なら同じ絵になる (冪等) ので、二重呼び出しは不具合ではない
- */
-function refreshTelopTrack(): void {
-  if (telopTrack === null) return;
-  const timeWindow = rangeBar?.window() ?? null;
-  const wasHidden = telopTrack.element.hidden;
-  telopTrack.setEnabled(canEditTelops());
-  telopTrack.update(
-    timeWindow === null ? [] : listedItems().telops,
-    timeWindow ?? { startSec: 0, endSec: 0 },
-  );
-  // 段が出る・消えるとバーの窓の高さが 34px 変わる。つまみ (操作の行) が画面の下へ押し出され
-  // ないよう、置いた場所から詰め直す。**最初の位置は取り直さない** (取り直すきっかけは resize と
-  // プレイヤーの大きさの変化だけ。spec A.2)
-  if (wasHidden !== telopTrack.element.hidden) barWindow.refit();
-}
-
-/**
- * 一覧と帯の段を手元の写しに合わせて描き直し、窓を出すかを決め直す。
- * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ
+ * 欄 (区間の見出しと手入力の行)・詰める欄を手元の写しに合わせて描き直し、窓を出すかを決め直す。
+ * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ。詰める欄は refreshTranscript が最後に描く
  */
 function refreshLists(): void {
-  const { segments, telops } = listedItems();
-  segmentList?.setEnabled(!busy);
-  segmentList?.update(segments, selectedIndex, maxClipSec);
-  telopList?.setEnabled(canEditTelops());
-  telopList?.update(telops, segments);
   refreshTranscript();
-  refreshTelopTrack();
-  refreshTrimPanel();
   refreshWindows();
 }
 
@@ -1469,13 +1419,10 @@ function isDockedInPage(id: WindowId): boolean {
  * 見ながら区間を足したときにそちらが潜る。**ドック中ならタブを前に出すだけ** (C2.2): ページの中の窓は中身なりの
  * 高さで中でスクロールしないので送る先が無く、ページもスクロールしない (右側パネルの spec §3 と同じ理由)。
  * 窓が隠れている (全画面など) ときは何もしない。出す判断は `refreshWindows` のもの。
- * index を渡さなければ末尾の行
+ * 欄の中のスクロールは `transcriptPanel.reveal` が済ませている (row はそれが返した要素)
  */
-function revealRow(list: HTMLElement | undefined, role: "segment" | "telop", index?: number): void {
-  if (list === undefined || listWindow.element.hidden) return;
-  const rows = list.querySelectorAll<HTMLElement>(`[data-role='${role}']`);
-  const row = rows[index ?? rows.length - 1];
-  if (row === undefined) return;
+function revealInWindow(row: HTMLElement | null): void {
+  if (row === null || listWindow.element.hidden) return;
   if (isDockedInPage("list")) {
     dockManager.activate("list");
     return;
@@ -1511,6 +1458,17 @@ function applyStateToDisplay(state: ClipState): void {
   // 途中の答え (先に送った組) が届いた間は待ち続ける (後から送った組が本当の行き先)
   if (pendingClip !== null && (isClipOf(state, pendingClip) || (state.kind !== "ready" && state.kind !== "idle"))) {
     pendingClip = null;
+  }
+  // 位置で送った操作の答えが返った後に状態を描いたら、待つのをやめる (router は通知を応答より先に送るので、ふつうは
+  // 応答の時点で済んでいる。応答の後に届いた状態は、答えを反映した後のもの)。区間を変えられない種類 (録画など) でも待たない
+  lastAppliedKey = clipKey(state);
+  drawCount += 1;
+  if (
+    indexedAwaiting &&
+    (indexedResult !== null || (state.kind !== "ready" && state.kind !== "posted" && state.kind !== "idle"))
+  ) {
+    indexedAwaiting = false;
+    indexedResult = null;
   }
   // 作り直しの確かめは、状態が届いたらやり直す (確かめた区間とテロップが変わっているかもしれない)
   startOverArmed = false;
@@ -1564,11 +1522,21 @@ function applyStateToDisplay(state: ClipState): void {
   }
   // 足した直後の 1 回だけ、足した行へ送る。描き終えてから送るので、ここでは覚えるだけ
   const revealSegment = revealSegmentOnNextState;
-  const revealTelop = revealLastTelopOnNextState;
+  // 足したテロップが載った状態でだけ開く。載っていない答え (前の操作の答え) が先に来たら、待っている間は覚えたまま
+  const revealTelop = revealTelopOnNextState;
+  let addedTelopIndex = -1;
+  if (revealTelop !== null) {
+    for (let i = currentTelops.length - 1; i >= 0; i -= 1) {
+      if (sameTelop(currentTelops[i]!, revealTelop)) {
+        addedTelopIndex = i;
+        break;
+      }
+    }
+  }
   // 欄から送った組の答えを待つ間に、先に送った組の答えが届いた (選びたい区間がまだ無い)。忘れずに次の答えで選ぶ
   if (wantedIndex >= 0 || pendingClip === null) selectRangeOnNextState = null;
   revealSegmentOnNextState = false;
-  revealLastTelopOnNextState = false;
+  if (addedTelopIndex >= 0 || !indexedAwaiting) revealTelopOnNextState = null;
   removedIndexOnNextState = null;
 
   const current = selectedSegment();
@@ -1581,8 +1549,8 @@ function applyStateToDisplay(state: ClipState): void {
   // 直された後でも、これで取り戻せる
   rangeVideoId = stateMeta?.videoId ?? null;
 
+  // 詰める欄の有効は下の refreshLists (→ refreshTranscript → refreshTrimPanel) が同じ値で決める
   rangeBar?.setEnabled(canAdjustRange());
-  trimPanel?.setEnabled(canAdjustRange());
   refreshOverlay();
   refreshTelopPreview();
   renderActions(state.kind);
@@ -1598,9 +1566,13 @@ function applyStateToDisplay(state: ClipState): void {
   // ただし録画中は、打ち切られたドラッグの見た目が最後の位置に残るため、
   // ずれていなくても確定済みの範囲で描き直す
   refreshLists();
-  // 一覧と窓の表示が決まってから送る (出す → 送る の順)
-  if (revealSegment) revealRow(segmentList?.element, "segment", selectedIndex);
-  if (revealTelop) revealRow(telopList?.element, "telop");
+  // 欄と窓の表示が決まってから送る (出す → 送る の順)
+  if (revealSegment) revealInWindow(transcriptPanel?.reveal({ kind: "segment", index: selectedIndex }) ?? null);
+  if (addedTelopIndex >= 0) {
+    // ＋ ここに字幕を足す の答え。足した行の直す欄を開いて見せる
+    transcriptPanel?.editManual(addedTelopIndex);
+    revealInWindow(transcriptPanel?.reveal({ kind: "manual", telopIndex: addedTelopIndex }) ?? null);
+  }
 
   // 選んでいる区間が変わったら、範囲と秒数を状態の欄に出す (IN / OUT / ＋ 区間を追加の答え)。ready のときだけ:
   // 録画中・プレビュー・失敗などは、それぞれの文言を上で出している
@@ -1622,6 +1594,8 @@ function applyStateToDisplay(state: ClipState): void {
       console.warn(`拡大バーの再描画に失敗しました: ${String(error)}`);
     }
   }
+  // 区間が変わった答え (ハンドル・±0.1・IN / OUT・＋ 区間を追加・見出しの ✕) を描いたら、区間に入っている行のテロップに揃える
+  syncTelopsToSegments();
 }
 
 /** 指定した範囲を通しで再生して内容を確認する */
@@ -2022,6 +1996,39 @@ function readChannel(): Channel | null {
   return channel.id === "" ? null : channel;
 }
 
+/**
+ * 区間を消す (欄の見出しの ✕)。**作り直せないテロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
+ * なると状態機械は idle に戻り、手入力の文言もまとめて消える
+ */
+function removeSegment(index: number): void {
+  if (busy) return;
+  if (index < 0 || index >= currentSegments.length) return;
+  const remain = irreplaceableTelops(currentTelops);
+  if (currentSegments.length === 1 && remain > 0) {
+    // 取っている間は、区間から外れた字幕の行のテロップを欄に出していない (placeTranscriptItems の linesReady)
+    const loading = transcriptHeader(transcriptStatus, transcriptStatus.kind !== "idle" && transcriptStatus.videoId === currentVideoId()).kind === "loading";
+    const hidden = loading && currentTelops.some((telop) => telop.lineId !== undefined);
+    setStatus(hidden ? `${telopsRemainMessage(remain)} (文字起こしを取り終えると欄に出ます)` : telopsRemainMessage(remain));
+    return;
+  }
+  if (!sendIndexed({ type: "REMOVE_SEGMENT", index })) return;
+  removedIndexOnNextState = index;
+}
+
+/** 手入力の行の ✕。手入力の行はテロップそのもの (ADR 0003) */
+function removeTelop(index: number): void {
+  if (!canEditTelops()) return;
+  sendIndexed({ type: "REMOVE_TELOP", index });
+}
+
+/** 欄の見出し・詰める欄の ‹ › で区間を選んだ。その区間を詰める (録画中は選び直さない) */
+function selectSegment(index: number): void {
+  if (busy) return;
+  if (index < 0 || index >= listedItems().segments.length) return;
+  selectedIndex = index;
+  applyStateToSelection();
+}
+
 function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
@@ -2074,80 +2081,39 @@ function buildBar(): HTMLElement {
   });
   rangeBar.element.id = RANGE_ID;
 
-  // 拡大バーの下のテロップの帯。拡大バーと同じ時間の軸で描くので、拡大バーと一緒に作り直す。
-  // ドラッグ中のシークは拡大バーと同じ onScrub、押して離したときは一覧の ▶ と同じ再生
-  telopTrack = createTelopTrack({
-    onScrub,
-    onCommit: onTelopDragged,
-    onPlay: (index) => void playTelop(index),
-  });
-
-  // 詰める欄 (第 2 版のモック)。拡大バーとテロップの帯はここに入る
+  // 詰める欄 (第 2 版のモック)。拡大バーはここに入る
   trimPanel = createTrimPanel(
-    { rangeBar: rangeBar.element, telopTrack: telopTrack.element },
+    { rangeBar: rangeBar.element },
     {
-      onSelect: (index) => {
-        if (index < 0 || index >= listedItems().segments.length) return;
-        selectedIndex = index;
-        applyStateToSelection();
-      },
+      onSelect: selectSegment,
       onNudge,
       onPlayAround: (kind) => void playAround(kind),
     },
   );
 
-  segmentList = createSegmentList({
-    onSelect: (index) => {
-      selectedIndex = index;
-      applyStateToSelection();
-    },
-    onPlay: (index) => {
-      selectedIndex = index;
-      applyStateToSelection();
-      void playRange();
-    },
-    onRemove: (index) => {
-      // **テロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
-      // なると状態機械は idle に戻り、手入力の文言もまとめて消える
-      if (currentSegments.length === 1 && currentTelops.length > 0) {
-        setStatus(telopsRemainMessage(currentTelops.length));
-        return;
-      }
-      removedIndexOnNextState = index;
-      send({ type: "REMOVE_SEGMENT", index });
-    },
-  });
-
-  telopList = createTelopList({
-    onAdd: onAddTelop,
-    onSetStart: (index) => onMoveTelopEdge(index, "start"),
-    onSetEnd: (index) => onMoveTelopEdge(index, "end"),
-    onPlay: (index) => void playTelop(index),
-    onRemove: (index) => {
-      if (!canEditTelops()) return;
-      send({ type: "REMOVE_TELOP", index });
-    },
-    onText: onTelopText,
-  });
-
-  // 文字起こしの欄 (ADR 0001)。区間・テロップの窓の先頭に置く。区間とテロップの一覧は 1c まで欄の下に残す
+  // 文字起こしの欄 (ADR 0001)。区間・テロップの窓に置く。区間の見出しと手入力の行も欄の中に出す (ADR 0003)
   // 欄は 1 度だけ作る。バーの根が YouTube の再描画で外れて buildBar が走るたびに、数千行を作り直さない
   transcriptPanel ??= createTranscriptPanel({
     onToggle: onToggleLine,
     onEditText: onEditLineText,
     onToggleHidden: onToggleLineHidden,
     onPlay: onPlayLine,
+    onSelectSegment: selectSegment,
+    onRemoveSegment: removeSegment,
+    onAddManual: onAddTelop,
+    onManualEdge: onMoveTelopEdge,
+    onManualText: onTelopText,
+    onRemoveManual: removeTelop,
+    onPlayManual: (index) => void playTelop(index),
     onRetry: () => transcriptLoader?.retry(),
   });
 
-  // バーは詰める欄 (見出しの行 → 拡大バー → テロップの帯の段 → 単語) → 操作の行。拡大バーは幅がそのまま精度になるので、
-  // 一覧の窓の幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の
-  // spec A.1)。帯の段は拡大バーのトラックの**下**に置く: トラックの中に重ねると、区間のハンドルと
-  // 帯の当たり判定が重なる (spec B.1)
+  // バーは詰める欄 (見出しの行 → 拡大バー → 単語) → 操作の行。拡大バーは幅がそのまま精度になるので、
+  // 一覧の窓の幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の spec A.1)
   bar.append(trimPanel.element, row);
-  // 一覧は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
-  // 足すだけにすると、バーを作り直すたびに古い一覧が残って 2 重になる
-  listWindow.body.replaceChildren(transcriptPanel.element, segmentList.element, telopList.element);
+  // 文字起こしの欄は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
+  // 足すだけにすると、バーを作り直すたびに 2 重になる
+  listWindow.body.replaceChildren(transcriptPanel.element);
   return bar;
 }
 
@@ -2217,6 +2183,19 @@ let transcriptStatus: TranscriptStatus = { kind: "idle" };
 let anchorLineId: string | null = null;
 /** 欄から送ったけれど、状態機械の答えがまだ届いていない組 (clipBase の doc) */
 let pendingClip: Clip | null = null;
+/**
+ * 位置 (index) で指す操作 (手入力の行の ADD / UPDATE / REMOVE_TELOP、見出しの ✕ の REMOVE_SEGMENT) の答えを待っている。
+ * **SET_CLIP (pendingClip) と混ぜない** (whole-branch review)。SET_CLIP が先に効くと位置が詰まり、古い位置で送った操作が
+ * 別のテロップを書き換える / 状態機械を internal-error に落とす。逆に位置で送った答えを待つ間に組を作ると、古い写しで
+ * 直した時刻や文字を黙って戻す
+ */
+let indexedAwaiting = false;
+/** 位置で送った操作の答え (適用後の状態の要約)。答えが返った後に状態を描いたら待つのをやめる。答えの前なら null */
+let indexedResult: string | null = null;
+/** 最後に描いた状態の要約 (clipKey)。応答より先に通知を描いていたかを見る */
+let lastAppliedKey = "";
+/** 状態を描いた回数。位置で指す操作を送ってから 1 度でも描いたか (= 通知が来ている) を見る */
+let drawCount = 0;
 /** 外した行のテロップの文字 (行の id ごと)。入れ直したら戻す。動画が変わったら捨てる */
 const editedLineTexts = new Map<string, string>();
 /** 届いた状態が SET_CLIP を受けるか (acceptsSetClip)。欄の押せる / 押せないはこれで決める */
@@ -2232,6 +2211,24 @@ function onTranscriptStatus(status: TranscriptStatus): void {
   const line = transcriptLogLine(status);
   if (line !== null) console.info(line);
   refreshTranscript();
+  // 取り終えたら、先に IN / OUT で作っていた区間の中の行もテロップにする
+  syncTelopsToSegments();
+}
+
+/**
+ * **区間に入っている字幕の行 = テロップが出る** に揃える (回答 2026-11-03「区間に入った行は全部テロップに」)。状態機械は
+ * 文字起こしの行を知らないので、行を持っているこのタブが、区間が変わった答えを描いた後に SET_CLIP で揃える。
+ *
+ * 揃えるのは ready のときだけ (posted で SET_CLIP を送ると、投稿したクリップが外れる。範囲を触れば ready に戻ってから揃う)。
+ * 欄の組・位置で指す操作・±0.1 の答えを待っている間は揃えない (答えが届いて描いたときにまた呼ばれる)
+ */
+function syncTelopsToSegments(): void {
+  if (lastKind !== "ready" || !canEditTelops() || !transcriptEditable) return;
+  if (pendingClip !== null || indexedAwaiting || rangeAwaiting !== null) return;
+  const lines = transcriptLines();
+  if (lines.length === 0) return;
+  const next = syncLineTelops(listedItems(), lines, editedLineTexts);
+  if (next !== null) sendClip(next);
 }
 
 /** 今の動画の文字起こしの行を id で引く */
@@ -2251,6 +2248,68 @@ function transcriptLines(): TranscriptLine[] {
  */
 function canEditFromTranscript(): boolean {
   return transcriptEditable;
+}
+
+const CLIP_BUSY_MESSAGE = "前の操作の答えを待っています。少し待ってからもう一度押してください";
+/**
+ * 位置で指す操作の答えが描いた状態と違うとき、通知を待つ長さ (ミリ秒)。過ぎたら答えの状態を描いて待つのをやめる。
+ * **拒まれた操作は通知されない** (router は拒んだ遷移を publish しない)。別のタブで状態が先に変わっていて、このタブの
+ * 写しが古いまま拒まれると、通知を待つだけでは欄の操作がずっと止まる (whole-branch 再レビュー)
+ */
+const INDEXED_ANSWER_WAIT_MS = 1500;
+let indexedFallback: ReturnType<typeof setTimeout> | null = null;
+
+/** 比べるための状態の要約 (種類と区間とテロップ)。応答と通知は別の object なので中身で比べる */
+function clipKey(state: ClipState): string {
+  return JSON.stringify([state.kind, "segments" in state ? state.segments : [], "telops" in state ? state.telops : []]);
+}
+
+/** 欄から組 (SET_CLIP) を送ってよいか。位置で送った答えを待っている間は送らず理由を出す */
+function canSendClip(): boolean {
+  if (!indexedAwaiting) return true;
+  setStatus(CLIP_BUSY_MESSAGE);
+  return false;
+}
+
+/** 位置で指す操作を送る。欄の組 (SET_CLIP) の答えか、前の位置の操作の答えを待っている間は送らず理由を出す */
+function sendIndexed(event: ClipEvent): boolean {
+  if (pendingClip !== null || indexedAwaiting) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return false;
+  }
+  indexedAwaiting = true;
+  indexedResult = null;
+  const id = runId;
+  const sentAt = drawCount;
+  const settle = (): void => {
+    indexedAwaiting = false;
+    indexedResult = null;
+  };
+  send(
+    event,
+    (state) => {
+      // router は通知を応答より先に送るので、もう描いているかもしれない。描いていればここで待つのをやめる
+      const key = clipKey(state);
+      // 送ってから 1 度でも描いていれば、描いたのはこの答えの通知か、それより新しい状態。待つのをやめるだけにする
+      // (古い答えで描き直さない。後の操作の通知が応答より先に届いたとき、その結果を戻さない)
+      if (key === lastAppliedKey || drawCount !== sentAt) {
+        settle();
+        return true;
+      }
+      indexedResult = key;
+      // 通知が来ないまま (拒まれた) なら、答えの状態を描く。描けば applyStateToDisplay が待つのをやめる。
+      // その間にほかの状態を描いていれば (indexedAwaiting が下りている) 何もしない (新しい状態を古い答えで戻さない)
+      if (indexedFallback !== null) clearTimeout(indexedFallback);
+      indexedFallback = setTimeout(() => {
+        indexedFallback = null;
+        if (!isCurrentRun(id) || !indexedAwaiting || indexedResult !== key) return;
+        applyStateToDisplay(state);
+      }, INDEXED_ANSWER_WAIT_MS);
+      return true;
+    },
+    settle,
+  );
+  return true;
 }
 
 /**
@@ -2328,6 +2387,12 @@ function refreshTranscript(): void {
     header,
     dubbed: forThisVideo && (status.kind === "ready" || status.kind === "none") && status.dubbed,
     enabled: canEditFromTranscript(),
+    // 区間の見出しと手入力の行 (lineId の無いテロップ。ADR 0003)
+    // 取っている間は、行から作ったテロップを手入力の行にしない (取り終わると行へ戻る)
+    items: placeTranscriptItems(lines, segments, telops, header.kind !== "loading"),
+    trimmingIndex: segments.length === 0 ? -1 : selectedIndex,
+    // 区間があり、テロップを変えられる (ready / posted で、範囲を作った動画を見ている)。canEditTelops は区間がある状態でしか true にならない
+    canAddManual: canEditTelops(),
     rows: lines.map((line) => {
       const selected = isLineInSegments(line, segments);
       const telop = telopByLine.get(line.id);
@@ -2341,7 +2406,7 @@ function refreshTranscript(): void {
       };
     }),
   });
-  // 読み込みが済んだら詰める欄にも単語を出す (refreshLists からも呼ばれるので 2 回になるが冪等)
+  // 読み込みが済んだら詰める欄にも単語を出す (詰める欄の単語・合計も欄と同じ写しから描く)
   refreshTrimPanel();
 }
 
@@ -2358,6 +2423,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
     if (!busy) setStatus("いまは区間を変えられません");
     return;
   }
+  if (!canSendClip()) return;
   const lines = transcriptLines();
   const line = lines.find((item) => item.id === lineId);
   if (line === undefined) return;
@@ -2374,10 +2440,10 @@ function onToggleLine(lineId: string, extend: boolean): void {
     setStatus(`1 つの区間は ${maxClipSec} 秒までです。行を分けて選んでください (設定で上限を変えられます)`);
     return;
   }
-  // **最後の区間が消えるとき、テロップが残るなら送らない** (区間の一覧の ✕ と同じ守り)。区間が 0 個になると
+  // **最後の区間が消えるとき、テロップが残るなら送らない** (見出しの ✕ と同じ守り)。区間が 0 個になると
   // 状態機械は idle に戻り、手で打ったテロップもまとめて消える
-  if (next.segments.length === 0 && next.telops.length > 0) {
-    setStatus(telopsRemainMessage(next.telops.length));
+  if (next.segments.length === 0 && irreplaceableTelops(next.telops) > 0) {
+    setStatus(telopsRemainMessage(irreplaceableTelops(next.telops)));
     return;
   }
   // 起点は送るときだけ動かす (拒んだ Shift + クリックで起点がずれない)
@@ -2405,6 +2471,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
 function onEditLineText(lineId: string, text: string): boolean {
   if (!canEditFromTranscript()) return false;
   if (rejectLongTelopText(text)) return false;
+  if (!canSendClip()) return false;
   const base = clipBase();
   if (!base.telops.some((telop) => telop.lineId === lineId)) return false;
   sendClip({
@@ -2417,6 +2484,7 @@ function onEditLineText(lineId: string, text: string): boolean {
 /** 「字幕に出さない」/「字幕に出す」 */
 function onToggleLineHidden(lineId: string): void {
   if (!canEditFromTranscript()) return;
+  if (!canSendClip()) return;
   const line = lineById(lineId);
   if (line === undefined) return;
   const next = toggleTelopHidden(clipBase(), line);
@@ -2473,12 +2541,9 @@ function mount(): void {
   // 前のバーが外されていることがある (YouTube の再描画で枠ごと外れた)。参照だけ差し替えると
   // rAF とリスナを抱えた古いインスタンスが解放されないまま残る
   const previousBar = rangeBar;
-  const previousTrack = telopTrack;
-  // buildBar が rangeBar と telopTrack を新しいインスタンスに差し替える
+  // buildBar が rangeBar を新しいインスタンスに差し替える
   const bar = buildBar();
   previousBar?.destroy();
-  // 帯の段も rAF (シークの間引き) とドラッグのリスナを抱えうる。拡大バーと同じく捨てる
-  previousTrack?.destroy();
 
   // 窓の中身だけを入れ替える。窓は作り直さないので、位置も大きさも変わらない (spec A.3)
   barWindow.body.replaceChildren(bar);
@@ -2498,7 +2563,7 @@ function mount(): void {
   }
   refreshOverlay();
   refreshTelopPreview();
-  // 作り直した一覧は空で隠れている。次の状態通知を待たずに手元の写しで描き直し、
+  // 作り直した詰める欄は空で隠れている。次の状態通知を待たずに手元の写しで描き直し、
   // 窓の表示も決め直す
   refreshLists();
 }
@@ -2803,7 +2868,7 @@ function onPageMutated(): void {
     trimPanel?.setEnabled(canAdjustRange());
     refreshOverlay();
     refreshTelopPreview();
-    // 一覧も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
+    // 欄も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
     // 動画ページ以外へ移ったら、窓もドック枠もページから外れる (refreshWindows → leaveVideoPage)
     refreshLists();
     // 状態の欄も同じ。B では最初の案内、A へ戻ったら選んでいる区間の範囲 (状態は SPA で移っても届かない)。
@@ -2834,10 +2899,7 @@ function resetModuleState(): void {
   currentTelops = [];
   recordingTelops = null;
   selectedIndex = -1;
-  segmentList = null;
-  telopList = null;
   rangeBar = null;
-  telopTrack = null;
   trimPanel = null;
   layoutReady = false;
   // 覚えた配置の写し。start() の loadInitialLayout が読み直す (オフの間に別のタブで動かした位置も拾う)
@@ -2847,7 +2909,13 @@ function resetModuleState(): void {
   selectRangeOnNextState = null;
   rangeAwaiting = null;
   revealSegmentOnNextState = false;
-  revealLastTelopOnNextState = false;
+  revealTelopOnNextState = null;
+  indexedAwaiting = false;
+  indexedResult = null;
+  lastAppliedKey = "";
+  drawCount = 0;
+  if (indexedFallback !== null) clearTimeout(indexedFallback);
+  indexedFallback = null;
   removedIndexOnNextState = null;
   rangeVideoId = null;
   busy = false;
@@ -2869,7 +2937,7 @@ function resetModuleState(): void {
 /**
  * オンにする (マスタースイッチの spec §2.3 の逆順)。今まで import 時に行っていた処理を、そのままここで行う:
  * 窓とドック枠と監視を作る → mount() → 設定の読み込み → 覚えた配置の読み込み → content/loaded (状態の取り戻し)。
- * **読み込み直さずにオンへ戻せる** (spec §2.4): content/loaded はタブのリロードと同じ経路で、応答の状態で範囲・帯・一覧が
+ * **読み込み直さずにオンへ戻せる** (spec §2.4): content/loaded はタブのリロードと同じ経路で、応答の状態で範囲・シークバーの帯・欄が
  * 戻る。覚えた配置の読み込みが済むまで窓を出さない (spec A.2) のも今までと同じ。
  * 呼ぶのは switch driver だけ (テストのために export する。判断メモ 15)。二度呼ぶのは配線の誤り
  */
@@ -2934,11 +3002,10 @@ export function stop(): void {
   // 4. YouTube の要素の中に差したもの: プレイヤーの上の canvas (video の seeked・rVFC・ResizeObserver も) とシークバーの帯
   telopPreview.destroy();
   clearOverlay();
-  // 5. ドック枠 (中の窓ごと外れる) → 拡大バーと帯の段 (rAF と捕捉) → 窓 (resize の listener)。**枠を窓より先に**:
+  // 5. ドック枠 (中の窓ごと外れる) → 拡大バー (rAF と捕捉) → 窓 (resize の listener)。**枠を窓より先に**:
   //    ドック中の窓は枠の根の中にあり、窓の destroy は自分の要素しか外さない
   dockManager.destroy();
   rangeBar?.destroy();
-  telopTrack?.destroy();
   barWindow.destroy();
   listWindow.destroy();
   // 6. 文字起こしの取得 (走っている取得の結末は捨てる) と、写しを最初の値に戻す

@@ -7,7 +7,7 @@ import type { ClipRange, Telop } from "@/shared/types";
  * 文字起こしの欄で行を入れた / 外したときの、区間とテロップの組を計算する (ADR 0001)。**純粋関数だけを置く**
  * (状態機械へ送るのは youtube.ts。ここは組を作るだけ)。
  *
- * **押した行のまわりしか変えない。** 区間とテロップの一覧と ＋ 区間を追加は 1c まで残るので、手で作った区間と行の
+ * **押した行のまわりしか変えない。** ＋ 区間を追加と IN / OUT で手で作った区間と、行の
  * 選択が混ざるのが普通の使い方になる。押した行に当たらない区間とテロップは、手作りでも重なっていても触らない。
  *
  * 規則:
@@ -178,4 +178,38 @@ export function toggleTelopHidden(clip: Clip, line: TranscriptLine): Clip | null
     segments: clip.segments,
     telops: clip.telops.map((item, i) => (i === index ? { ...item, text } : item)),
   };
+}
+
+/**
+ * **区間に入っている字幕の行 = テロップが出る** に揃える (回答 2026-11-03「区間に入った行は全部テロップに」)。
+ * 行を押したとき以外 (詰める欄のハンドル・±0.1・IN / OUT・＋ 区間を追加・見出しの ✕) で区間が変わったあとに呼ぶ。
+ * 揃っていれば null (送らない)。
+ *
+ * - 区間に入った行にテロップが無ければ末尾に足す (前からのテロップの位置は動かさない)。直した文字を覚えていればそれで
+ * - 区間から外れた行のテロップは消し、文字を `remembered` に覚える (また入ったら戻す)
+ * - 手入力のテロップ (`lineId` が無い) と、行が無くなった (取り直した) テロップは触らない。区間も変えない
+ */
+export function syncLineTelops(clip: Clip, lines: TranscriptLine[], remembered: Map<string, string>): Clip | null {
+  const covered = new Set<string>();
+  for (const line of lines) if (isLineInSegments(line, clip.segments)) covered.add(line.id);
+  const known = new Set(lines.map((line) => line.id));
+
+  let changed = false;
+  const kept = clip.telops.filter((telop) => {
+    if (telop.lineId === undefined || !known.has(telop.lineId) || covered.has(telop.lineId)) return true;
+    remembered.set(telop.lineId, telop.text);
+    changed = true;
+    return false;
+  });
+  const have = new Set(kept.map((telop) => telop.lineId));
+  const added = lines
+    .filter((line) => covered.has(line.id) && !have.has(line.id))
+    .map((line) => ({
+      startSec: line.startSec,
+      endSec: line.endSec,
+      text: remembered.get(line.id) ?? line.text.slice(0, MAX_TELOP_TEXT_LENGTH),
+      lineId: line.id,
+    }));
+  if (!changed && added.length === 0) return null;
+  return { segments: clip.segments, telops: [...kept, ...added] };
 }

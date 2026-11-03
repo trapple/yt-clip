@@ -327,7 +327,7 @@ describe("文字起こしの欄 (段階 1b-2)", () => {
     expect(state).toMatchObject({ telops: [{ text: "直した", lineId: "youtube-asr:4.00" }] });
   });
 
-  test("最後の行を外すと手で足したテロップまで消えるときは、送らずに理由を出す (区間の一覧の ✕ と同じ)", async () => {
+  test("最後の行を外すと手で足したテロップまで消えるときは、送らずに理由を出す (見出しの ✕ と同じ)", async () => {
     ready();
     await flush();
     emit({
@@ -442,3 +442,290 @@ describe("詰める欄 (段階 1c-1)", () => {
     expect(title).toBe("区間 2 を詰める");
   });
 });
+
+describe("区間の見出し (段階 1c-2)", () => {
+  const headers = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>("#yt-clip-list [data-role='segment']")];
+
+  test("行を押すと、その行の上に区間の見出しが出て、詰めている区間に印が付く", async () => {
+    ready();
+    await flush();
+    rows()[1]!.click();
+    await flush();
+    const list = document.querySelector<HTMLElement>("[data-role='transcript-lines']")!;
+    const order = [...list.children].map((child) => (child as HTMLElement).dataset.role);
+    expect(order).toEqual(["line", "segment", "line", "line"]);
+    expect(headers()[0]?.querySelector("[data-role='segment-title']")?.textContent).toBe("区間 1 · 詰めている");
+  });
+
+  test("見出しを押すとその区間を詰める欄で詰める", async () => {
+    ready();
+    await flush();
+    rows()[0]!.click();
+    await flush();
+    // 3 秒より空いていないので 1 つに繋がらないよう、離れた区間を状態で作る
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }, { startSec: 6.8, endSec: 9.3 }],
+      telops: [],
+      meta: META,
+    });
+    await flush();
+    headers()[0]!.click();
+    await flush();
+    expect(document.querySelector("[data-role='trim-title']")?.textContent).toBe("区間 1 を詰める");
+    expect(headers()[0]?.dataset.selected).toBe("true");
+    expect(headers()[1]?.dataset.selected).toBe("false");
+  });
+
+  test("見出しの ✕ でその区間を消す", async () => {
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }, { startSec: 6.8, endSec: 9.3 }],
+      telops: [],
+      meta: META,
+    });
+    await flush();
+    events = [];
+    headers()[1]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    // 区間を消した後、区間から外れた行のテロップを揃える SET_CLIP が続くことがある (syncLineTelops)
+    expect(events[0]).toEqual({ type: "REMOVE_SEGMENT", index: 1 });
+    expect(headers()).toHaveLength(1);
+  });
+});
+
+describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
+  const manualRows = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>("#yt-clip-list [data-role='telop']")];
+  const addButton = (): HTMLButtonElement => document.querySelector<HTMLButtonElement>("#yt-clip-list [data-role='add-telop']")!;
+  const lineEditor = (): HTMLTextAreaElement | null => document.querySelector<HTMLTextAreaElement>("[data-role='line-edit']");
+  const video = (): HTMLVideoElement => document.querySelector<HTMLVideoElement>("video")!;
+
+  test("区間が無いと押せない", async () => {
+    ready();
+    await flush();
+    expect(addButton().disabled).toBe(true);
+  });
+
+  test("押すと今の位置から 3 秒のテロップを足し、行の時刻順の並びに入って文字を打つ欄が開く", async () => {
+    ready();
+    await flush();
+    rows()[0]!.click();
+    await flush();
+    Object.defineProperty(video(), "duration", { configurable: true, value: 600 });
+    video().currentTime = 5;
+    events = [];
+    try {
+      addButton().click();
+      await flush();
+    } finally {
+      // 後のテストに長さを持ち越さない
+      delete (video() as { duration?: number }).duration;
+    }
+    expect(events).toEqual([{ type: "ADD_TELOP", telop: { startSec: 5, endSec: 8, text: "" } }]);
+    const list = document.querySelector<HTMLElement>("[data-role='transcript-lines']")!;
+    const order = [...list.children].map((child) => {
+      const el = child as HTMLElement;
+      return el.dataset.role === "line" ? el.dataset.lineId : el.dataset.role;
+    });
+    // 5 秒は 4〜6 秒の行の後、7 秒の行の前
+    expect(order).toEqual(["segment", "youtube-asr:1.00", "youtube-asr:4.00", "telop", "youtube-asr:7.00"]);
+    expect(lineEditor()).not.toBeNull();
+    expect(document.activeElement).toBe(lineEditor());
+  });
+
+  test("打って Enter でテロップの文字にする", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "" }], meta: META });
+    await flush();
+    events = [];
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='manual-edit-button']")!.click();
+    lineEditor()!.value = "ここ重要";
+    lineEditor()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(events).toEqual([{ type: "UPDATE_TELOP", index: 0, telop: { startSec: 5, endSec: 8, text: "ここ重要" } }]);
+  });
+
+  test("頭を今に・尻を今に・✕", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    events = [];
+    video().currentTime = 6;
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='set-start']")!.click();
+    await flush();
+    expect(events.at(-1)).toEqual({ type: "UPDATE_TELOP", index: 0, telop: { startSec: 6, endSec: 8, text: "あ" } });
+    video().currentTime = 7;
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='set-end']")!.click();
+    await flush();
+    expect(events.at(-1)).toEqual({ type: "UPDATE_TELOP", index: 0, telop: { startSec: 6, endSec: 7, text: "あ" } });
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events.at(-1)).toEqual({ type: "REMOVE_TELOP", index: 0 });
+    expect(manualRows()).toHaveLength(0);
+  });
+
+  test("文字起こしを取り直しても手入力の行は残る", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    ready();
+    await flush();
+    expect(manualRows()).toHaveLength(1);
+  });
+
+  test("行から作ったテロップは手入力の行にしない", async () => {
+    ready();
+    await flush();
+    rows()[0]!.click();
+    await flush();
+    expect(manualRows()).toHaveLength(0);
+  });
+
+  test("見出しの ✕ で区間を消すと、その行のテロップも消える (区間に入っている行 = テロップが出る)", async () => {
+    ready();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }, { startSec: 6.8, endSec: 9.3 }],
+      telops: [
+        { startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" },
+        { startSec: 7, endSec: 9, text: "えーと", lineId: "youtube-asr:7.00" },
+      ],
+      meta: META,
+    });
+    await flush();
+    events = [];
+    document.querySelectorAll<HTMLElement>("#yt-clip-list [data-role='segment']")[1]!
+      .querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events.map((event) => event.type)).toEqual(["REMOVE_SEGMENT", "SET_CLIP"]);
+    expect(events[1]).toMatchObject({ telops: [{ lineId: "youtube-asr:1.00" }] });
+    expect(manualRows()).toHaveLength(0);
+  });
+
+  test("詰めて区間を広げ、隣の行が入るとテロップができ、狭めて外すと消える。直した文字は戻る", async () => {
+    ready();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }],
+      telops: [{ startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" }],
+      meta: META,
+    });
+    await flush();
+    events = [];
+    // 拡大バーのハンドルで尻を 6.3 まで広げた答え (ADJUST_SEGMENT) が描かれた
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 6.3 }],
+      telops: [{ startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" }],
+      meta: META,
+    });
+    await flush();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "SET_CLIP",
+        telops: [
+          { startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" },
+          // 文字は、この動画の間に前のテストで直した文字を覚えていればそれになる (syncLineTelops の remembered)
+          expect.objectContaining({ startSec: 4, endSec: 6, lineId: "youtube-asr:4.00" }),
+        ],
+      }),
+    ]);
+    expect(rows()[1]!.querySelector("[data-role='line-edit-button']")).not.toBeNull();
+
+    // 直してから狭めて外し、また広げる
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 6.3 }],
+      telops: [
+        { startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" },
+        { startSec: 4, endSec: 6, text: "直した", lineId: "youtube-asr:4.00" },
+      ],
+      meta: META,
+    });
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }],
+      telops: [
+        { startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" },
+        { startSec: 4, endSec: 6, text: "直した", lineId: "youtube-asr:4.00" },
+      ],
+      meta: META,
+    });
+    await flush();
+    expect(state.kind === "ready" && state.telops.map((telop) => telop.lineId)).toEqual(["youtube-asr:1.00"]);
+    emit({ ...state, segments: [{ startSec: 0.8, endSec: 6.3 }] } as ClipState);
+    await flush();
+    expect(state.kind === "ready" && state.telops.map((telop) => telop.text)).toEqual(["さあ残り 30 秒", "直した"]);
+  });
+
+  test("行を押した答えを待つ間は、手入力の行を位置で指して変えない (詰まった位置で別のテロップを書き換えない)", async () => {
+    // テロップが [X (行 1 の字幕), A (手入力)]。行 1 を外す SET_CLIP が先に効くと A は位置 0 に詰まり、
+    // 古い位置 1 で送った UPDATE_TELOP は後ろの別のテロップを上書きするか、状態機械を internal-error に落とす
+    ready();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 9.3 }],
+      telops: [
+        { startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" },
+        { startSec: 5, endSec: 8, text: "あ" },
+      ],
+      meta: META,
+    });
+    await flush();
+    events = [];
+    rows()[0]!.click();
+    // 答えを待たずに押す
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='set-start']")!.click();
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+    expect(document.getElementById("yt-clip-bar-status")?.textContent).toBe(
+      "前の操作の答えを待っています。少し待ってからもう一度押してください",
+    );
+    await flush();
+    // 答えが描かれた後は押せる (A は位置 0 に詰まっている)
+    events = [];
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events).toEqual([{ type: "REMOVE_TELOP", index: 0 }]);
+  });
+
+  test("手入力の行を変えた答えを待つ間は、行を押しても古い写しで丸ごと差し替えない", async () => {
+    ready();
+    await flush();
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    events = [];
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    rows()[1]!.click();
+    expect(events.map((event) => event.type)).toEqual(["REMOVE_TELOP"]);
+    await flush();
+    events = [];
+    rows()[1]!.click();
+    await flush();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+  });
+
+  test("位置で指す操作が拒まれて通知が来なくても、待ったままにならない (別のタブで状態が先に変わっていたとき)", async () => {
+    ready();
+    await flush();
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    // 別のタブでテロップが消えた。このタブには通知が届かず、描いた状態は古いまま
+    state = { kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [], meta: META };
+    events = [];
+    // 位置 0 のテロップは router にはもう無いので拒まれ、通知は来ない
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events).toEqual([{ type: "REMOVE_TELOP", index: 0 }]);
+    // 少し待っても通知が来なければ、応答の状態を描いて待つのをやめる
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+    await flush();
+    expect(manualRows()).toHaveLength(0);
+    events = [];
+    rows()[1]!.click();
+    await flush();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+  });
+});
+

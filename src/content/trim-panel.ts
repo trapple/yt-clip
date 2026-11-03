@@ -1,16 +1,16 @@
 /**
  * 詰める欄 (ADR 0001・第 2 版のモック)。見出しの行 (区間 N を詰める・時刻・‹ ›・頭と尻の ±0.1・繋ぎ目の聞き直し)、
- * 拡大バー (前後 2 秒の窓) とテロップの帯、窓の中の単語を並べる。詰める操作は見出しの行に入れ、行を増やさない
+ * 拡大バー (前後 2 秒の窓) と、窓の中の単語を並べる。詰める操作は見出しの行に入れ、行を増やさない
  * (回答 2026-11-03「行を詰めて最小に」。1440x795 でバーの背をなるべく伸ばさないように)。
  *
  * **区間は持たない。** 何を出すかは `update` で受け取り、押されたことを伝えるだけ (状態機械に送るのは youtube.ts)。
- * 拡大バーとテロップの帯は youtube.ts が作り、要素だけをここに入れる (どちらも youtube.ts が直接更新する)
+ * 拡大バーは youtube.ts が作り、要素だけをここに入れる (youtube.ts が直接更新する)
  */
 
 import { NUDGE_SEC, timeToRatio, type HandleKind, type TimeWindow } from "@/content/range-math";
 import { TRIM_STYLE } from "@/content/styles";
 import type { TrimWord } from "@/content/trim-words";
-import { formatTime, formatTimeCentis } from "@/shared/time";
+import { formatSecTenths, formatTime, formatTimeCentis } from "@/shared/time";
 import type { ClipRange } from "@/shared/types";
 
 export type TrimPanelCallbacks = {
@@ -30,6 +30,10 @@ export type TrimView = {
   range: ClipRange | null;
   /** 全区間の合計 (秒) */
   totalSec: number;
+  /** 1 本のクリップの上限の秒数 (設定)。合計がこれを超えると録画できない */
+  maxClipSec: number;
+  /** 合計が上限を超えている (`isOverLimit`)。**ここで比べ直さない**: 録画ボタンと同じ判定 (丸めてから比べる) にする */
+  over: boolean;
   /** 拡大バーが映している窓。まだ無ければ null */
   window: TimeWindow | null;
   /** 窓に入る単語 (`wordsInWindow`) */
@@ -44,19 +48,16 @@ export type TrimPanel = {
   setActiveEdge(kind: HandleKind): void;
 };
 
-/** 秒を 0.1 秒の桁で出す (見出しの長さと合計) */
-const tenths = (sec: number): string => (Math.round(sec * 10) / 10).toFixed(1);
-
 /** 押されたキーが文字を打つ欄の中か。打っている文字を横取りしない */
 function isTyping(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && (target.isContentEditable || target.closest("input, textarea, select") !== null);
 }
 
 export function createTrimPanel(
-  parts: { rangeBar: HTMLElement; telopTrack: HTMLElement },
+  parts: { rangeBar: HTMLElement },
   callbacks: TrimPanelCallbacks,
 ): TrimPanel {
-  let view: TrimView = { index: -1, count: 0, range: null, totalSec: 0, window: null, words: [] };
+  let view: TrimView = { index: -1, count: 0, range: null, totalSec: 0, maxClipSec: 0, over: false, window: null, words: [] };
   let enabled = false;
   /** キーで動かす端。はじめは頭 (モック「選んでいる端を動かす」) */
   let activeEdge: HandleKind = "in";
@@ -140,7 +141,7 @@ export function createTrimPanel(
   ghostEnd.style.cssText = TRIM_STYLE.ghost;
   words.append(ghostStart, lane, ghostEnd);
 
-  element.append(head, parts.rangeBar, parts.telopTrack, words);
+  element.append(head, parts.rangeBar, words);
 
   /** キーで動く端の組に印を付ける (どちらが動くか見えるように) */
   function setActive(kind: HandleKind): void {
@@ -171,7 +172,7 @@ export function createTrimPanel(
     const window = view.window;
     const range = view.range;
     const shown = window !== null && range !== null ? view.words : [];
-    // **display も切り替える。** 根の inline の display:flex は [hidden] に勝ち、空の段が背を取り続ける (telop-track と同じ作法)
+    // **display も切り替える。** 根の inline の display:flex は [hidden] に勝ち、空の段が背を取り続ける
     words.hidden = shown.length === 0;
     words.style.display = shown.length === 0 ? "none" : "flex";
     if (window === null || range === null) {
@@ -205,10 +206,15 @@ export function createTrimPanel(
     if (range !== null) {
       title.textContent = `区間 ${view.index + 1} を詰める`;
       const length = range.endSec - range.startSec;
-      rangeText.textContent = `${formatTimeCentis(range.startSec)} – ${formatTimeCentis(range.endSec)} · ${tenths(length)} 秒 · 合計 ${tenths(view.totalSec)} 秒`;
+      const over = view.over;
+      rangeText.textContent = `${formatTimeCentis(range.startSec)} – ${formatTimeCentis(range.endSec)} · ${formatSecTenths(length)} 秒 · 合計 ${formatSecTenths(view.totalSec)} / ${view.maxClipSec} 秒`;
+      rangeText.dataset.over = over ? "true" : "false";
+      rangeText.style.cssText = over ? TRIM_STYLE.rangeOver : TRIM_STYLE.range;
     } else {
       title.textContent = "区間はまだありません";
       rangeText.textContent = "文字起こしの行を押すか、＋ 区間を追加 で作れます";
+      rangeText.dataset.over = "false";
+      rangeText.style.cssText = TRIM_STYLE.range;
     }
     const hasPrev = range !== null && view.index > 0;
     const hasNext = range !== null && view.index < view.count - 1;

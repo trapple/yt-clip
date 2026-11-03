@@ -241,7 +241,6 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
           meta: state.meta,
         };
       }
-      if (event.type === "RESET_MARKS") return { kind: "idle" };
       return invalid(state);
 
     case "seeking":
@@ -400,7 +399,6 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
           invalid(state)
         );
       }
-      if (event.type === "RESET_MARKS") return { kind: "idle" };
       return invalid(state);
 
     case "degraded":
@@ -425,7 +423,6 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
           meta: state.meta,
         };
       }
-      if (event.type === "RESET_MARKS") return { kind: "idle" };
       return invalid(state);
 
     case "failed":
@@ -441,7 +438,6 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
           meta: state.meta,
         };
       }
-      if (event.type === "RESET_MARKS") return { kind: "idle" };
       return invalid(state);
   }
 }

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   DEFAULT_MAX_CLIP_SEC,
   MIN_CLIP_SEC,
+  formatSecTenths,
   formatTime,
   formatTimeCentis,
   toUrlSeconds,
@@ -116,5 +117,14 @@ describe("formatTimeCentis", () => {
   test("繰り上がりで秒の桁が 60 にならない", () => {
     // 59.996 を秒と 100 分の 1 で別々に丸めると 0:59.100 や 0:60.00 になる
     expect(formatTimeCentis(59.996)).toBe("1:00.00");
+  });
+});
+
+describe("formatSecTenths", () => {
+  test("0.1 秒の桁で出す", () => {
+    expect(formatSecTenths(8.36)).toBe("8.4");
+    expect(formatSecTenths(24.6)).toBe("24.6");
+    expect(formatSecTenths(3)).toBe("3.0");
+    expect(formatSecTenths(0.04)).toBe("0.0");
   });
 });

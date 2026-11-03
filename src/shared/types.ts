@@ -213,7 +213,6 @@ export type ClipEvent =
    * RETRY で戻れる区間とテロップを持っているので受けない (画面の写しは failed では空なので、丸ごと差し替えると消える)
    */
   | { type: "SET_CLIP"; segments: ClipRange[]; telops: Telop[]; meta: VideoMeta }
-  | { type: "RESET_MARKS" }
   | { type: "START_RECORDING" }
   | { type: "SEEK_DONE" }
   | { type: "OUT_REACHED" }

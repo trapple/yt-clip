@@ -13,6 +13,13 @@ function setup(overrides: Partial<TranscriptPanelCallbacks> = {}) {
     onToggleHidden: vi.fn(),
     onPlay: vi.fn(),
     onRetry: vi.fn(),
+    onSelectSegment: vi.fn(),
+    onRemoveSegment: vi.fn(),
+    onAddManual: vi.fn(),
+    onManualEdge: vi.fn(),
+    onManualText: vi.fn(() => true),
+    onRemoveManual: vi.fn(),
+    onPlayManual: vi.fn(),
     ...overrides,
   };
   const panel = createTranscriptPanel(callbacks);
@@ -29,6 +36,9 @@ const view = (overrides: Partial<TranscriptView> = {}): TranscriptView => ({
     { id: "b", startSec: 65, text: "ここは絶対に右から", selected: true, hidden: false, hasTelop: true },
     { id: "c", startSec: 70, text: "えーと", selected: true, hidden: true, hasTelop: true },
   ],
+  items: [],
+  trimmingIndex: -1,
+  canAddManual: false,
   ...overrides,
 });
 
@@ -100,7 +110,7 @@ describe("見出しと案内", () => {
     panel.update(view({ header: { kind: "loading" }, rows: [] }));
     expect(role("transcript-notice")?.textContent).toBe("文字起こしを取っています…");
     panel.update(view({ header: { kind: "none" }, rows: [] }));
-    expect(role("transcript-notice")?.textContent).toBe("この動画には公式字幕がありません");
+    expect(role("transcript-notice")?.textContent).toBe("この動画には公式字幕がありません。IN / OUT で区間を作り、＋ ここに字幕を足す でテロップを足せます");
     panel.update(view({ header: { kind: "failed", reason: "字幕が空で返りました" }, rows: [] }));
     expect(role("transcript-notice")?.textContent).toContain("文字起こしを取れませんでした: 字幕が空で返りました");
     role("transcript-retry")?.click();
@@ -234,4 +244,212 @@ test("setCurrentTime で、再生位置を含む行 (その位置より前で最
   expect(marks()).toEqual(["false:", "false:", "false:"]);
   panel.setCurrentTime(100);
   expect(marks()).toEqual(["false:", "false:", "true:▶"]);
+});
+
+describe("区間の見出しと手入力の行 (段階 1c-2)", () => {
+  const SEGMENT = { kind: "segment", index: 0, startSec: 64.8, endSec: 73.3, before: 1 } as const;
+  const MANUAL = { kind: "manual", telopIndex: 2, startSec: 66, endSec: 69, text: "ここ重要", inSegment: true, fromLine: false, before: 2 } as const;
+  const listChildren = (): string[] =>
+    [...(role("transcript-lines")?.children ?? [])].map((child) => {
+      const el = child as HTMLElement;
+      return el.dataset.role === "line" ? `line:${el.dataset.lineId}` : `${el.dataset.role}`;
+    });
+  const header = (): HTMLElement => document.querySelector<HTMLElement>("[data-role='segment']")!;
+  const manual = (): HTMLElement => document.querySelector<HTMLElement>("[data-role='telop']")!;
+  const inManual = (name: string): HTMLElement | null => manual().querySelector<HTMLElement>(`[data-role='${name}']`);
+
+  test("見出しと手入力の行は、指した行の前に入る", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [SEGMENT, MANUAL] }));
+    expect(listChildren()).toEqual(["line:a", "segment", "line:b", "telop", "line:c"]);
+  });
+
+  test("行の数を指すものは末尾に入る。行が無くても並ぶ (字幕の無い動画)", () => {
+    const { panel } = setup();
+    panel.update(view({ header: { kind: "none" }, rows: [], items: [{ ...SEGMENT, before: 0 }, { ...MANUAL, before: 0 }] }));
+    expect(listChildren()).toEqual(["segment", "telop"]);
+  });
+
+  test("見出しに区間の番号・頭と尻・長さを出し、詰めている区間には「· 詰めている」", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [SEGMENT], trimmingIndex: -1 }));
+    expect(header().querySelector("[data-role='segment-title']")?.textContent).toBe("区間 1");
+    expect(header().querySelector("[data-role='segment-range']")?.textContent).toBe("1:04.80 – 1:13.30 · 8.5 秒");
+    expect(header().dataset.selected).toBe("false");
+
+    panel.update(view({ items: [SEGMENT], trimmingIndex: 0 }));
+    expect(header().querySelector("[data-role='segment-title']")?.textContent).toBe("区間 1 · 詰めている");
+    expect(header().dataset.selected).toBe("true");
+  });
+
+  test("見出しを押すと選び、✕ で消す (✕ は選ばない)", () => {
+    const { panel, callbacks } = setup();
+    panel.update(view({ items: [SEGMENT] }));
+    header().click();
+    expect(callbacks.onSelectSegment).toHaveBeenCalledWith(0);
+    header().querySelector<HTMLElement>("[data-role='remove']")!.click();
+    expect(callbacks.onRemoveSegment).toHaveBeenCalledWith(0);
+    expect(callbacks.onSelectSegment).toHaveBeenCalledTimes(1);
+    // 見出しを押しても行の入れ外しにはならない
+    expect(callbacks.onToggle).not.toHaveBeenCalled();
+  });
+
+  test("手入力の行は時刻と文字を出し、空の文字は「まだ書いていません」", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [MANUAL] }));
+    expect(manual().dataset.telopIndex).toBe("2");
+    expect(inManual("manual-time")?.textContent).toBe("1:06");
+    expect(inManual("manual-text")?.textContent).toBe("ここ重要");
+    expect(inManual("manual-text")?.dataset.empty).toBe("false");
+
+    panel.update(view({ items: [{ ...MANUAL, text: "" }] }));
+    expect(inManual("manual-text")?.textContent).toBe("（まだ書いていません）");
+    expect(inManual("manual-text")?.dataset.empty).toBe("true");
+
+    // 区間から外れた、字幕に出さないにした行のテロップ。書いていないのとは違う
+    panel.update(view({ items: [{ ...MANUAL, text: "", fromLine: true }] }));
+    expect(inManual("manual-text")?.textContent).toBe("（字幕に出さない行）");
+  });
+
+  test("手入力の行の文字はタグとして解釈しない", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [{ ...MANUAL, text: "<img src=x onerror=alert(1)>" }] }));
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  test("区間の外の手入力の行には「(区間外)」が付く", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [{ ...MANUAL, inSegment: false }] }));
+    expect(manual().dataset.inSegment).toBe("false");
+    expect(inManual("telop-outside")?.textContent).toBe("(区間外)");
+    panel.update(view({ items: [MANUAL] }));
+    expect(inManual("telop-outside")).toBeNull();
+  });
+
+  test("頭を今に・尻を今に・✕・時刻を押すと、テロップの位置で伝える", () => {
+    const { panel, callbacks } = setup();
+    panel.update(view({ items: [MANUAL] }));
+    inManual("set-start")!.click();
+    inManual("set-end")!.click();
+    inManual("manual-time")!.click();
+    inManual("remove")!.click();
+    expect(callbacks.onManualEdge).toHaveBeenNthCalledWith(1, 2, "start");
+    expect(callbacks.onManualEdge).toHaveBeenNthCalledWith(2, 2, "end");
+    expect(callbacks.onPlayManual).toHaveBeenCalledWith(2);
+    expect(callbacks.onRemoveManual).toHaveBeenCalledWith(2);
+  });
+
+  test("押せない間 (録画中など) は手入力の行を変えないが、時刻からの再生は伝える", () => {
+    const { panel, callbacks } = setup();
+    panel.update(view({ items: [MANUAL], enabled: false }));
+    inManual("set-start")!.click();
+    inManual("remove")!.click();
+    inManual("manual-edit-button")!.click();
+    inManual("manual-time")!.click();
+    expect(callbacks.onManualEdge).not.toHaveBeenCalled();
+    expect(callbacks.onRemoveManual).not.toHaveBeenCalled();
+    expect(editor()).toBeNull();
+    expect(callbacks.onPlayManual).toHaveBeenCalledWith(2);
+  });
+
+  test("✎ で直す欄が開き、Enter でテロップの位置と文字を伝えて閉じる", () => {
+    const { panel, callbacks } = setup();
+    panel.update(view({ items: [MANUAL] }));
+    inManual("manual-edit-button")!.click();
+    expect(editor()?.value).toBe("ここ重要");
+    editor()!.value = "ここ大事";
+    key(editor()!, { key: "Enter" });
+    expect(callbacks.onManualText).toHaveBeenCalledWith(2, "ここ大事");
+    expect(editor()).toBeNull();
+  });
+
+  test("送らなかった (上限を超えた) ときは直す欄を閉じない", () => {
+    const { panel } = setup({ onManualText: vi.fn(() => false) });
+    panel.update(view({ items: [MANUAL] }));
+    inManual("manual-edit-button")!.click();
+    editor()!.value = "あ".repeat(501);
+    key(editor()!, { key: "Enter" });
+    expect(editor()?.value).toBe("あ".repeat(501));
+  });
+
+  test("直している間に状態が届いても、書きかけとフォーカスを残す", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [MANUAL] }));
+    inManual("manual-edit-button")!.click();
+    editor()!.value = "書きかけ";
+    // ほかの操作 (別の行の入れ外し) の答え。手入力の行の並びは同じ
+    panel.update(view({ items: [MANUAL], trimmingIndex: 0 }));
+    expect(editor()?.value).toBe("書きかけ");
+    expect(document.activeElement).toBe(editor());
+  });
+
+  test("手入力の行の数が変わったら直す欄を閉じる (位置がずれて別のテロップに書き込まない)", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [MANUAL] }));
+    inManual("manual-edit-button")!.click();
+    panel.update(view({ items: [{ ...MANUAL, telopIndex: 1, startSec: 60 }, MANUAL] }));
+    expect(editor()).toBeNull();
+  });
+
+  test("数が同じでも位置が詰まったら閉じる (前の字幕の行を外して、行のテロップが消えたとき)", () => {
+    // テロップが [行 L0, 手 M1, 手 M2] のとき M1 を直し始め、L0 の行を外すと [M1 (0), M2 (1)] になる。
+    // manual:1 はまだあり数も 2 のままだが、閉じないと Enter で M2 を上書きする
+    const { panel } = setup();
+    const m1 = { ...MANUAL, telopIndex: 1, startSec: 66 };
+    const m2 = { ...MANUAL, telopIndex: 2, startSec: 68, text: "二つ目" };
+    panel.update(view({ items: [m1, m2] }));
+    document.querySelector<HTMLElement>("[data-telop-index='1'] [data-role='manual-edit-button']")!.click();
+    expect(editor()).not.toBeNull();
+    panel.update(view({ items: [{ ...m1, telopIndex: 0 }, { ...m2, telopIndex: 1 }] }));
+    expect(editor()).toBeNull();
+  });
+
+  test("editManual で直す欄を開く (足した直後)", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [{ ...MANUAL, text: "" }] }));
+    panel.editManual(2);
+    expect(editor()?.value).toBe("");
+    expect(document.activeElement).toBe(editor());
+  });
+
+  test("「＋ ここに字幕を足す」は区間があって押せるときだけ押せる", () => {
+    const { panel, callbacks } = setup();
+    const add = (): HTMLButtonElement => document.querySelector<HTMLButtonElement>("[data-role='add-telop']")!;
+    panel.update(view({ canAddManual: false }));
+    expect(add().textContent).toBe("＋ ここに字幕を足す");
+    expect(add().disabled).toBe(true);
+    expect(add().title).toBe("先に区間を作ってください (行を押す・IN / OUT・＋ 区間を追加)");
+
+    panel.update(view({ canAddManual: true, enabled: false }));
+    expect(add().disabled).toBe(true);
+
+    panel.update(view({ canAddManual: true }));
+    expect(add().disabled).toBe(false);
+    add().click();
+    expect(callbacks.onAddManual).toHaveBeenCalledTimes(1);
+  });
+
+  test("字幕の無い動画の案内は、区間を作ってから足す道を出す", () => {
+    const { panel } = setup();
+    panel.update(view({ header: { kind: "none" }, rows: [] }));
+    expect(role("transcript-notice")?.textContent).toBe(
+      "この動画には公式字幕がありません。IN / OUT で区間を作り、＋ ここに字幕を足す でテロップを足せます",
+    );
+  });
+
+  test("reveal は差し込んだ要素を返し、欄の中をそこまで送る", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [SEGMENT, MANUAL] }));
+    expect(panel.reveal({ kind: "segment", index: 0 })).toBe(header());
+    expect(panel.reveal({ kind: "manual", telopIndex: 2 })).toBe(manual());
+    expect(panel.reveal({ kind: "manual", telopIndex: 9 })).toBeNull();
+  });
+
+  test("差し込むものが同じなら作り直さない", () => {
+    const { panel } = setup();
+    panel.update(view({ items: [SEGMENT, MANUAL] }));
+    const before = header();
+    panel.update(view({ items: [SEGMENT, MANUAL] }));
+    expect(header()).toBe(before);
+  });
 });

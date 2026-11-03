@@ -7,6 +7,8 @@ const VIEW: TrimView = {
   count: 3,
   range: { startSec: 741.4, endSec: 749.8 },
   totalSec: 24.6,
+  maxClipSec: 60,
+  over: false,
   window: { startSec: 739.4, endSec: 751.8 },
   words: [
     { startSec: 740, endSec: 741, text: "（前）" },
@@ -15,15 +17,13 @@ const VIEW: TrimView = {
   ],
 };
 
-const EMPTY: TrimView = { index: -1, count: 0, range: null, totalSec: 0, window: null, words: [] };
+const EMPTY: TrimView = { index: -1, count: 0, range: null, totalSec: 0, maxClipSec: 60, over: false, window: null, words: [] };
 
 function mount(view: TrimView = VIEW) {
   const callbacks = { onSelect: vi.fn(), onNudge: vi.fn(), onPlayAround: vi.fn() };
   const rangeBar = document.createElement("div");
   rangeBar.id = "range";
-  const telopTrack = document.createElement("div");
-  telopTrack.id = "track";
-  const panel = createTrimPanel({ rangeBar, telopTrack }, callbacks);
+  const panel = createTrimPanel({ rangeBar }, callbacks);
   document.body.append(panel.element);
   panel.update(view);
   panel.setEnabled(true);
@@ -54,7 +54,17 @@ describe("見出しの行", () => {
   test("何番目の区間か、頭と尻・長さ・合計を出す", () => {
     const { panel } = mount();
     expect(part(panel, "trim-title").textContent).toBe("区間 2 を詰める");
-    expect(part(panel, "trim-range").textContent).toBe("12:21.40 – 12:29.80 · 8.4 秒 · 合計 24.6 秒");
+    expect(part(panel, "trim-range").textContent).toBe("12:21.40 – 12:29.80 · 8.4 秒 · 合計 24.6 / 60 秒");
+  });
+
+  test("合計が上限を超えたら警告の印と色を付ける (外した区間の一覧の合計の役目。判定は録画ボタンと同じ isOverLimit を受け取る)", () => {
+    const { panel } = mount({ ...VIEW, totalSec: 61.2, maxClipSec: 60, over: true });
+    expect(part(panel, "trim-range").textContent).toContain("合計 61.2 / 60 秒");
+    expect(part(panel, "trim-range").dataset.over).toBe("true");
+    expect(part(panel, "trim-range").style.cssText).toContain("font-weight: 600");
+
+    panel.update({ ...VIEW, totalSec: 24.6, maxClipSec: 60, over: false });
+    expect(part(panel, "trim-range").dataset.over).toBe("false");
   });
 
   test("‹ › は行き先の区間の番号を出し、押すとその区間を選ぶ", () => {
@@ -94,10 +104,10 @@ describe("見出しの行", () => {
 });
 
 describe("中身の並び", () => {
-  test("見出しの行 → 拡大バー → テロップの帯 → 単語", () => {
+  test("見出しの行 → 拡大バー → 単語", () => {
     const { panel } = mount();
     const ids = [...panel.element.children].map((child) => child.id || (child as HTMLElement).dataset.role);
-    expect(ids).toEqual(["trim-head", "range", "track", "trim-words"]);
+    expect(ids).toEqual(["trim-head", "range", "trim-words"]);
   });
 });
 
