@@ -327,6 +327,26 @@ describe("文字起こしの欄 (段階 1b-2)", () => {
     expect(state).toMatchObject({ telops: [{ text: "直した", lineId: "youtube-asr:4.00" }] });
   });
 
+  test("最後の行を外すと手で足したテロップまで消えるときは、送らずに理由を出す (区間の一覧の ✕ と同じ)", async () => {
+    ready();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 3.8, endSec: 6.3 }],
+      telops: [
+        { startSec: 4, endSec: 6, text: "ここは絶対に右から", lineId: "youtube-asr:4.00" },
+        { startSec: 4.5, endSec: 5.5, text: "手で打った大事な文言" },
+      ],
+      meta: META,
+    });
+    await flush();
+    events = [];
+    rows()[1]?.click();
+    await flush();
+    expect(events).toEqual([]);
+    expect(document.body.textContent).toContain("テロップが 1 件残っています。先にテロップを消してください");
+  });
+
   test("＋ 区間を追加で作った区間は、欄で離れた行を押しても変わらない", async () => {
     ready();
     await flush();

@@ -2218,6 +2218,12 @@ function onToggleLine(lineId: string, extend: boolean): void {
     setStatus(`1 つの区間は ${maxClipSec} 秒までです。行を分けて選んでください (設定で上限を変えられます)`);
     return;
   }
+  // **最後の区間が消えるとき、テロップが残るなら送らない** (区間の一覧の ✕ と同じ守り)。区間が 0 個になると
+  // 状態機械は idle に戻り、手で打ったテロップもまとめて消える
+  if (next.segments.length === 0 && next.telops.length > 0) {
+    setStatus(`テロップが ${next.telops.length} 件残っています。先にテロップを消してください`);
+    return;
+  }
   // 起点は送るときだけ動かす (拒んだ Shift + クリックで起点がずれない)
   anchorLineId = lineId;
   // 外した行の直した文字を覚え、入れ直したら戻す (続けて 2 回押すと、外して入れ直すことになる)
