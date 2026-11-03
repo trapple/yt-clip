@@ -18,6 +18,84 @@ const BOTTOM_MARGIN_RATIO = 0.08;
 const LINE_HEIGHT_RATIO = 1.2;
 /** テロップとして読める太さ。細字を選ぶ要望は無いので固定する */
 const FONT_WEIGHT = 700;
+/** 折り返すときに左右に空ける割合 (幅に対して。片側) */
+export const SIDE_MARGIN_RATIO = 0.05;
+
+/**
+ * 行の頭に来てはいけない文字 (行頭禁則)。折り返した先の頭に来るなら前の行に付けたままにする
+ * (その 1 文字だけ右へはみ出しうる。追い出して前の文字ごと送るより単純で、はみ出しは縁の分ほど)
+ */
+const NO_LINE_START = new Set([..."、。，．,.！？!?）)」』】〉》〕］]｝}ー～…‥・：:；;ゃゅょっぁぃぅぇぉャュョッァィゥェォ"]);
+
+/** 折り返しの単位。英数字の続きは 1 つ (単語の途中で切らない)、空白の続きも 1 つ、ほかは 1 文字ずつ */
+const TOKEN = /[\p{Script=Latin}\p{Nd}'’\-]+|\s+|./gsu;
+
+/** 文字の幅を測る (`ctx.measureText(text).width`。いまの font で) */
+export type MeasureText = (text: string) => number;
+
+/**
+ * 測った幅の覚え。**drawTelops は毎フレーム呼ばれる** (録画は 30〜60fps) ので、折り返しのために同じ文字を
+ * 毎フレーム測り直さない。鍵は font と文字。増えすぎたら丸ごと捨てる (テロップの数は少なく、すぐ溜まり直す)
+ */
+const measuredWidths = new Map<string, number>();
+const MEASURED_WIDTHS_LIMIT = 4000;
+
+function measureCached(ctx: CanvasRenderingContext2D, text: string): number {
+  const key = `${ctx.font}\u0000${text}`;
+  const known = measuredWidths.get(key);
+  if (known !== undefined) return known;
+  if (measuredWidths.size >= MEASURED_WIDTHS_LIMIT) measuredWidths.clear();
+  const width = ctx.measureText(text).width;
+  measuredWidths.set(key, width);
+  return width;
+}
+
+/**
+ * 1 行 (改行を含まない) を maxWidth に収まるように折り返す。
+ *
+ * - 日本語は文字の間、英語は単語の間で折り返す。行の頭と尻の空白は落とす
+ * - 1 単語だけで幅を超えるときは、その単語を文字の間で切る
+ * - 行頭禁則の文字は前の行に付けたままにする (`NO_LINE_START`)
+ */
+export function wrapRow(row: string, maxWidth: number, measure: MeasureText): string[] {
+  if (measure(row) <= maxWidth) return [row];
+  const lines: string[] = [];
+  let current = "";
+  const push = (): void => {
+    const trimmed = current.trimEnd();
+    if (trimmed !== "") lines.push(trimmed);
+    current = "";
+  };
+
+  for (const token of row.match(TOKEN) ?? []) {
+    const candidate = current + token;
+    if (measure(candidate) <= maxWidth || current === "" || NO_LINE_START.has(token)) {
+      // 空の行に置く単語が幅を超えるなら、文字の間で切る
+      if (current === "" && measure(token) > maxWidth && token.length > 1) {
+        for (const char of token) {
+          if (current !== "" && measure(current + char) > maxWidth) push();
+          current += char;
+        }
+        continue;
+      }
+      current = candidate;
+      continue;
+    }
+    push();
+    // 折り返した先の頭の空白は落とす
+    current = /^\s+$/u.test(token) ? "" : token;
+    if (measure(current) > maxWidth && current.length > 1) {
+      const word = current;
+      current = "";
+      for (const char of word) {
+        if (current !== "" && measure(current + char) > maxWidth) push();
+        current += char;
+      }
+    }
+  }
+  push();
+  return lines.length === 0 ? [""] : lines;
+}
 
 export type TelopLine = {
   text: string;
@@ -34,7 +112,8 @@ function fontOf(family: string, sizePx: number): string {
 /**
  * 行の位置を決める。**作った順に下から積む。** 1 つのテロップの中の行は上から下。
  *
- * 自動折り返しはしない。日本語の禁則まで含めると重く、Phase 1 では手で改行してもらう。
+ * **`measure` を渡すと、幅に収まらない行を折り返す** (左右に幅の 5% ずつ空ける。`wrapRow`)。改行は改行のまま。
+ * 文字起こしの行から作るテロップには改行を入れる機会が無く、長い行が画面の外で切れていた。
  *
  * **canvas の上に完全に出た行 (下端が 0 以下) は返さない。** 改行だらけの文言でも
  * 描く行数が「高さ ÷ 行間」で頭打ちになり、毎フレームの太字の縁取りが膨らまない。
@@ -45,7 +124,9 @@ export function layoutTelops(
   width: number,
   height: number,
   fontSizePx: number,
+  measure?: MeasureText,
 ): TelopLine[] {
+  const maxWidth = width * (1 - SIDE_MARGIN_RATIO * 2);
   const lineHeight = fontSizePx * (height / TELOP_BASE_HEIGHT) * LINE_HEIGHT_RATIO;
   const x = width / 2;
   let bottom = height - height * BOTTOM_MARGIN_RATIO;
@@ -54,7 +135,9 @@ export function layoutTelops(
   for (const text of texts) {
     // ここから上に積むものは全部画面の外
     if (bottom <= 0) break;
-    const rows = text.split("\n");
+    const rows = text
+      .split("\n")
+      .flatMap((row) => (measure === undefined ? [row] : wrapRow(row, maxWidth, measure)));
     rows.forEach((row, index) => {
       const y = bottom - (rows.length - 1 - index) * lineHeight;
       if (y > 0) lines.push({ text: row, x, y });
@@ -123,6 +206,8 @@ export function drawTelops(
       width,
       height,
       style.fontSizePx,
+      // 縁取りは輪郭の外にも乗るので、その分も幅に入れて測る
+      (text) => measureCached(ctx, text) + ctx.lineWidth,
     );
     for (const line of lines) {
       if (style.strokeWidthPx > 0) ctx.strokeText(line.text, line.x, line.y);
