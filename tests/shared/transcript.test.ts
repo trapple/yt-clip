@@ -2,6 +2,19 @@ import { describe, expect, test } from "vitest";
 import { ASR_LINE_MAX_CHARS, parseJson3 } from "@/shared/transcript";
 
 describe("parseJson3 (手動字幕)", () => {
+  test("event が時間順に並んでいなくても、行は開始の早い順に並べる", () => {
+    const lines = parseJson3(
+      {
+        events: [
+          { tStartMs: 5000, dDurationMs: 1000, segs: [{ utf8: "後" }] },
+          { tStartMs: 1000, dDurationMs: 1000, segs: [{ utf8: "前" }] },
+        ],
+      },
+      "youtube-manual",
+    );
+    expect(lines.map((line) => line.text)).toEqual(["前", "後"]);
+  });
+
   test("同じ開始の行が 2 つあっても、id は重ねない (#2 を付ける)", () => {
     const lines = parseJson3(
       {

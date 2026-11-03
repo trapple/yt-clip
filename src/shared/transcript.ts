@@ -70,7 +70,9 @@ function parseManual(events: Json3Event[]): TranscriptLine[] {
     if (endSec <= startSec) continue;
     lines.push({ id: lineId("youtube-manual", startSec), startSec, endSec, text });
   }
-  return lines;
+  // event の順は時間順とは限らない。欄の今の行の二分探索と Shift の範囲は、行が時間順であることを前提にする
+  // (Array.prototype.sort は安定なので、同じ開始の行は元の順のまま)
+  return lines.sort((a, b) => a.startSec - b.startSec);
 }
 
 type Piece = { word: TranscriptWord; raw: string };
