@@ -53,7 +53,7 @@ describe("setLinesSelected: 入れる", () => {
     expect(two.segments).toHaveLength(2);
     const joined = pick(two, ["l2"]);
     expect(joined.segments).toEqual([{ startSec: 2.8, endSec: 11.3 }]);
-    // テロップは足した順に末尾へ積む (テロップの一覧の並びを動かさない)
+    // テロップは足した順に末尾へ積む (テロップの位置を動かさない)
     expect(lineIds(joined)).toEqual(["l1", "l3", "l2"]);
   });
 

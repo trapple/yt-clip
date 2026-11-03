@@ -157,7 +157,7 @@ let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
 /**
  * 拡大バーがいま編集している区間の位置。区間が無ければ -1。
  *
- * **ここが選択の唯一の持ち主。** 一覧にも持たせると同期が要る。
+ * **ここが選択の唯一の持ち主。** 欄の見出しや詰める欄にも持たせると同期が要る。
  * 状態機械は区間を時間順に並べるので、足した・動かした直後は範囲で引き直す (selectRangeOnNextState)。それ以外は数が変わったときだけ詰める
  */
 let selectedIndex = -1;
@@ -190,7 +190,7 @@ let layoutReady = false;
  */
 const floatLayout: Partial<Record<WindowId, WindowRect>> = {};
 /**
- * 区間・テロップの窓。区間の一覧とテロップの一覧を入れる (窓の分割の spec C1.1)。
+ * 区間・テロップの窓。文字起こしの欄 (区間の見出しと手入力の行もこの中) を入れる (窓の分割の spec C1.1)。
  *
  * **オンの間は 1 つを使い回す。** 窓の位置を持つので、バーを作り直すたびに作り直さない。中身の入れ替えは
  * `buildBar`、body への付け直しは `mount`、出すかの判定は `refreshWindows` が行う。
@@ -621,7 +621,7 @@ function startOver(): void {
  * 選び直しは状態の変化ではないので、`send` を通すと往復のぶん反応が遅れる
  */
 function applyStateToSelection(): void {
-  // 一覧に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
+  // 欄に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
   // 欄の見出しの「· 詰めている」を選び直した区間に合わせる (refreshTranscript は最後に詰める欄も描く)
   refreshTranscript();
 
@@ -717,7 +717,7 @@ function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
 }
 
 /**
- * 文言の確定。改行はそのまま持つ。**送らなかったら false** (一覧はその入力欄を下書きとして
+ * 文言の確定。改行はそのまま持つ。**送らなかったら false** (欄は直す欄を閉じずに書きかけを
  * 残し、次の描き直しで前の文言に戻さない)
  */
 function onTelopText(index: number, text: string): boolean {
@@ -741,7 +741,7 @@ function rejectLongTelopText(text: string): boolean {
   return true;
 }
 
-/** 最後の区間を消すとテロップも消えるので止める、の理由 (区間の一覧の ✕ と欄で同じ文言) */
+/** 最後の区間を消すとテロップも消えるので止める、の理由 (見出しの ✕ と欄の行で同じ文言) */
 function telopsRemainMessage(count: number): string {
   return `テロップが ${count} 件残っています。先にテロップを消してください`;
 }
@@ -1102,7 +1102,7 @@ function renderActions(kind: ClipState["kind"]): void {
           send(ACTION_EVENTS[action]);
         },
       );
-      // 押しても弾かれるだけの録画は押させない。一覧の合計表示と理由を揃える
+      // 押しても弾かれるだけの録画は押させない。詰める欄の合計の警告と理由を揃える
       if (action === "record" && isOverLimit(currentSegments, maxClipSec)) {
         button.disabled = true;
         button.title = `合計が上限 ${maxClipSec} 秒を超えています`;
@@ -1113,7 +1113,7 @@ function renderActions(kind: ClipState["kind"]): void {
 }
 
 /**
- * 一覧に出す区間とテロップ。**範囲を作った動画を見ているときだけ。**
+ * 欄と詰める欄に出す区間とテロップ。**範囲を作った動画を見ているときだけ。**
  *
  * 別の動画の区間は出さない
  * (帯・プレビューと同じ規則)。画面に浮いた窓に出すので、SPA で動画 B へ移ったのに
@@ -1373,6 +1373,7 @@ function refreshTrimPanel(): void {
     range,
     totalSec: totalSec(segments),
     maxClipSec,
+    over: isOverLimit(segments, maxClipSec),
     window,
     words: window === null ? [] : wordsInWindow(transcriptLines(), window),
   });
@@ -1550,7 +1551,7 @@ function applyStateToDisplay(state: ClipState): void {
   // ただし録画中は、打ち切られたドラッグの見た目が最後の位置に残るため、
   // ずれていなくても確定済みの範囲で描き直す
   refreshLists();
-  // 一覧と窓の表示が決まってから送る (出す → 送る の順)
+  // 欄と窓の表示が決まってから送る (出す → 送る の順)
   if (revealSegment) revealInWindow(transcriptPanel?.reveal({ kind: "segment", index: selectedIndex }) ?? null);
   if (addedTelopIndex >= 0) {
     // ＋ ここに字幕を足す の答え。足した行の直す欄を開いて見せる
@@ -2376,7 +2377,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
     setStatus(`1 つの区間は ${maxClipSec} 秒までです。行を分けて選んでください (設定で上限を変えられます)`);
     return;
   }
-  // **最後の区間が消えるとき、テロップが残るなら送らない** (区間の一覧の ✕ と同じ守り)。区間が 0 個になると
+  // **最後の区間が消えるとき、テロップが残るなら送らない** (見出しの ✕ と同じ守り)。区間が 0 個になると
   // 状態機械は idle に戻り、手で打ったテロップもまとめて消える
   if (next.segments.length === 0 && next.telops.length > 0) {
     setStatus(telopsRemainMessage(next.telops.length));
@@ -2499,7 +2500,7 @@ function mount(): void {
   }
   refreshOverlay();
   refreshTelopPreview();
-  // 作り直した一覧は空で隠れている。次の状態通知を待たずに手元の写しで描き直し、
+  // 作り直した詰める欄は空で隠れている。次の状態通知を待たずに手元の写しで描き直し、
   // 窓の表示も決め直す
   refreshLists();
 }
@@ -2804,7 +2805,7 @@ function onPageMutated(): void {
     trimPanel?.setEnabled(canAdjustRange());
     refreshOverlay();
     refreshTelopPreview();
-    // 一覧も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
+    // 欄も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
     // 動画ページ以外へ移ったら、窓もドック枠もページから外れる (refreshWindows → leaveVideoPage)
     refreshLists();
     // 状態の欄も同じ。B では最初の案内、A へ戻ったら選んでいる区間の範囲 (状態は SPA で移っても届かない)。
@@ -2870,7 +2871,7 @@ function resetModuleState(): void {
 /**
  * オンにする (マスタースイッチの spec §2.3 の逆順)。今まで import 時に行っていた処理を、そのままここで行う:
  * 窓とドック枠と監視を作る → mount() → 設定の読み込み → 覚えた配置の読み込み → content/loaded (状態の取り戻し)。
- * **読み込み直さずにオンへ戻せる** (spec §2.4): content/loaded はタブのリロードと同じ経路で、応答の状態で範囲・帯・一覧が
+ * **読み込み直さずにオンへ戻せる** (spec §2.4): content/loaded はタブのリロードと同じ経路で、応答の状態で範囲・シークバーの帯・欄が
  * 戻る。覚えた配置の読み込みが済むまで窓を出さない (spec A.2) のも今までと同じ。
  * 呼ぶのは switch driver だけ (テストのために export する。判断メモ 15)。二度呼ぶのは配線の誤り
  */

@@ -32,6 +32,8 @@ export type TrimView = {
   totalSec: number;
   /** 1 本のクリップの上限の秒数 (設定)。合計がこれを超えると録画できない */
   maxClipSec: number;
+  /** 合計が上限を超えている (`isOverLimit`)。**ここで比べ直さない**: 録画ボタンと同じ判定 (丸めてから比べる) にする */
+  over: boolean;
   /** 拡大バーが映している窓。まだ無ければ null */
   window: TimeWindow | null;
   /** 窓に入る単語 (`wordsInWindow`) */
@@ -55,7 +57,7 @@ export function createTrimPanel(
   parts: { rangeBar: HTMLElement },
   callbacks: TrimPanelCallbacks,
 ): TrimPanel {
-  let view: TrimView = { index: -1, count: 0, range: null, totalSec: 0, maxClipSec: 0, window: null, words: [] };
+  let view: TrimView = { index: -1, count: 0, range: null, totalSec: 0, maxClipSec: 0, over: false, window: null, words: [] };
   let enabled = false;
   /** キーで動かす端。はじめは頭 (モック「選んでいる端を動かす」) */
   let activeEdge: HandleKind = "in";
@@ -204,8 +206,7 @@ export function createTrimPanel(
     if (range !== null) {
       title.textContent = `区間 ${view.index + 1} を詰める`;
       const length = range.endSec - range.startSec;
-      // 上限を超えたかは isOverLimit (timeline.ts) と同じ「合計 > 上限」。区間の配列ではなく合計の数で比べる
-      const over = view.totalSec > view.maxClipSec;
+      const over = view.over;
       rangeText.textContent = `${formatTimeCentis(range.startSec)} – ${formatTimeCentis(range.endSec)} · ${formatSecTenths(length)} 秒 · 合計 ${formatSecTenths(view.totalSec)} / ${view.maxClipSec} 秒`;
       rangeText.dataset.over = over ? "true" : "false";
       rangeText.style.cssText = over ? TRIM_STYLE.rangeOver : TRIM_STYLE.range;

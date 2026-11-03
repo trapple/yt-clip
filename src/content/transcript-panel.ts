@@ -6,7 +6,7 @@ import { formatSecTenths, formatTime, formatTimeCentis } from "@/shared/time";
  * 文字起こしの欄 (ADR 0001)。区間・テロップの窓の先頭に出す。
  *
  * **選択は持たない。** 行が区間に入っているかは状態機械の区間から決まり、youtube.ts が計算して渡す
- * (区間の一覧と同じ作法)。この欄は渡された行を描き、押されたことを伝えるだけ。
+ * (詰める欄と同じ作法)。この欄は渡された行を描き、押されたことを伝えるだけ。
  * **文字は textContent でだけ入れる** (字幕の文字はページから届く。タグとして解釈しない)。
  * **行の要素は、行の並びが変わったときだけ作り直す** (長い配信では 8000 行ほどになる。状態が届くたびに全部を
  * 作り直すと止まって見える)。それ以外は、変わった行の印と文字だけを直す
@@ -191,7 +191,7 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     if (target.closest("[data-role='line-edit']") !== null) return;
     const headerElement = target.closest<HTMLElement>("[data-role='segment']");
     if (headerElement !== null) {
-      // 見出しは録画中でも伝える (選べるかは youtube.ts が決める。区間の一覧と同じ)
+      // 見出しは録画中でも伝える (選べるか・消せるかは youtube.ts が決める)
       const index = Number(headerElement.dataset.index);
       if (target.closest("[data-role='remove']") !== null) callbacks.onRemoveSegment(index);
       else callbacks.onSelectSegment(index);

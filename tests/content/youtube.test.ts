@@ -584,7 +584,7 @@ function listElement(): HTMLElement {
   return element;
 }
 
-/** 区間・テロップの窓の中身の箱。区間の一覧とテロップの一覧が入る */
+/** 区間・テロップの窓の中身の箱。文字起こしの欄 (区間の見出しと手入力の行もこの中) が入る */
 function listBody(): HTMLElement {
   const element = document.getElementById("yt-clip-list-body");
   if (element === null) throw new Error("区間・テロップの窓の中身が見つかりません");
@@ -1411,7 +1411,7 @@ describe("複数区間", () => {
     );
   }
 
-  /** 一覧の行 */
+  /** 欄の区間の見出し */
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
@@ -2460,7 +2460,7 @@ describe("テロップ付きの録画", () => {
   });
 });
 
-describe("テロップの一覧", () => {
+describe("手入力の行 (テロップ)", () => {
   const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
 
   function telopRows(): HTMLElement[] {
@@ -2657,7 +2657,7 @@ describe("区間・テロップの窓", () => {
 
   test("body を作り直しても、2 つの窓を body の直下に付け直す", async () => {
     // buildPage は body を空にする。付け直さないと、以降は窓が DOM に無く
-    // バーも一覧も操作できない
+    // バーも欄も操作できない
     buildPage();
     document.body.append(document.createElement("div"));
     await flush();
@@ -2668,7 +2668,7 @@ describe("区間・テロップの窓", () => {
     expect(document.querySelectorAll("#yt-clip-list").length).toBe(1);
   });
 
-  test("一覧は区間・テロップの窓に入り、バーには詰める欄と操作の行だけが残る", async () => {
+  test("欄は区間・テロップの窓に入り、バーには詰める欄と操作の行だけが残る", async () => {
     await showEdit([TELOP]);
 
     const body = listBody();
@@ -2711,10 +2711,10 @@ describe("区間・テロップの窓", () => {
     expect(listElement().hidden).toBe(false);
   });
 
-  test("バーを 2 回作り直しても、区間・テロップの窓と一覧は 1 つずつ", async () => {
+  test("バーを 2 回作り直しても、区間・テロップの窓と欄の見出しは 1 つずつ", async () => {
     await showEdit([TELOP]);
 
-    // YouTube の再描画でバーが外れる場面を 2 回。一覧を足すだけにしていると、作り直すたびに 2 重になる
+    // YouTube の再描画でバーが外れる場面を 2 回。中身を足すだけにしていると、作り直すたびに 2 重になる
     for (let round = 0; round < 2; round += 1) {
       barElement().remove();
       document.body.append(document.createElement("div"));
@@ -2726,10 +2726,10 @@ describe("区間・テロップの窓", () => {
     expect(listBody().querySelectorAll("[data-role='segment']")).toHaveLength(1);
   });
 
-  test("バーを作り直しても、手元の区間で一覧を描き直す", async () => {
+  test("バーを作り直しても、手元の区間で欄を描き直す", async () => {
     await showEdit([TELOP]);
 
-    // YouTube の再描画でバーが外れた場面。次の状態通知を待たずに一覧を戻す
+    // YouTube の再描画でバーが外れた場面。次の状態通知を待たずに欄を戻す
     barElement().remove();
     document.body.append(document.createElement("div"));
     await flush();
@@ -2762,7 +2762,7 @@ describe("区間・テロップの窓", () => {
     expect(listElement().hidden).toBe(false);
   });
 
-  test("別の動画へ移ると一覧を空にするが、区間・テロップの窓 (文字起こしの欄) は出たまま。戻れば一覧も戻る", async () => {
+  test("別の動画へ移ると見出しと手入力の行を空にするが、区間・テロップの窓 (文字起こしの欄) は出たまま。戻れば戻る", async () => {
     await showEdit([TELOP]);
     expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
 
@@ -3120,7 +3120,7 @@ describe("フロートの窓", () => {
     ]);
   });
 
-  /** 区間・テロップの窓を出す (区間が 1 つある)。出すかは一覧の中身で決まる */
+  /** 区間・テロップの窓を出す (区間が 1 つある)。出すかは欄の中身で決まる */
   async function showList(): Promise<void> {
     emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
@@ -3938,7 +3938,7 @@ describe("ドック枠とタブ", () => {
     expect(slot.contains(listElement())).toBe(true);
   });
 
-  test("別の動画へ移っても区間・テロップのタブ (文字起こしの欄) は残り、区間の一覧は空。戻っても出ている", async () => {
+  test("別の動画へ移っても区間・テロップのタブ (文字起こしの欄) は残り、区間の見出しは空。戻っても出ている", async () => {
     history.pushState({}, "", "/watch?v=video-b");
     document.body.append(document.createElement("div"));
     await flush();

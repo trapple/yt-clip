@@ -52,7 +52,7 @@ export const PANEL_HEADER_HEIGHT_PX = 32;
 
 export type PanelWindow = {
   element: HTMLElement;
-  /** 中身の箱。区間・テロップの窓には区間の一覧とテロップの一覧を入れる */
+  /** 中身の箱。区間・テロップの窓には文字起こしの欄 (区間の見出しと手入力の行もこの中) を入れる */
   body: HTMLElement;
   /**
    * 出すか隠すか。**理由の計算は youtube.ts の 1 箇所に置く** (中身が無い /
@@ -127,7 +127,7 @@ export function createPanelWindow(options: PanelWindowOptions): PanelWindow {
     scrollTo(target): void {
       // 本体の外 (まだ入れていない・別の場所へ移った) なら送る先が無い
       if (!body.contains(target)) return;
-      // **offsetTop ではなく画面上の位置の差で測る。** テロップの行は一覧の中の
+      // **offsetTop ではなく画面上の位置の差で測る。** テロップの行は欄の中の
       // 入れ子なので、offsetTop の基準の祖先が本体とずれる。
       // **scrollIntoView は使わない。** ページまで動かして動画の位置がずれうる
       const view = body.getBoundingClientRect();
