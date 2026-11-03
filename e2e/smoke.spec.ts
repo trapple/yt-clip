@@ -263,6 +263,10 @@ test("オフにすると 1 秒以内に拡張の要素が消え、YouTube はそ
   page.on("console", (message) => {
     if (!watchingLogs) return;
     const fromExtension = message.location().url.startsWith(`chrome-extension://${extensionId}/`);
+    // 同じタブで 2 回目以降に読み込むと、Chromium 153 が crxjs の loader の動的 import の先の chunk ごとに出す警告。
+    // 拡張の行ではない (出すのはブラウザで、拡張はそのまま動く。README の「E2E が失敗したときの切り分け」)
+    const loaderWarning = message.text().startsWith(`Unsafe attempt to load URL chrome-extension://${extensionId}/assets/`);
+    if (loaderWarning) return;
     if (fromExtension || message.text().includes("[yt-clip]")) extensionLogs.push(message.text());
   });
   try {
