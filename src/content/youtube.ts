@@ -607,6 +607,10 @@ function onMarkIn(): void {
   }
   // 作り直し (startOver) と頭を動かす道 (onMarkSegmentStart) の両方に効かせる
   if (refuseDuringAd()) return;
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return;
+  }
   const shown = currentSegments.length > 0 && rangeVideoId === currentVideoId();
   const simple = currentSegments.length === 1 && currentTelops.length === 0;
   if (shown && !simple) {
@@ -686,6 +690,10 @@ function onAddSegment(): void {
     return;
   }
   if (refuseDuringAd()) return;
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return;
+  }
 
   const video = getVideo();
   const meta = getVideoMeta();
@@ -699,7 +707,7 @@ function onAddSegment(): void {
   revealSegmentOnNextState = true;
   // 選ぶ区間が変わるので、前の区間を見ている再生の監視は用済み
   cancelPreviewWatch();
-  send({ type: "ADD_SEGMENT", range, meta });
+  sendRange({ type: "ADD_SEGMENT", range, meta }, range);
 }
 
 /** テロップを出す既定の長さ (秒) */
@@ -848,7 +856,7 @@ function onMarkSegmentStart(): void {
   // 頭を動かすと時間順の位置が変わりうる。選択は範囲で追う (selectRangeOnNextState)
   cancelPreviewWatch();
   selectRangeOnNextState = next;
-  send({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next }, (state) => hasSegment(state, next));
+  sendRange({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next }, next);
 }
 
 function onMarkOut(): void {
@@ -857,6 +865,10 @@ function onMarkOut(): void {
     return;
   }
   if (refuseDuringAd()) return;
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return;
+  }
   const editing = selectedSegment();
   if (editing === null) {
     setStatus("先に区間を追加してください");
@@ -889,7 +901,7 @@ function onMarkOut(): void {
   cancelPreviewWatch();
   // 楽観的に描かない。状態機械の答えを待ってから描く (`onAddSegment` と同じ)
   selectRangeOnNextState = next;
-  send({ type: "MARK_OUT", index: selectedIndex, sec: next.endSec }, (state) => hasSegment(state, next));
+  sendRange({ type: "MARK_OUT", index: selectedIndex, sec: next.endSec }, next);
 }
 
 /**
@@ -921,7 +933,7 @@ function onRangeCommitted(range: ClipRange): boolean {
     const durationSec = getVideo().duration;
 
     const current = selectedSegment();
-    if (current !== null && (sameRange(current, range) || pendingClip !== null)) {
+    if (current !== null && (sameRange(current, range) || clipOpBusy())) {
       paintRangeBar(current, durationSec);
       return false;
     }
@@ -933,20 +945,7 @@ function onRangeCommitted(range: ClipRange): boolean {
     paintRangeBar(range, durationSec);
     setStatus(rangeLabel(range));
     selectRangeOnNextState = range;
-    rangeAwaiting = range;
-    const settle = (): void => {
-      if (rangeAwaiting === range) rangeAwaiting = null;
-    };
-    send(
-      { type: "ADJUST_SEGMENT", index: selectedIndex, range },
-      (state) => {
-        const ok = hasSegment(state, range);
-        // 拒まれたら待つのをやめる (待ち続けると ±0.1 が二度と効かない)
-        if (!ok) settle();
-        return ok;
-      },
-      settle,
-    );
+    sendRange({ type: "ADJUST_SEGMENT", index: selectedIndex, range }, range);
     return true;
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
@@ -963,6 +962,45 @@ function onRangeCommitted(range: ClipRange): boolean {
 let rangeAwaiting: ClipRange | null = null;
 
 /**
+ * 区間の範囲を変える操作を送り、その範囲を持つ状態を描くまで待つ (`rangeAwaiting`)。拒まれた・届かなかったら待ちを下ろす
+ * (待ち続けると ±0.1 が二度と効かない。下ろすのは send が応答の状態を描くより前)。受け入れられたのに通知が来ないまま
+ * 上限が過ぎたら、答えの状態を描いて下ろす (`drawAnswerIfSilent`)
+ */
+function sendRange(event: ClipEvent, range: ClipRange): void {
+  rangeAwaiting = range;
+  const sentAt = drawCount;
+  const settle = (): void => {
+    if (rangeAwaiting === range) rangeAwaiting = null;
+  };
+  send(
+    event,
+    (state) => {
+      if (!hasSegment(state, range)) {
+        settle();
+        return false;
+      }
+      drawAnswerIfSilent(state, sentAt, () => rangeAwaiting === range, settle);
+      return true;
+    },
+    settle,
+  );
+}
+
+/**
+ * 送った操作の答え (応答の状態) を、通知が来ないときの代わりに描く。router は通知を応答より先に送るので、ふつうは
+ * もう描いている。送ってから何も描いていないまま上限が過ぎたら答えの状態を描く (描けば待ちが下りる)。何か描いて
+ * いれば、描いたのは答えの通知かそれより新しい状態なので、古い答えで戻さず待ちを下ろすだけにする
+ */
+function drawAnswerIfSilent(state: ClipState, sentAt: number, still: () => boolean, release: () => void): void {
+  const id = runId;
+  setTimeout(() => {
+    if (!isCurrentRun(id) || !still()) return;
+    if (drawCount === sentAt) applyStateToDisplay(state);
+    else release();
+  }, INDEXED_ANSWER_WAIT_MS);
+}
+
+/**
  * 詰める欄の −0.1 / ＋0.1 (と `,` `.`)。拡大バーのドラッグの確定と同じ経路 (`onRangeCommitted`) で送る。
  *
  * **前に送った範囲の答えが届くまで、次は受けない** (`rangeAwaiting` の doc)。欄の行を押した答え (`pendingClip`) を
@@ -970,7 +1008,12 @@ let rangeAwaiting: ClipRange | null = null;
  * 動かした端の映像を出す (止めて、その位置へ)
  */
 function onNudge(kind: HandleKind, deltaSec: number): void {
-  if (!canAdjustRange() || rangeAwaiting !== null || pendingClip !== null) return;
+  if (!canAdjustRange() || rangeAwaiting !== null) return;
+  // 前の ±0.1 の答えを待つ間は黙って数えない (押し続けたとき)。ほかの操作の答えを待つ間は理由を出す
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return;
+  }
   const range = selectedSegment();
   if (range === null) return;
   try {
@@ -2315,16 +2358,28 @@ function clipKey(state: ClipState): string {
   return JSON.stringify([state.kind, "segments" in state ? state.segments : [], "telops" in state ? state.telops : []]);
 }
 
-/** 欄から組 (SET_CLIP) を送ってよいか。位置で送った答えを待っている間は送らず理由を出す */
+/**
+ * 区間とテロップを変える操作の答えを待っているか。**待っている間は次を受けない** (欄の組の丸ごと差し替え・位置で指す
+ * 操作・区間の範囲は、答えを待たずに混ぜると互いの結果を古い写しで戻す。OUT の直後の ±0.1 は OUT で動かした尻を戻す)。
+ * 待ちは下ろす条件が違うので 3 つの変数のまま持ち、判定だけここにまとめる
+ */
+function clipOpBusy(): boolean {
+  return pendingClip !== null || indexedAwaiting || rangeAwaiting !== null;
+}
+
+/**
+ * 欄から組 (SET_CLIP) を送ってよいか。位置で送った操作か区間の範囲の答えを待っている間は送らず理由を出す。
+ * **欄の組の答え (pendingClip) は待たない** (行は続けて押せる。clipBase が送った組に積む)
+ */
 function canSendClip(): boolean {
-  if (!indexedAwaiting) return true;
+  if (!indexedAwaiting && rangeAwaiting === null) return true;
   setStatus(CLIP_BUSY_MESSAGE);
   return false;
 }
 
 /** 位置で指す操作を送る。欄の組 (SET_CLIP) の答えか、前の位置の操作の答えを待っている間は送らず理由を出す */
 function sendIndexed(event: ClipEvent): boolean {
-  if (pendingClip !== null || indexedAwaiting) {
+  if (clipOpBusy()) {
     setStatus(CLIP_BUSY_MESSAGE);
     return false;
   }
