@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  clampTelopText,
   activeTelops,
   MAX_TELOP_TEXT_LENGTH,
   assertValidTelops,
@@ -121,5 +122,17 @@ describe("hasRenderableTelops", () => {
 
   test("テロップが無ければ偽", () => {
     expect(hasRenderableTelops([], segments)).toBe(false);
+  });
+});
+
+describe("clampTelopText", () => {
+  test("上限で切るとき、サロゲートペアを割らない", () => {
+    const text = "あ".repeat(MAX_TELOP_TEXT_LENGTH - 1) + "𠮷";
+    expect(clampTelopText(text)).toBe("あ".repeat(MAX_TELOP_TEXT_LENGTH - 1));
+    expect(clampTelopText("短い")).toBe("短い");
+    expect(clampTelopText("あ".repeat(MAX_TELOP_TEXT_LENGTH + 5))).toHaveLength(MAX_TELOP_TEXT_LENGTH);
+    // ペアがちょうど上限に収まるなら残す
+    const fits = "あ".repeat(MAX_TELOP_TEXT_LENGTH - 2) + "𠮷" + "い";
+    expect(clampTelopText(fits)).toBe("あ".repeat(MAX_TELOP_TEXT_LENGTH - 2) + "𠮷");
   });
 });

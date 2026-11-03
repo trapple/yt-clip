@@ -94,7 +94,7 @@ import {
   type Channel,
   type Settings,
 } from "@/shared/settings";
-import { MAX_TELOP_TEXT_LENGTH, hasRenderableTelops } from "@/shared/telop";
+import { MAX_TELOP_TEXT_LENGTH, clampTelopText, hasRenderableTelops } from "@/shared/telop";
 import type { TranscriptLine } from "@/shared/transcript";
 import { telopStyleOf, type TelopStyle } from "@/shared/telop-style";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
@@ -765,7 +765,7 @@ function irreplaceableTelops(telops: Telop[]): number {
   return telops.filter((telop) => {
     if (telop.lineId === undefined) return true;
     const line = byId.get(telop.lineId);
-    return line === undefined || telop.text !== line.text.slice(0, MAX_TELOP_TEXT_LENGTH);
+    return line === undefined || telop.text !== clampTelopText(line.text);
   }).length;
 }
 

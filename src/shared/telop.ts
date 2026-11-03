@@ -17,6 +17,17 @@ import type { ClipRange, Telop } from "@/shared/types";
 export const MAX_TELOP_TEXT_LENGTH = 500;
 
 /**
+ * 上限 (UTF-16 の長さ) までに切る。**サロゲートペアの片方で切らない** (片方だけの文字は描けない)。上限は状態機械の
+ * 検証 (`text.length`) と同じ単位
+ */
+export function clampTelopText(text: string): string {
+  if (text.length <= MAX_TELOP_TEXT_LENGTH) return text;
+  const last = text.charCodeAt(MAX_TELOP_TEXT_LENGTH - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? MAX_TELOP_TEXT_LENGTH - 1 : MAX_TELOP_TEXT_LENGTH;
+  return text.slice(0, end);
+}
+
+/**
  * テロップとして成立しているか確かめる。
  *
  * **握り潰して直さない。** ここに不正な値が来るのは UI のバグであり、黙って
