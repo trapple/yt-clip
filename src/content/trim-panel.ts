@@ -108,7 +108,11 @@ export function createTrimPanel(
   const edgeGroup = (role: string, label: string, ...buttons: HTMLButtonElement[]): HTMLElement => {
     const box = document.createElement("span");
     box.dataset.role = role;
-    box.append(label, ...buttons);
+    box.style.cssText = TRIM_STYLE.group;
+    // 印 (下線と濃い文字) は「頭」「尻」の文字だけに付ける。組に付けると中のボタンの文字にも下線が継がれる
+    const name = document.createElement("span");
+    name.textContent = label;
+    box.append(name, ...buttons);
     return box;
   };
   const nudgeButtons = [
@@ -144,7 +148,8 @@ export function createTrimPanel(
     for (const [group, edge] of [[inGroup, "in"], [outGroup, "out"]] as const) {
       if (edge === kind) group.dataset.active = "true";
       else delete group.dataset.active;
-      group.style.cssText = edge === kind ? `${TRIM_STYLE.group}${TRIM_STYLE.groupActive}` : TRIM_STYLE.group;
+      const name = group.firstElementChild as HTMLElement;
+      name.style.cssText = edge === kind ? TRIM_STYLE.groupActive : "";
     }
   }
   setActive("in");

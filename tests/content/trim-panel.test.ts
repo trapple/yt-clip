@@ -167,6 +167,13 @@ describe("キー", () => {
     expect(callbacks.onNudge.mock.calls).toEqual([["out", 0.1]]);
   });
 
+  test("印は「頭」「尻」の文字だけに付け、中のボタンの文字には下線を継がせない", () => {
+    const { panel } = mount();
+    const group = part(panel, "trim-edge-in");
+    expect((group.firstElementChild as HTMLElement).style.textDecoration).toBe("underline");
+    expect(group.style.textDecoration).toBe("");
+  });
+
   test("±0.1 を押した端もキーの端になる", () => {
     const { panel, callbacks } = mount();
     part(panel, "nudge-out-minus").click();
