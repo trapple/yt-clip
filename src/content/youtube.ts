@@ -100,6 +100,7 @@ import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 import { isOverLimit, totalSec } from "@/shared/timeline";
 // BUSY_KINDS は状態の性質なので types.ts で共有している
 import {
+  acceptsSetClip,
   BUSY_KINDS,
   FAILURE_MESSAGES,
   type ClipEvent,
@@ -729,17 +730,27 @@ function onTelopText(index: number, text: string): boolean {
   if (telop.text === text) return true;
   // 状態機械は上限を超えた文言を UI のバグとして拒む。送る前に止めて理由を出す。
   // 入力欄は消さない (削って直してもらう)
-  if (text.length > MAX_TELOP_TEXT_LENGTH) {
-    setStatus(
-      `テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`,
-    );
-    return false;
-  }
+  if (rejectLongTelopText(text)) return false;
   send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
   return true;
 }
 
 /** そのテロップの頭から再生する。範囲再生の監視は解く (押した場所からの再生が止まる) */
+/**
+ * テロップの文言が上限を超えていたら理由を出して true。状態機械は上限を超えた文言を UI のバグとして拒むので、
+ * 送る前に止める (入力欄は消さない。削って直してもらう)
+ */
+function rejectLongTelopText(text: string): boolean {
+  if (text.length <= MAX_TELOP_TEXT_LENGTH) return false;
+  setStatus(`テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`);
+  return true;
+}
+
+/** 最後の区間を消すとテロップも消えるので止める、の理由 (区間の一覧の ✕ と欄で同じ文言) */
+function telopsRemainMessage(count: number): string {
+  return `テロップが ${count} 件残っています。先にテロップを消してください`;
+}
+
 async function playTelop(index: number): Promise<void> {
   const telop = currentTelops[index];
   if (telop === undefined || busy) return;
@@ -1408,7 +1419,7 @@ function applyStateToDisplay(state: ClipState): void {
   busy = BUSY_KINDS.has(state.kind);
   // 欄の押せる / 押せないは refreshLists の中で決まるので、その前に今の種類を書く
   lastKind = state.kind;
-  failedKeepsClip = state.kind === "failed" && state.segments.length > 0;
+  transcriptEditable = acceptsSetClip(state);
   // 欄から送った組の答えが届いたら、待つのをやめる。録画などほかの種類になっても捨てる。
   // 途中の答え (先に送った組) が届いた間は待ち続ける (後から送った組が本当の行き先)
   if (pendingClip !== null && (isClipOf(state, pendingClip) || (state.kind !== "ready" && state.kind !== "idle"))) {
@@ -1969,9 +1980,7 @@ function buildBar(): HTMLElement {
       // **テロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
       // なると状態機械は idle に戻り、手入力の文言もまとめて消える
       if (currentSegments.length === 1 && currentTelops.length > 0) {
-        setStatus(
-          `テロップが ${currentTelops.length} 件残っています。先にテロップを消してください`,
-        );
+        setStatus(telopsRemainMessage(currentTelops.length));
         return;
       }
       removedIndexOnNextState = index;
@@ -1992,7 +2001,8 @@ function buildBar(): HTMLElement {
   });
 
   // 文字起こしの欄 (ADR 0001)。区間・テロップの窓の先頭に置く。区間とテロップの一覧は 1c まで欄の下に残す
-  transcriptPanel = createTranscriptPanel({
+  // 欄は 1 度だけ作る。バーの根が YouTube の再描画で外れて buildBar が走るたびに、数千行を作り直さない
+  transcriptPanel ??= createTranscriptPanel({
     onToggle: onToggleLine,
     onEditText: onEditLineText,
     onToggleHidden: onToggleLineHidden,
@@ -2079,8 +2089,8 @@ let anchorLineId: string | null = null;
 let pendingClip: Clip | null = null;
 /** 外した行のテロップの文字 (行の id ごと)。入れ直したら戻す。動画が変わったら捨てる */
 const editedLineTexts = new Map<string, string>();
-/** 届いた状態が failed で、RETRY で戻れる区間を持っている (欄を押せなくする) */
-let failedKeepsClip = false;
+/** 届いた状態が SET_CLIP を受けるか (acceptsSetClip)。欄の押せる / 押せないはこれで決める */
+let transcriptEditable = true;
 
 /**
  * 文字起こしの状態が変わった。欄を描き直し、結末をコンソールに 1 行残す
@@ -2094,6 +2104,11 @@ function onTranscriptStatus(status: TranscriptStatus): void {
   refreshTranscript();
 }
 
+/** 今の動画の文字起こしの行を id で引く */
+function lineById(id: string): TranscriptLine | undefined {
+  return transcriptLines().find((line) => line.id === id);
+}
+
 /** 今の動画の文字起こしの行。今の動画のものでなければ空 */
 function transcriptLines(): TranscriptLine[] {
   const status = transcriptStatus;
@@ -2101,14 +2116,11 @@ function transcriptLines(): TranscriptLine[] {
 }
 
 /**
- * 文字起こしの欄で区間を変えてよいか。録画中・録画した後 (preview / composing / degraded) と、やり直せる区間を持つ
- * failed では変えない (状態機械の SET_CLIP と同じ規則)。**今届いた状態の種類で見る**
- * (applyStateToDisplay は refreshLists より前に lastKind と failedKeepsClip を書く)
+ * 文字起こしの欄で区間を変えてよいか。状態機械の SET_CLIP と同じ規則 (acceptsSetClip)。**今届いた状態で見る**
+ * (applyStateToDisplay は refreshLists より前に transcriptEditable を書く)
  */
 function canEditFromTranscript(): boolean {
-  if (busy) return false;
-  if (lastKind === "failed") return !failedKeepsClip;
-  return lastKind === "idle" || lastKind === "ready" || lastKind === "posted";
+  return transcriptEditable;
 }
 
 /**
@@ -2120,13 +2132,19 @@ function clipBase(): Clip {
   return pendingClip ?? listedItems();
 }
 
-/** 届いた状態が、送った組そのものか (区間が空なら idle) */
+function sameTelop(a: Telop, b: Telop): boolean {
+  return a.startSec === b.startSec && a.endSec === b.endSec && a.text === b.text && a.lineId === b.lineId;
+}
+
+/** 届いた状態が、送った組そのものか (区間が空なら idle)。区間は状態機械も時間順に並べるので、並びのまま比べる */
 function isClipOf(state: ClipState, clip: Clip): boolean {
   if (clip.segments.length === 0) return state.kind === "idle";
   return (
     state.kind === "ready" &&
-    JSON.stringify(state.segments) === JSON.stringify(clip.segments) &&
-    JSON.stringify(state.telops) === JSON.stringify(clip.telops)
+    state.segments.length === clip.segments.length &&
+    state.telops.length === clip.telops.length &&
+    state.segments.every((segment, i) => sameRange(segment, clip.segments[i]!)) &&
+    state.telops.every((telop, i) => sameTelop(telop, clip.telops[i]!))
   );
 }
 
@@ -2151,6 +2169,21 @@ function sendClip(next: Clip): void {
   );
 }
 
+/** 欄の見出し。今の動画のものでなければ、取っている間と同じに見せる */
+function transcriptHeader(status: TranscriptStatus, forThisVideo: boolean): TranscriptView["header"] {
+  if (!forThisVideo) return { kind: "loading" };
+  switch (status.kind) {
+    case "ready":
+      return { kind: "ready", label: TRANSCRIPT_SOURCE_LABEL[status.transcript.source] };
+    case "none":
+      return { kind: "none" };
+    case "failed":
+      return { kind: "failed", reason: status.reason };
+    default:
+      return { kind: "loading" };
+  }
+}
+
 /** 欄を今の状態で描き直す。区間に入っているかは状態機械の区間から決める (欄は選択を持たない) */
 function refreshTranscript(): void {
   if (transcriptPanel === null) return;
@@ -2160,15 +2193,7 @@ function refreshTranscript(): void {
   const { segments, telops } = listedItems();
   const lines = transcriptLines();
   const telopByLine = new Map(telops.filter((telop) => telop.lineId !== undefined).map((telop) => [telop.lineId, telop]));
-  const header: TranscriptView["header"] = !forThisVideo
-    ? { kind: "loading" }
-    : status.kind === "ready"
-      ? { kind: "ready", label: TRANSCRIPT_SOURCE_LABEL[status.transcript.source] }
-      : status.kind === "none"
-        ? { kind: "none" }
-        : status.kind === "failed"
-          ? { kind: "failed", reason: status.reason }
-          : { kind: "loading" };
+  const header = transcriptHeader(status, forThisVideo);
   transcriptPanel.update({
     header,
     dubbed: forThisVideo && (status.kind === "ready" || status.kind === "none") && status.dubbed,
@@ -2220,7 +2245,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
   // **最後の区間が消えるとき、テロップが残るなら送らない** (区間の一覧の ✕ と同じ守り)。区間が 0 個になると
   // 状態機械は idle に戻り、手で打ったテロップもまとめて消える
   if (next.segments.length === 0 && next.telops.length > 0) {
-    setStatus(`テロップが ${next.telops.length} 件残っています。先にテロップを消してください`);
+    setStatus(telopsRemainMessage(next.telops.length));
     return;
   }
   // 起点は送るときだけ動かす (拒んだ Shift + クリックで起点がずれない)
@@ -2247,10 +2272,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
 /** 行の文字を直した。その行のテロップの文字にする (送らなかったら false。直す欄を閉じない) */
 function onEditLineText(lineId: string, text: string): boolean {
   if (!canEditFromTranscript()) return false;
-  if (text.length > MAX_TELOP_TEXT_LENGTH) {
-    setStatus(`テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`);
-    return false;
-  }
+  if (rejectLongTelopText(text)) return false;
   const base = clipBase();
   if (!base.telops.some((telop) => telop.lineId === lineId)) return false;
   sendClip({
@@ -2263,7 +2285,7 @@ function onEditLineText(lineId: string, text: string): boolean {
 /** 「字幕に出さない」/「字幕に出す」 */
 function onToggleLineHidden(lineId: string): void {
   if (!canEditFromTranscript()) return;
-  const line = transcriptLines().find((item) => item.id === lineId);
+  const line = lineById(lineId);
   if (line === undefined) return;
   const next = toggleTelopHidden(clipBase(), line);
   if (next === null) return;
@@ -2276,7 +2298,7 @@ function onToggleLineHidden(lineId: string): void {
  */
 function onPlayLine(lineId: string): void {
   if (busy) return;
-  const line = transcriptLines().find((item) => item.id === lineId);
+  const line = lineById(lineId);
   if (line === undefined) return;
   void onSeekPlay(line.startSec);
 }
@@ -2699,7 +2721,7 @@ function resetModuleState(): void {
   anchorLineId = null;
   pendingClip = null;
   editedLineTexts.clear();
-  failedKeepsClip = false;
+  transcriptEditable = true;
   cancelWatch = null;
   cancelPreview = null;
   handle = null;

@@ -10,6 +10,8 @@
  * 端末ごとに違う。sync で運ぶと、大きい画面で置いた位置が小さい画面の端末へ届く
  */
 
+import { isRecord } from "@/shared/guards";
+
 export const WINDOW_LAYOUT_KEY = "windowLayout";
 
 /**
@@ -164,11 +166,6 @@ function parseRect(value: unknown): WindowRect | null {
   if (!isCoord(source.left) || !isCoord(source.top) || !isSize(source.width)) return null;
   if (source.height !== undefined && !isSize(source.height)) return null;
   return toRect(source.left, source.top, source.width, source.height);
-}
-
-/** 組 (配列でない object) か。配列も typeof は "object" なので分ける */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function isWindowId(value: unknown): value is WindowId {

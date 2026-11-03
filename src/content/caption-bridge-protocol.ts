@@ -1,3 +1,5 @@
+import { isRecord } from "@/shared/guards";
+
 /**
  * 隔離された world (youtube.ts) と MAIN world (caption-bridge) の間で `window.postMessage` に載せる形 (ADR 0002)。
  *
@@ -44,9 +46,6 @@ export type BridgeAnswer =
   | { ok: false; reason: "error"; message: string };
 
 export type BridgeResponse = BridgeAnswer & { type: typeof BRIDGE_RESPONSE; id: string };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object";
 
 export function isBridgeRequest(value: unknown): value is BridgeRequest {
   return (

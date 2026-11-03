@@ -1,4 +1,5 @@
 import {
+  acceptsSetClip,
   BUSY_KINDS,
   type ClipEvent,
   type ClipRange,
@@ -207,14 +208,8 @@ export function reduce(state: ClipState, event: ClipEvent): ClipState {
   }
 
   if (event.type === "SET_CLIP") {
-    // 録画中・録画した後 (preview / composing / degraded) と、やり直せる区間を持つ failed は受けない。
-    // 文字起こしの欄も、その間は押せない (UI と同じ規則)
-    const open =
-      state.kind === "idle" ||
-      state.kind === "ready" ||
-      state.kind === "posted" ||
-      (state.kind === "failed" && state.segments.length === 0);
-    if (!open) {
+    // 文字起こしの欄も同じ規則で押せなくする (acceptsSetClip)
+    if (!acceptsSetClip(state)) {
       return invalid(state);
     }
     // 別の動画の区間は持ち越さない (渡された区間とテロップで丸ごと置き換えるので、meta も渡されたもの)

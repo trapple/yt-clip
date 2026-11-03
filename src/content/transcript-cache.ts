@@ -1,3 +1,4 @@
+import { isFiniteNumber, isRecord } from "@/shared/guards";
 import type { Transcript, TranscriptLine } from "@/shared/transcript";
 
 /**
@@ -30,8 +31,6 @@ export const chromeLocalStorage: TranscriptStorage = {
 
 const keyOf = (videoId: string): string => `${TRANSCRIPT_KEY_PREFIX}${videoId}`;
 const byteLength = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value)).length;
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object";
-const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
 function isWord(value: unknown): boolean {
   return isRecord(value) && isFiniteNumber(value.startSec) && isFiniteNumber(value.endSec) && typeof value.text === "string";

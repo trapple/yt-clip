@@ -258,17 +258,14 @@ export function onReachTime(
   let cancelled = false;
   let handle = 0;
 
-  const stop = (): void => {
+  function stop(): void {
     cancelled = true;
     target.cancelVideoFrameCallback(handle);
-    video.removeEventListener("ended", onEnded);
-  };
-  const reach = (): void => {
+    video.removeEventListener("ended", reach);
+  }
+  function reach(): void {
     stop();
     onReach();
-  };
-  function onEnded(): void {
-    if (!cancelled) reach();
   }
 
   const tick: FrameCallback = (_now, metadata) => {
@@ -281,7 +278,7 @@ export function onReachTime(
   };
 
   handle = target.requestVideoFrameCallback(tick);
-  video.addEventListener("ended", onEnded);
+  video.addEventListener("ended", reach);
 
   return stop;
 }

@@ -44,7 +44,8 @@ const LAST_WORD_MAX_MS = 1500;
 const MIN_LINE_SEC = 0.1;
 const SENTENCE_END = /[。！？!?]$/;
 
-const round2 = (sec: number): number => Math.round(sec * 100) / 100;
+/** 100 分の 1 秒に丸める。行の時刻と、欄で作る区間の端で同じ丸め方を使う */
+export const round2 = (sec: number): number => Math.round(sec * 100) / 100;
 const lineId = (source: TranscriptSource, startSec: number): string => `${source}:${startSec.toFixed(2)}`;
 
 function eventsOf(json: unknown): Json3Event[] {

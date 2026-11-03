@@ -173,6 +173,20 @@ export const BUSY_KINDS: ReadonlySet<ClipState["kind"]> = new Set([
   "encoding",
 ]);
 
+/**
+ * SET_CLIP (文字起こしの欄で区間とテロップをまとめて差し替える) を受けるか。状態機械と欄の両方がこれで決める。
+ * 録画中・録画した後 (preview / composing / degraded) と、RETRY で戻れる区間を持つ failed は受けない
+ * (画面の写しは failed では空なので、丸ごと差し替えると戻れる区間とテロップが消える)
+ */
+export function acceptsSetClip(state: ClipState): boolean {
+  return (
+    state.kind === "idle" ||
+    state.kind === "ready" ||
+    state.kind === "posted" ||
+    (state.kind === "failed" && state.segments.length === 0)
+  );
+}
+
 export type ClipEvent =
   /** 範囲の作成。今ある区間とテロップを置き換える (IN を、区間を組み立てている途中以外で押したとき) */
   | { type: "MARK_IN"; range: ClipRange; meta: VideoMeta }

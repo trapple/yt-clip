@@ -1,6 +1,6 @@
 import { MAX_TELOP_TEXT_LENGTH } from "@/shared/telop";
 import { MIN_CLIP_SEC } from "@/shared/time";
-import type { TranscriptLine } from "@/shared/transcript";
+import { round2, type TranscriptLine } from "@/shared/transcript";
 import type { ClipRange, Telop } from "@/shared/types";
 
 /**
@@ -27,7 +27,6 @@ const MIN_OVERLAP_RATIO = 0.5;
 
 export type Clip = { segments: ClipRange[]; telops: Telop[] };
 
-const round2 = (sec: number): number => Math.round(sec * 100) / 100;
 
 function overlapSec(a: ClipRange, b: ClipRange): number {
   return Math.max(0, Math.min(a.endSec, b.endSec) - Math.max(a.startSec, b.startSec));
