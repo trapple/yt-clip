@@ -79,8 +79,9 @@ describe("マーク操作", () => {
     }
   });
 
-  test("RESET_MARKS で idle に戻る", () => {
-    expect(reduce(ready, { type: "RESET_MARKS" })).toEqual({ kind: "idle" });
+  test("RESET_MARKS はもう受けない (区間を空にするのは SET_CLIP と REMOVE_SEGMENT)", () => {
+    // @ts-expect-error 外したイベント
+    expect(reduce(ready, { type: "RESET_MARKS" })).toMatchObject({ kind: "failed", reason: "internal-error" });
   });
 });
 
@@ -707,10 +708,6 @@ describe("テロップ", () => {
       meta,
     });
     expect(next).toMatchObject({ kind: "ready", telops: [] });
-  });
-
-  test("RESET_MARKS で消える", () => {
-    expect(reduce(withTelop, { type: "RESET_MARKS" })).toEqual({ kind: "idle" });
   });
 
   test("録画から preview まで持ち回る", () => {
