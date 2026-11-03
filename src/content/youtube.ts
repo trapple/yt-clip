@@ -469,6 +469,20 @@ function rangeLabel(range: ClipRange): string {
 /** 状態の欄の最初の案内。区間が無いときに出す */
 const INITIAL_STATUS = "IN を押して開始位置を指定";
 
+/** プレビューに入ったときの状態の欄。ボタンの文言 (ACTION_LABELS) と揃える */
+const PREVIEW_STATUS = "録画できました。X に投稿 か 取り直す を選んでください";
+
+/**
+ * 録画の進みの文言 (準備・録画中・区間の移動・書き出し) を状態の欄に書いたか。**書いたときだけ、録画を離れたら出し直す**
+ * (録画を離れただけで出し直すと、録画を始める前に出した理由 (合計が上限を超えている など) まで消す)
+ */
+let recordingStatusShown = false;
+
+function setRecordingStatus(text: string): void {
+  recordingStatusShown = true;
+  setStatus(text);
+}
+
 /** 操作が通ったときの状態の欄。選んでいる区間があればその範囲、無ければ最初の案内 (前の操作の理由を残さない) */
 function restingStatus(): string {
   const segment = selectedSegment();
@@ -1607,6 +1621,13 @@ function applyStateToDisplay(state: ClipState): void {
       console.warn(`拡大バーの再描画に失敗しました: ${String(error)}`);
     }
   }
+  // 録画を離れた (中止・書き出し済み)。録画の間に書いた「録画中… (N秒)」「書き出しています…」を残さない。
+  // failed は上で失敗の文言を出している
+  if (recordingStatusShown && !BUSY_KINDS.has(state.kind)) {
+    recordingStatusShown = false;
+    if (state.kind !== "failed") setStatus(state.kind === "preview" ? PREVIEW_STATUS : restingStatus());
+  }
+
   // 区間が変わった答え (ハンドル・±0.1・IN / OUT・＋ 区間を追加・見出しの ✕) を描いたら、区間に入っている行のテロップに揃える
   syncTelopsToSegments();
 }
@@ -1757,7 +1778,7 @@ async function prepareRecording(
     if (!isCurrentRun(id)) return;
 
     send({ type: "SEEK_DONE" });
-    setStatus(`${qualityNote}録画の準備をしています…`);
+    setRecordingStatus(`${qualityNote}録画の準備をしています…`);
   } catch (error) {
     if (!isCurrentRun(id)) return;
     if (error instanceof DrmProtectedError) {
@@ -1876,7 +1897,7 @@ function watchSegmentEnd(
   }
 
   const remainingSec = Math.round(totalSec(segments.slice(index)));
-  setStatus(
+  setRecordingStatus(
     segments.length === 1
       ? `録画中… (${remainingSec}秒)`
       : `録画中… ${index + 1} / ${segments.length} 区間目 (残り ${remainingSec}秒)`,
@@ -1887,7 +1908,7 @@ function watchSegmentEnd(
     if (segments[index + 1] === undefined) {
       video.pause();
       send({ type: "OUT_REACHED" });
-      setStatus("録画を書き出しています…");
+      setRecordingStatus("録画を書き出しています…");
       return;
     }
     void advanceToSegment(video, segments, index + 1);
@@ -1919,7 +1940,7 @@ async function advanceToSegment(
   try {
     recorder.pause();
     video.pause();
-    setStatus(`${index + 1} / ${segments.length} 区間目へ移動中…`);
+    setRecordingStatus(`${index + 1} / ${segments.length} 区間目へ移動中…`);
 
     await seekTo(video, segment.startSec);
     // オフのページで再生を始めない・waitForFreshFrame の rVFC を張らない (spec §1)。下の handle の確かめは
@@ -2947,6 +2968,7 @@ function resetModuleState(): void {
   observedPlayer = null;
   capturing = false;
   captureRun = 0;
+  recordingStatusShown = false;
 }
 
 /**
