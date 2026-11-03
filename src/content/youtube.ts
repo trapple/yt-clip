@@ -23,7 +23,9 @@ import {
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
 import { BAR_STYLE, applyPalette, isDarkTheme } from "@/content/styles";
 import { fixVideoDisplayMatrix } from "@/content/display-matrix";
-import { makeDefaultRange } from "@/content/range-math";
+import { TRIM_MARGIN_SEC, makeDefaultRange, nudgeRange, type HandleKind } from "@/content/range-math";
+import { createTrimPanel, type TrimPanel } from "@/content/trim-panel";
+import { snapPointsIn, wordsInWindow } from "@/content/trim-words";
 import {
   DrmProtectedError,
   assertRecordable,
@@ -306,6 +308,8 @@ let rangeBar: RangeBar | null = null;
  * 拡大バーと一緒に buildBar が作り直す
  */
 let telopTrack: TelopTrack | null = null;
+/** 詰める欄 (ADR 0001)。拡大バーとテロップの帯を中に抱える。バーと一緒に作り直す */
+let trimPanel: TrimPanel | null = null;
 /** 再生位置の監視を張ったか。mount は DOM 変化のたびに呼ばれる */
 let playheadWatched = false;
 /** 再生位置のループの rAF の handle。止めるのは stop() (オフの間に rAF を残さない。spec §1) */
@@ -629,6 +633,7 @@ function startOver(): void {
 function applyStateToSelection(): void {
   // 一覧に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
   segmentList?.update(listedItems().segments, selectedIndex, maxClipSec);
+  refreshTrimPanel();
 
   const segment = selectedSegment();
   if (segment === null) return;
@@ -866,6 +871,8 @@ function onMarkOut(): void {
 /**
  * 拡大バーでのドラッグが確定したとき。
  *
+ * **確定したら窓を前後 2 秒で映し直す** (詰める欄。もっと伸ばしたいときはもう一度端まで引く)
+ *
  * 拡大バーから直接呼ばれるので click 用の guard を通らない。ここで落とすと
  * 範囲が service worker へ送られず、画面の見た目だけが新しい範囲になって
  * 実際の状態と食い違う
@@ -886,11 +893,32 @@ function onRangeCommitted(range: ClipRange): void {
       index === selectedIndex ? range : segment,
     );
     paintOverlay(currentSegments, durationSec);
+    paintRangeBar(range, durationSec);
     setStatus(rangeLabel(range));
     selectRangeOnNextState = range;
     send({ type: "ADJUST_SEGMENT", index: selectedIndex, range }, (state) => hasSegment(state, range));
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
+  }
+}
+
+/**
+ * 詰める欄の −0.1 / ＋0.1 (と `,` `.`)。拡大バーのドラッグの確定と同じ経路 (`onRangeCommitted`) で送る。
+ *
+ * **手元の写し (楽観的に描いた範囲) に積む。** 答えを待たずに続けて押しても、前に押した分が消えない。
+ * 動かした端の映像を出す (止めて、その位置へ)
+ */
+function onNudge(kind: HandleKind, deltaSec: number): void {
+  if (!canAdjustRange()) return;
+  const range = selectedSegment();
+  if (range === null) return;
+  try {
+    const next = nudgeRange(kind, deltaSec, range, getVideo().duration, maxClipSec);
+    if (sameRange(next, range)) return;
+    onRangeCommitted(next);
+    onScrub(kind === "in" ? next.startSec : next.endSec);
+  } catch (error) {
+    setStatus(`区間を詰められませんでした: ${String(error)}`);
   }
 }
 
@@ -1316,12 +1344,33 @@ function attachWindowsToBody(): void {
 }
 
 /**
- * 拡大バーを描き直し、同じ時間の軸で帯の段も描き直す。**拡大バーの窓が変わる経路はここを通す**
- * (帯だけが古い窓のまま残らないように)
+ * 拡大バーを描き直し、同じ時間の軸で帯の段と詰める欄の単語も描き直す。**拡大バーの窓が変わる経路はここを通す**
+ * (帯や単語だけが古い窓のまま残らないように)
  */
 function paintRangeBar(range: ClipRange, videoDurationSec: number): void {
   rangeBar?.update(range, videoDurationSec);
   refreshTelopTrack();
+  refreshTrimPanel();
+}
+
+/**
+ * 詰める欄の見出し・単語・押せるかを手元の写しに合わせる。区間の数や選択が変わったとき (`refreshLists`) と、
+ * 拡大バーの窓が変わったとき (`paintRangeBar`) に呼ぶ。同じ入力なら同じ絵になる (冪等)
+ */
+function refreshTrimPanel(): void {
+  if (trimPanel === null) return;
+  const { segments } = listedItems();
+  const range = segments[selectedIndex] ?? null;
+  const window = range === null ? null : (rangeBar?.window() ?? null);
+  trimPanel.setEnabled(canAdjustRange());
+  trimPanel.update({
+    index: range === null ? -1 : selectedIndex,
+    count: segments.length,
+    range,
+    totalSec: totalSec(segments),
+    window,
+    words: window === null ? [] : wordsInWindow(transcriptLines(), window),
+  });
 }
 
 /**
@@ -1362,6 +1411,7 @@ function refreshLists(): void {
   telopList?.update(telops, segments);
   refreshTranscript();
   refreshTelopTrack();
+  refreshTrimPanel();
   refreshWindows();
 }
 
@@ -1490,6 +1540,7 @@ function applyStateToDisplay(state: ClipState): void {
   rangeVideoId = stateMeta?.videoId ?? null;
 
   rangeBar?.setEnabled(canAdjustRange());
+  trimPanel?.setEnabled(canAdjustRange());
   refreshOverlay();
   refreshTelopPreview();
   renderActions(state.kind);
@@ -1500,8 +1551,8 @@ function applyStateToDisplay(state: ClipState): void {
     setStatus(FAILURE_MESSAGES[state.reason]);
   }
 
-  // 拡大バーを描き直すのは、表示がずれているときだけにする。確定のたびに
-  // 描き直すと窓が計算し直されてハンドルが跳ねる。
+  // 拡大バーを描き直すのは、表示がずれているときだけにする (手を離したときの映し直しは
+  // onRangeCommitted がしている。答えが届くたびに描き直すと、続けて動かしている最中に窓が動く)。
   // ただし録画中は、打ち切られたドラッグの見た目が最後の位置に残るため、
   // ずれていなくても確定済みの範囲で描き直す
   refreshLists();
@@ -1534,15 +1585,35 @@ function applyStateToDisplay(state: ClipState): void {
 /** 指定した範囲を通しで再生して内容を確認する */
 async function playRange(): Promise<void> {
   const range = selectedSegment();
-  if (range === null || busy) return;
+  if (range === null) return;
+  await playSpan(range, range.startSec, range.endSec, `区間を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
+}
 
+/**
+ * 繋ぎ目だけを聞き直す (第 2 版のモック)。in = 頭の 2 秒前から頭の 2 秒後まで、out = 尻の 2 秒前から尻の 2 秒後まで
+ * (切り落とした所も聞こえる)。尻の 2 秒後が動画の終わりを越えても、`onReachTime` が `ended` で止める
+ */
+async function playAround(kind: HandleKind): Promise<void> {
+  const range = selectedSegment();
+  if (range === null) return;
+  const edge = kind === "in" ? range.startSec : range.endSec;
+  const fromSec = Math.max(0, edge - TRIM_MARGIN_SEC);
+  const label = kind === "in" ? "頭の 2 秒前から再生中…" : "尻をまたいで再生中…";
+  await playSpan(range, fromSec, edge + TRIM_MARGIN_SEC, label);
+}
+
+/**
+ * fromSec から toSec まで再生して止める。止めたら区間の範囲を状態の欄に戻す
+ */
+async function playSpan(range: ClipRange, fromSec: number, toSec: number, playingLabel: string): Promise<void> {
+  if (busy) return;
   cancelPreviewWatch();
-  const video = await seekAndPlay(range.startSec);
+  const video = await seekAndPlay(fromSec);
   if (video === null) return;
 
   try {
-    setStatus(`区間を再生中… (${Math.round(range.endSec - range.startSec)}秒)`);
-    cancelPreview = onReachTime(video, range.endSec, () => {
+    setStatus(playingLabel);
+    cancelPreview = onReachTime(video, toSec, () => {
       cancelPreview = null;
       // 登録したときの範囲を今も使っているかを確かめる。解除が漏れていた
       // 場合にここで止めると、別の範囲の再生や録画まで巻き込んで止める
@@ -1955,9 +2026,9 @@ function buildBar(): HTMLElement {
     onCommit: onRangeCommitted,
     onSeekPlay: (sec) => void onSeekPlay(sec),
     maxClipSec: () => maxClipSec,
-    // 吸い付き先と掴んだ端は、詰める欄を組み込むときに繋ぐ
-    snapPoints: () => [],
-    onGrab: () => undefined,
+    // 吸い付き先は今の動画の文字起こしの単語の切れ目 (別の動画の行は transcriptLines が返さない)
+    snapPoints: (window) => snapPointsIn(transcriptLines(), window),
+    onGrab: (kind) => trimPanel?.setActiveEdge(kind),
   });
   rangeBar.element.id = RANGE_ID;
 
@@ -1968,6 +2039,20 @@ function buildBar(): HTMLElement {
     onCommit: onTelopDragged,
     onPlay: (index) => void playTelop(index),
   });
+
+  // 詰める欄 (第 2 版のモック)。拡大バーとテロップの帯はここに入る
+  trimPanel = createTrimPanel(
+    { rangeBar: rangeBar.element, telopTrack: telopTrack.element },
+    {
+      onSelect: (index) => {
+        if (index < 0 || index >= listedItems().segments.length) return;
+        selectedIndex = index;
+        applyStateToSelection();
+      },
+      onNudge,
+      onPlayAround: (kind) => void playAround(kind),
+    },
+  );
 
   segmentList = createSegmentList({
     onSelect: (index) => {
@@ -2013,11 +2098,11 @@ function buildBar(): HTMLElement {
     onRetry: () => transcriptLoader?.retry(),
   });
 
-  // バーは拡大バー → テロップの帯の段 → 操作の行だけ。拡大バーは幅がそのまま精度になるので、
+  // バーは詰める欄 (見出しの行 → 拡大バー → テロップの帯の段 → 単語) → 操作の行。拡大バーは幅がそのまま精度になるので、
   // 一覧の窓の幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の
   // spec A.1)。帯の段は拡大バーのトラックの**下**に置く: トラックの中に重ねると、区間のハンドルと
   // 帯の当たり判定が重なる (spec B.1)
-  bar.append(rangeBar.element, telopTrack.element, row);
+  bar.append(trimPanel.element, row);
   // 一覧は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
   // 足すだけにすると、バーを作り直すたびに古い一覧が残って 2 重になる
   listWindow.body.replaceChildren(transcriptPanel.element, segmentList.element, telopList.element);
@@ -2214,6 +2299,8 @@ function refreshTranscript(): void {
       };
     }),
   });
+  // 読み込みが済んだら詰める欄にも単語を出す (refreshLists からも呼ばれるので 2 回になるが冪等)
+  refreshTrimPanel();
 }
 
 /** 動画の長さ。分からなければ Infinity (区間の尻を止めない) */
@@ -2356,6 +2443,7 @@ function mount(): void {
 
   // 作り直したバーは空で無効の状態。確定済みの範囲があれば載せ直す
   rangeBar?.setEnabled(canAdjustRange());
+  trimPanel?.setEnabled(canAdjustRange());
   const restored = selectedSegment();
   if (restored !== null) {
     try {
@@ -2670,6 +2758,7 @@ function onPageMutated(): void {
     // 旧動画の位置に青い帯が出たままになり、ハンドルを動かせてしまうと
     // 見えていない動画の範囲を書き換えることになる
     rangeBar?.setEnabled(canAdjustRange());
+    trimPanel?.setEnabled(canAdjustRange());
     refreshOverlay();
     refreshTelopPreview();
     // 一覧も同じ規則で描き直す。区間・テロップの窓に A の区間が B の画面で出続けないように。
@@ -2707,6 +2796,7 @@ function resetModuleState(): void {
   telopList = null;
   rangeBar = null;
   telopTrack = null;
+  trimPanel = null;
   layoutReady = false;
   // 覚えた配置の写し。start() の loadInitialLayout が読み直す (オフの間に別のタブで動かした位置も拾う)
   for (const id of WINDOW_IDS) delete floatLayout[id];
