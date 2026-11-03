@@ -83,6 +83,16 @@ describe("nudgeRange", () => {
     expect(nudgeRange("out", 0.1, { startSec: 590, endSec: 599.95 }, 600, 60)).toEqual({ startSec: 590, endSec: 600 });
   });
 
+  test("丸めても 1 秒を割らず、上限を超えない (100 分の 1 秒の格子の内側へ寄せる)", () => {
+    // 尻 101.126 の 1 秒手前 (100.126) で止まる。四捨五入すると 100.13 で長さ 0.996 秒になる
+    const shortest = nudgeRange("in", 0.1, { startSec: 100.05, endSec: 101.126 }, 600, 60);
+    expect(shortest.startSec).toBe(100.12);
+    expect(shortest.endSec - shortest.startSec).toBeGreaterThanOrEqual(1);
+    // 頭 10.004 から上限 60 秒 (70.004) で止まる。四捨五入すると 70.00 で 59.996 秒、上限は超えない
+    const longest = nudgeRange("out", 0.1, { startSec: 10.004, endSec: 69.95 }, 600, 60);
+    expect(longest.endSec - longest.startSec).toBeLessThanOrEqual(60);
+  });
+
   test("1 秒より短くも、上限より長くもしない", () => {
     expect(nudgeRange("in", 0.1, { startSec: 10, endSec: 11 }, 600, 60)).toEqual({ startSec: 10, endSec: 11 });
     expect(nudgeRange("out", 0.1, { startSec: 10, endSec: 70 }, 600, 60)).toEqual({ startSec: 10, endSec: 70 });

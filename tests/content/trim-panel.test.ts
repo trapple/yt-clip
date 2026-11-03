@@ -111,9 +111,12 @@ describe("単語の並び", () => {
     expect(parseFloat(words[0]?.style.left ?? "")).toBeCloseTo((0.6 / 12.4) * 100, 3);
   });
 
-  test("単語が無ければ段を出さない", () => {
+  test("単語が無ければ段を出さない (display も消し、空の段に背を取らせない)", () => {
     const { panel } = mount({ ...VIEW, words: [] });
     expect(part(panel, "trim-words").hidden).toBe(true);
+    expect(part(panel, "trim-words").style.display).toBe("none");
+    panel.update(VIEW);
+    expect(part(panel, "trim-words").style.display).toBe("flex");
   });
 
   test("文字は textContent で入れる", () => {
@@ -204,6 +207,19 @@ describe("キー", () => {
     const input = document.createElement("textarea");
     panel.element.append(input);
     input.dispatchEvent(new KeyboardEvent("keydown", { key: ".", bubbles: true, cancelable: true }));
+    expect(callbacks.onNudge).not.toHaveBeenCalled();
+  });
+
+  test("操作を受け付けない間 (録画の準備・録画中) も、キーは YouTube へ渡さない", () => {
+    // 録画の頭へ止めている間に YouTube がコマ送りすると、録画の頭がずれる
+    const { panel, callbacks } = mount();
+    panel.setEnabled(false);
+    const onDocument = vi.fn();
+    document.addEventListener("keydown", onDocument);
+    const event = key(panel, ".");
+    document.removeEventListener("keydown", onDocument);
+    expect(event.defaultPrevented).toBe(true);
+    expect(onDocument).not.toHaveBeenCalled();
     expect(callbacks.onNudge).not.toHaveBeenCalled();
   });
 

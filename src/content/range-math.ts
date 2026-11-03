@@ -91,6 +91,17 @@ export function computeTrimWindow(range: ClipRange, videoDurationSec: number): T
   };
 }
 
+/**
+ * 100 分の 1 秒に丸める。丸めて lowest〜highest の外へ出たら、格子の内側へ寄せる (丸めで長さが 1 秒を割る・上限を
+ * 超えるのを防ぐ。`transcript-selection.ts` も丸めた後に確かめ直している)
+ */
+function onGrid(sec: number, lowest: number, highest: number): number {
+  const rounded = round2(sec);
+  if (rounded > highest) return Math.floor(highest * 100) / 100;
+  if (rounded < lowest) return Math.ceil(lowest * 100) / 100;
+  return rounded;
+}
+
 /** 詰める欄の −0.1 / ＋0.1 で動かす幅 (秒) */
 export const NUDGE_SEC = 0.1;
 
@@ -112,7 +123,7 @@ export function nudgeRange(
   if (kind === "in") {
     const lowest = Math.max(0, range.endSec - maxClipSec);
     const highest = range.endSec - MIN_CLIP_SEC;
-    const startSec = round2(Math.min(highest, Math.max(lowest, range.startSec + deltaSec)));
+    const startSec = onGrid(Math.min(highest, Math.max(lowest, range.startSec + deltaSec)), lowest, highest);
     // 既に上限・下限の外にある範囲 (上限を設定で縮めた後など) は、押した向きと逆へ跳ばさない
     if ((deltaSec < 0 && startSec > range.startSec) || (deltaSec > 0 && startSec < range.startSec)) return range;
     return { startSec, endSec: range.endSec };
@@ -120,7 +131,7 @@ export function nudgeRange(
 
   const lowest = range.startSec + MIN_CLIP_SEC;
   const highest = Math.min(Math.max(videoDurationSec, range.endSec), range.startSec + maxClipSec);
-  const endSec = round2(Math.max(lowest, Math.min(highest, range.endSec + deltaSec)));
+  const endSec = onGrid(Math.max(lowest, Math.min(highest, range.endSec + deltaSec)), lowest, highest);
   if ((deltaSec < 0 && endSec > range.endSec) || (deltaSec > 0 && endSec < range.endSec)) return range;
   return { startSec: range.startSec, endSec };
 }

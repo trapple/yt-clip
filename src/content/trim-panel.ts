@@ -1,7 +1,7 @@
 /**
  * 詰める欄 (ADR 0001・第 2 版のモック)。見出しの行 (区間 N を詰める・時刻・‹ ›・頭と尻の ±0.1・繋ぎ目の聞き直し)、
  * 拡大バー (前後 2 秒の窓) とテロップの帯、窓の中の単語を並べる。詰める操作は見出しの行に入れ、行を増やさない
- * (回答 2026-11-03「行を詰めて最小に」。1440x795 でバーがプレイヤーの下端を覆わないように)。
+ * (回答 2026-11-03「行を詰めて最小に」。1440x795 でバーの背をなるべく伸ばさないように)。
  *
  * **区間は持たない。** 何を出すかは `update` で受け取り、押されたことを伝えるだけ (状態機械に送るのは youtube.ts)。
  * 拡大バーとテロップの帯は youtube.ts が作り、要素だけをここに入れる (どちらも youtube.ts が直接更新する)
@@ -157,10 +157,13 @@ export function createTrimPanel(
   element.addEventListener("keydown", (event) => {
     if (event.key !== "," && event.key !== ".") return;
     if (event.ctrlKey || event.metaKey || event.altKey || isTyping(event.target)) return;
-    if (!enabled || view.range === null) return;
-    // YouTube は , . を止めている間のコマ送りに使う。欄が受けたら渡さない (実機で、ここで止めればコマ送りが起きないことを確かめた)
+    if (view.range === null) return;
+    // YouTube は , . を止めている間のコマ送りに使う。欄が受けたら渡さない (実機で、ここで止めればコマ送りが起きないことを確かめた)。
+    // **受け付けない間 (録画の準備・録画中) も飲み込む。** 欄にフォーカスが残ったまま録画の頭へ止めている間に YouTube へ
+    // 渡すと、止まった動画が 1 コマ進み、録画の頭がずれる
     event.preventDefault();
     event.stopPropagation();
+    if (!enabled) return;
     callbacks.onNudge(activeEdge, event.key === "," ? -NUDGE_SEC : NUDGE_SEC);
   });
 
@@ -168,7 +171,9 @@ export function createTrimPanel(
     const window = view.window;
     const range = view.range;
     const shown = window !== null && range !== null ? view.words : [];
+    // **display も切り替える。** 根の inline の display:flex は [hidden] に勝ち、空の段が背を取り続ける (telop-track と同じ作法)
     words.hidden = shown.length === 0;
+    words.style.display = shown.length === 0 ? "none" : "flex";
     if (window === null || range === null) {
       lane.replaceChildren();
       return;
