@@ -52,7 +52,7 @@ const SEGMENTS = [
 const LAYOUT_SEGMENT_STARTS = [200, 230, 260, 290, 320];
 /**
  * 受け入れ条件の確認で足す 5 つのテロップの頭 (フロートの窓の spec A.4 / B)。**後ろの 3 つは同じ時刻に
- * 重ねる**: 最後に足した区間 (320〜335) が拡大バーに選ばれていて、その窓 (312.5〜342.5) に 3 つが
+ * 重ねる**: 最後に足した区間 (320〜335) が拡大バーに選ばれていて、その窓 (前後 2 秒の 318〜337) に 3 つが
  * 重なって入るので、帯の段が最大 (2 段 + 「+1」) になる。前の 2 つのうち 201 は帯の確認 (区間 1 を
  * 選び直して動かす) に使う。231 は区間 2 の中に置き、5 つの数を揃えるだけ
  */
@@ -370,7 +370,7 @@ test("テロップの実機確認", async () => {
   ).not.toBeEmpty({ timeout: 30_000 });
 
   const button = (name: string) => bar.getByRole("button", { name, exact: true });
-  // 区間とテロップの一覧は区間・テロップの窓にある (窓の分割の spec C1.1)。バーには拡大バーと操作の行だけ。
+  // 区間とテロップの一覧は区間・テロップの窓にある (窓の分割の spec C1.1)。バーには詰める欄と操作の行だけ。
   // 設定はページに無く、popup にある (settings-in-popup spec)
   const listWindow = page.locator("#yt-clip-list");
   const segmentRows = listWindow.locator("[data-role=segment]");
@@ -1358,7 +1358,7 @@ test("テロップの実機確認", async () => {
   // --- 拡大バー上のテロップの帯 (フロートの窓の spec B.4) ---------------------------------
   // 窓の確認の後 (2 つの窓は最初の配置の枠に入っている)。受け入れ条件の確認で足した区間 5 つと
   // テロップ 5 つ (201・231・321×3) が残っている。区間 1 (200〜215) を選び直すと拡大バーの窓は
-  // 192.5〜222.5 になり、テロップ 1 (201〜204) だけが帯で出る (ほかの帯と重ならない)
+  // 前後 2 秒の 198〜217 になり、テロップ 1 (201〜204) だけが帯で出る (ほかの帯と重ならない)
   type TelopTimes = { startSec: number; endSec: number; text: string };
 
   /** 状態機械が持つテロップ (service worker が chrome.storage.session に置く写し。sw.ts の SESSION_KEY) */
@@ -1412,7 +1412,7 @@ test("テロップの実機確認", async () => {
     const before = await firstTelop();
     const box = await boxOf(firstBand);
     const from = centerOf(box);
-    // 帯の段は約 1180px で 30 秒 (約 39px/秒)。60px で 1.5 秒ほど後ろへ
+    // 帯の段は約 1180px で 19 秒 (約 62px/秒)。60px で 1 秒ほど後ろへ (判定は 0.5 秒より動いたか)
     await dragFromTo(from, { x: from.x + 60, y: from.y });
     const after = await waitTelopChanged(before);
     // 一覧の行の文言も状態の通知で描き直される。変わるまで待ってから読む (待ちきれなくても合否は record で見る)

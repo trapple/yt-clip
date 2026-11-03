@@ -389,3 +389,56 @@ describe("文字起こしの欄 (段階 1b-2)", () => {
     });
   });
 });
+
+describe("詰める欄 (段階 1c-1)", () => {
+  const WORD_LINES = [
+    {
+      id: "youtube-asr:1.00",
+      startSec: 1,
+      endSec: 3,
+      text: "さあ残り 30 秒",
+      words: [
+        { startSec: 1, endSec: 1.8, text: "さあ" },
+        { startSec: 1.8, endSec: 2.4, text: "残り" },
+        { startSec: 2.4, endSec: 3, text: "30 秒" },
+      ],
+    },
+  ];
+
+  function readyWithWords(): void {
+    fake.onChange?.({
+      kind: "ready",
+      videoId: "video-a",
+      dubbed: false,
+      transcript: { videoId: "video-a", source: "youtube-asr", language: "ja", savedAt: 1, lines: WORD_LINES },
+    });
+  }
+
+  test("行を押すと、その区間の単語が詰める欄に並ぶ", async () => {
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 600 });
+    try {
+      readyWithWords();
+      await flush();
+      rows()[0]?.click();
+      await flush();
+
+      const words = [...document.querySelectorAll<HTMLElement>("#yt-clip-bar [data-role='trim-word']")];
+      expect(words.map((word) => word.textContent)).toEqual(["さあ", "残り", "30 秒"]);
+    } finally {
+      delete (video as { duration?: number }).duration;
+    }
+  });
+
+  test("答えを待たずに続けて押すと、詰める欄は後に押した行の区間を開く", async () => {
+    // 先に押した行の答えが、後の行を送った後に届く。その答えには後の行の区間がまだ無いが、選びたい区間を忘れない
+    ready();
+    await flush();
+    rows()[0]?.click();
+    rows()[2]?.click();
+    await flush();
+
+    const title = document.querySelector("#yt-clip-bar [data-role='trim-title']")?.textContent;
+    expect(title).toBe("区間 2 を詰める");
+  });
+});

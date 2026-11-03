@@ -41,9 +41,9 @@ describe("createRangeBar", () => {
     const { bar } = mountRangeBar({ range: { startSec: 100, endSec: 130 } });
 
     expect(labelsOf(bar)).toEqual(["開始 1:40", "終了 2:10"]);
-    // 窓は範囲の前後に余裕を持たせた 60 秒 (85 〜 145)
-    expect(bar.element.textContent).toContain("1:25");
-    expect(bar.element.textContent).toContain("2:25");
+    // 窓は範囲の前後 2 秒 (98 〜 132)
+    expect(bar.element.textContent).toContain("1:38");
+    expect(bar.element.textContent).toContain("2:12");
   });
 
   test("destroy すると要素が DOM から外れる", () => {
@@ -67,7 +67,7 @@ describe("現在の再生位置", () => {
     return element;
   }
 
-  /** 窓は範囲の 2 倍か 30 秒の広い方。既定の範囲では 30 秒 (22.5〜52.5) */
+  /** 窓は範囲の前後 2 秒。既定の範囲では 28〜47 */
   const makeBar = (): RangeBar => mountRangeBar().bar;
 
   test("窓の中なら位置を示す", () => {
@@ -99,7 +99,7 @@ describe("現在の再生位置", () => {
 });
 
 describe("トラックのクリックで再生", () => {
-  /** 窓は 22.5〜52.5 秒。幅 100px がその 30 秒に対応する */
+  /** 窓は範囲 30〜45 の前後 2 秒 (28〜47)。幅 100px がその 19 秒に対応する */
   const enabledBar = () => mountRangeBar({ enabled: true });
 
   test("押した位置の再生位置を返す", () => {
@@ -107,7 +107,7 @@ describe("トラックのクリックで再生", () => {
 
     pressAt(track, 50);
 
-    // 窓 22.5〜52.5 の中央
+    // 窓 28〜47 の中央
     expect(seeked).toEqual([37.5]);
   });
 
@@ -147,19 +147,19 @@ describe("トラックのクリックで再生", () => {
 
     pressAt(track, -20);
 
-    expect(seeked).toEqual([22.5]);
+    expect(seeked).toEqual([28]);
   });
 });
 
 describe("最大秒数", () => {
   /**
-   * 窓を 0〜100 秒にして開く (範囲 50 秒の 2 倍)。
+   * 窓を 0〜61 秒にして開く (範囲 0〜59 の前後 2 秒。頭は動画の頭で切る)。
    * **窓は `update` でしか変わらない。** 窓より上限を小さく取らないと、
    * 見ているのが上限なのか窓の端なのか区別が付かない
    */
   const wideBar = (maxClipSec: number) =>
     mountRangeBar({
-      range: { startSec: 0, endSec: 50 },
+      range: { startSec: 0, endSec: 59 },
       videoDurationSec: 300,
       trackWidth: 300,
       maxClipSec,
@@ -171,7 +171,7 @@ describe("最大秒数", () => {
     // 設定した値がドラッグまで届いているかという繋ぎ込み
     const { bar, handles } = wideBar(20);
 
-    // 窓の右端 (100 秒) まで引っ張る
+    // 窓の右端 (61 秒) まで引っ張る
     dragHandle(handles[1], 300);
 
     expect(labelsOf(bar)).toEqual(["開始 0:00", "終了 0:20"]);
@@ -197,16 +197,19 @@ describe("時間の窓 (テロップの帯が同じ軸で読む)", () => {
       onCommit: () => undefined,
       onSeekPlay: () => undefined,
       maxClipSec: () => 60,
+      // 吸い付き先と掴んだ端は、このテストでは使わない
+      snapPoints: () => [],
+      onGrab: () => undefined,
     });
 
     expect(bar.window()).toBeNull();
   });
 
   test("update した範囲から決めた窓を返す", () => {
-    // 範囲 30〜45 (15 秒) の窓は 30 秒幅で、中央 37.5 の前後に 15 秒ずつ
+    // 範囲 30〜45 の窓は前後 2 秒 (28〜47)
     const { bar } = mountRangeBar();
 
-    expect(bar.window()).toEqual({ startSec: 22.5, endSec: 52.5 });
+    expect(bar.window()).toEqual({ startSec: 28, endSec: 47 });
   });
 
   test("返した窓を書き換えても、拡大バーの窓は変わらない", () => {
@@ -216,6 +219,53 @@ describe("時間の窓 (テロップの帯が同じ軸で読む)", () => {
 
     read.startSec = 0;
 
-    expect(bar.window()).toEqual({ startSec: 22.5, endSec: 52.5 });
+    expect(bar.window()).toEqual({ startSec: 28, endSec: 47 });
+  });
+});
+
+describe("単語の切れ目への吸い付き", () => {
+  // 既定の範囲 30〜45 の窓は 28〜47 (19 秒)。トラックを 190px にして 1px = 0.1 秒にする。SNAP_PX (8px) は 0.8 秒
+  test("近くの切れ目に寄せる", () => {
+    const { handles, committed } = mountRangeBar({ enabled: true, trackWidth: 190, snapPoints: [31] });
+    dragHandle(handles[0], 33); // 28 + 3.3 = 31.3 秒
+    handles[0].dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(committed.at(-1)).toEqual({ startSec: 31, endSec: 45 });
+  });
+
+  test("Alt を押している間は吸い付かない", () => {
+    const { handles, committed } = mountRangeBar({ enabled: true, trackWidth: 190, snapPoints: [31] });
+    dragHandle(handles[0], 33, 0, true);
+    handles[0].dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(committed.at(-1)?.startSec).toBeCloseTo(31.3, 5);
+  });
+
+  test("遠い切れ目には寄せない", () => {
+    const { handles, committed } = mountRangeBar({ enabled: true, trackWidth: 190, snapPoints: [35] });
+    dragHandle(handles[0], 33);
+    handles[0].dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(committed.at(-1)?.startSec).toBeCloseTo(31.3, 5);
+  });
+
+  test("寄せた後も最小・最大の長さを守る", () => {
+    // 尻 45 の 0.5 秒手前に切れ目。寄せると 0.5 秒の区間になるので、1 秒手前で止める
+    const { handles, committed } = mountRangeBar({ enabled: true, trackWidth: 190, snapPoints: [44.5] });
+    dragHandle(handles[0], 165); // 28 + 16.5 = 44.5 秒
+    handles[0].dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    expect(committed.at(-1)).toEqual({ startSec: 44, endSec: 45 });
+  });
+});
+
+describe("掴んだ端", () => {
+  test("ハンドルを掴むと、どちらの端かを知らせる", () => {
+    const { handles, grabbed } = mountRangeBar({ enabled: true });
+    pressAt(handles[1], 0);
+    pressAt(handles[0], 0);
+    expect(grabbed).toEqual(["out", "in"]);
+  });
+
+  test("操作を受け付けない間は知らせない", () => {
+    const { handles, grabbed } = mountRangeBar({ enabled: false });
+    pressAt(handles[1], 0);
+    expect(grabbed).toEqual([]);
   });
 });

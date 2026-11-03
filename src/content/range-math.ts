@@ -1,11 +1,9 @@
 import { DEFAULT_MAX_CLIP_SEC, MIN_CLIP_SEC } from "@/shared/time";
+import { round2 } from "@/shared/transcript";
 import type { ClipRange } from "@/shared/types";
 
 /** IN を押したときに作られる範囲の長さ (秒) */
 export const DEFAULT_CLIP_SEC = 15;
-
-/** 拡大バーが表示する最小の時間幅 (秒)。短い範囲でも調整の余地を残す */
-export const MIN_WINDOW_SEC = 30;
 
 /** 拡大バーが映している時間帯 */
 export type TimeWindow = {
@@ -47,25 +45,6 @@ function assertWindow(window: TimeWindow): void {
   assertInterval(window, "窓");
 }
 
-/** 指定した幅の区間を、0 から duration の中に収める */
-function fitWithin(
-  centerSec: number,
-  widthSec: number,
-  durationSec: number,
-): TimeWindow {
-  // 動画自体が幅より短いなら、動画全体を見せるほかない
-  if (durationSec <= widthSec) {
-    return { startSec: 0, endSec: durationSec };
-  }
-
-  let startSec = centerSec - widthSec / 2;
-  // 端から溢れた分は反対側へ回す。幅を縮めると調整の余地が減るため
-  if (startSec < 0) startSec = 0;
-  if (startSec + widthSec > durationSec) startSec = durationSec - widthSec;
-
-  return { startSec, endSec: startSec + widthSec };
-}
-
 /**
  * IN を押した位置から既定の長さの範囲を作る。
  * 動画の末尾に近い場合は、最小の長さを確保できるところまで開始位置を手前へずらす。
@@ -94,22 +73,84 @@ export function makeDefaultRange(
   };
 }
 
+/** 詰める欄が区間の前後に映す幅 (秒。第 2 版のモック「前後 2 秒まで見せる」) */
+export const TRIM_MARGIN_SEC = 2;
+
 /**
- * 拡大バーが映す時間帯を決める。
- * 範囲の前後に余裕を持たせて、ハンドルを動かせる余地を残す。
+ * 詰める欄が映す時間帯。区間の前後 2 秒で、動画の頭と終わりで切る。
+ *
+ * **区間の尻より手前では切らない。** 広告の間は video.duration が広告の長さになり、区間より短いことがある。
+ * 窓が区間より狭いとハンドルが窓の外になる (描く場所が無い)
  */
-export function computeWindow(
+export function computeTrimWindow(range: ClipRange, videoDurationSec: number): TimeWindow {
+  assertRange(range);
+  assertSeconds(videoDurationSec, "動画の長さ");
+  return {
+    startSec: Math.max(0, range.startSec - TRIM_MARGIN_SEC),
+    endSec: Math.max(range.endSec, Math.min(videoDurationSec, range.endSec + TRIM_MARGIN_SEC)),
+  };
+}
+
+/**
+ * 100 分の 1 秒に丸める。丸めて lowest〜highest の外へ出たら、格子の内側へ寄せる (丸めで長さが 1 秒を割る・上限を
+ * 超えるのを防ぐ。`transcript-selection.ts` も丸めた後に確かめ直している)
+ */
+function onGrid(sec: number, lowest: number, highest: number): number {
+  const rounded = round2(sec);
+  if (rounded > highest) return Math.floor(highest * 100) / 100;
+  if (rounded < lowest) return Math.ceil(lowest * 100) / 100;
+  return rounded;
+}
+
+/** 詰める欄の −0.1 / ＋0.1 で動かす幅 (秒) */
+export const NUDGE_SEC = 0.1;
+
+/**
+ * 頭か尻だけを deltaSec 動かした範囲。動画の頭と終わり・最小の長さ・上限の長さで止める (`clampHandle` と同じ規則。
+ * ただし窓では止めない: 窓は確定のたびに映し直す)。100 分の 1 秒に丸める (0.1 を足し続けた誤差を状態機械へ送らない)
+ */
+export function nudgeRange(
+  kind: HandleKind,
+  deltaSec: number,
   range: ClipRange,
   videoDurationSec: number,
-): TimeWindow {
+  maxClipSec: number,
+): ClipRange {
+  if (!Number.isFinite(deltaSec)) throw new RangeError(`動かす幅が不正です: ${deltaSec}`);
   assertRange(range);
   assertSeconds(videoDurationSec, "動画の長さ");
 
-  const rangeSec = range.endSec - range.startSec;
-  const widthSec = Math.max(rangeSec * 2, MIN_WINDOW_SEC);
-  const centerSec = (range.startSec + range.endSec) / 2;
+  if (kind === "in") {
+    const lowest = Math.max(0, range.endSec - maxClipSec);
+    const highest = range.endSec - MIN_CLIP_SEC;
+    const startSec = onGrid(Math.min(highest, Math.max(lowest, range.startSec + deltaSec)), lowest, highest);
+    // 既に上限・下限の外にある範囲 (上限を設定で縮めた後など) は、押した向きと逆へ跳ばさない
+    if ((deltaSec < 0 && startSec > range.startSec) || (deltaSec > 0 && startSec < range.startSec)) return range;
+    return { startSec, endSec: range.endSec };
+  }
 
-  return fitWithin(centerSec, widthSec, videoDurationSec);
+  const lowest = range.startSec + MIN_CLIP_SEC;
+  const highest = Math.min(Math.max(videoDurationSec, range.endSec), range.startSec + maxClipSec);
+  const endSec = onGrid(Math.max(lowest, Math.min(highest, range.endSec + deltaSec)), lowest, highest);
+  if ((deltaSec < 0 && endSec > range.endSec) || (deltaSec > 0 && endSec < range.endSec)) return range;
+  return { startSec: range.startSec, endSec };
+}
+
+/**
+ * 許す幅 (toleranceSec) の中で一番近い点に寄せる。無ければそのまま。ハンドルを単語の切れ目に吸い付かせる
+ * (第 2 版のモック)。点の数は窓の中の単語の数 (数百) なので、並べ替えや二分探索はしない
+ */
+export function snapSec(sec: number, points: readonly number[], toleranceSec: number): number {
+  let best = sec;
+  let bestDistance = toleranceSec;
+  for (const point of points) {
+    const distance = Math.abs(point - sec);
+    if (distance <= bestDistance) {
+      best = point;
+      bestDistance = distance;
+    }
+  }
+  return best;
 }
 
 /**

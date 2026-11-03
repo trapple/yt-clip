@@ -122,6 +122,37 @@ export const RANGE_STYLE = {
 } as const;
 
 /**
+ * 詰める欄 (`trim-panel.ts`。第 2 版のモック)。拡大バーとテロップの帯を中に抱える。
+ *
+ * **根の gap はバーと同じ 10px。** テロップの帯の段は `margin-top:-6px` で拡大バーのトラックとの間を 4px に詰める
+ * 前提で作ってある (`TELOP_TRACK_STYLE`)。gap を狭めると帯がハンドルの当たり判定 (トラックの上下 4px) に重なる。
+ * 単語の段も同じ `margin-top:-6px` で上の段に寄せ、バーの背を伸ばしすぎない。
+ *
+ * **単語の段は拡大バーと同じ左右の余白を持つ。** 拡大バーはトラックの左右に時刻を置くので、単語の段も同じ文字の
+ * 見えない時刻 (`ghost`) を左右に置き、トラックと同じ幅に揃える (テロップの帯の段と同じやり方)
+ */
+export const TRIM_STYLE = {
+  /** `outline:none`: フォーカスはキーを受けるためだけ。枠を出すとバーの見た目が揺れる */
+  root: "display:flex;flex-direction:column;gap:10px;outline:none;",
+  /** 見出しの行。詰める操作もここに入れる (回答 2026-11-03「行を詰めて最小に」)。狭い幅では折り返す */
+  head: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;",
+  title: "font-weight:500;color:var(--ytc-text);white-space:nowrap;",
+  range: "color:var(--ytc-text-sub);font-variant-numeric:tabular-nums;white-space:nowrap;",
+  grow: "flex:1;",
+  group: "display:inline-flex;gap:3px;align-items:center;color:var(--ytc-text-sub);padding:0 2px;border-radius:6px;",
+  /** キーで動く端の組。文字を濃くして下線を引く (色だけに頼らない) */
+  groupActive: "color:var(--ytc-text);font-weight:500;text-decoration:underline;",
+  smallButton: `appearance:none;border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:13px;height:26px;padding:0 8px;font-family:${FONT};font-size:12px;cursor:pointer;white-space:nowrap;`,
+  disabled: "opacity:0.4;pointer-events:none;",
+  words:
+    "display:flex;align-items:center;gap:10px;height:20px;margin-top:-6px;font-size:12px;font-variant-numeric:tabular-nums;",
+  ghost: "visibility:hidden;white-space:nowrap;",
+  lane: "position:relative;flex:1;min-width:0;height:20px;overflow:hidden;",
+  word: "position:absolute;top:0;height:18px;box-sizing:border-box;padding:0 3px;border:1px solid transparent;border-radius:4px;background:var(--ytc-surface);color:var(--ytc-text);font-size:11px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:clip;pointer-events:none;",
+  wordOut: "background:transparent;border:1px dashed var(--ytc-border);color:var(--ytc-text-sub);",
+} as const;
+
+/**
  * 拡大バーの下のテロップの帯の段 (`telop-track.ts`。フロートの窓の spec B)。
  *
  * **根は display を持たない。** 出し入れは telop-track.ts が `style.display` で行う (ここに display を

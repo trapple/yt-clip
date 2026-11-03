@@ -1373,7 +1373,8 @@ describe("最大秒数の設定", () => {
     clickButton("IN");
     await flush();
     // 実機では service worker が state/changed を配る。それで拡大バーが有効になる
-    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], telops: [], meta: META_A });
+    // 窓 (前後 2 秒) より上限 (20 秒) で先に止まるように、区間を 19 秒にする (窓は 98〜121)
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 119 }], telops: [], meta: META_A });
     await flush();
 
     dragOutToEnd();
@@ -2670,16 +2671,16 @@ describe("拡大バーの下のテロップの帯", () => {
   }
 
   /**
-   * 拡大バーの窓は 0〜30 秒 (範囲 10〜20 の 2 倍と 30 秒の広い方)。帯の段の箱を幅 300px
-   * (10px/秒) に、テロップ (11〜14 秒) の帯を 110〜140px に決め打ちする。ほかの要素は 0
+   * 拡大バーの窓は 8〜22 秒 (範囲 10〜20 の前後 2 秒)。帯の段の箱を幅 280px (20px/秒) に、
+   * テロップ (11〜14 秒) の帯を 60〜120px に決め打ちする。ほかの要素は 0
    */
   function stubLayout() {
     return vi
       .spyOn(Element.prototype, "getBoundingClientRect")
       .mockImplementation(function (this: Element) {
         const role = this instanceof HTMLElement ? this.dataset.role : undefined;
-        if (role === "telop-lanes") return boxAt(0, 0, 300, 30);
-        if (role === "telop-band") return boxAt(110, 0, 30, 14);
+        if (role === "telop-lanes") return boxAt(0, 0, 280, 30);
+        if (role === "telop-band") return boxAt(60, 0, 60, 14);
         return boxAt(0, 0, 0, 0);
       });
   }
@@ -2710,7 +2711,7 @@ describe("拡大バーの下のテロップの帯", () => {
       [RANGE, { startSec: 200, endSec: 215 }],
     );
     // 状態の通知では選択は動かない (selectedIndex はテストをまたいで残り、index 0 = RANGE のまま)。
-    // 行を押して区間 2 (200〜215、窓 192.5〜222.5) を選ぶ
+    // 行を押して区間 2 (200〜215、窓 198〜217) を選ぶ
     segmentRows()[1]?.click();
     expect(bands().map((band) => band.textContent)).toEqual(["二つ目"]);
 
@@ -2724,17 +2725,17 @@ describe("拡大バーの下のテロップの帯", () => {
     const spy = stubLayout();
     try {
       const band = firstBand();
-      pointer(band, "pointerdown", 125, 5);
-      pointer(band, "pointermove", 135, 5);
-      pointer(band, "pointermove", 145, 5);
+      pointer(band, "pointerdown", 90, 5);
+      pointer(band, "pointermove", 110, 5);
+      pointer(band, "pointermove", 130, 5);
       // 動かしている間は送らない (区間の拡大バーと同じ。往復を増やさない)
       expect(updateTelopEvents()).toEqual([]);
-      pointer(band, "pointerup", 145, 5);
+      pointer(band, "pointerup", 130, 5);
     } finally {
       spy.mockRestore();
     }
 
-    // 20px = 2 秒。長さ (3 秒) と文言は保つ
+    // 40px = 2 秒。長さ (3 秒) と文言は保つ
     expect(updateTelopEvents()).toEqual([
       {
         type: "UPDATE_TELOP",
@@ -2750,12 +2751,12 @@ describe("拡大バーの下のテロップの帯", () => {
     const before = firstBand().style.left;
     try {
       const band = firstBand();
-      pointer(band, "pointerdown", 125, 5);
-      pointer(band, "pointermove", 145, 5);
+      pointer(band, "pointerdown", 90, 5);
+      pointer(band, "pointermove", 130, 5);
       // 指を離す直前に、別タブで録画が始まって service worker 側の状態だけが進んだ場面を作る。
       // emit は使わない (content script にも通知してしまい、このレースを起こせない)
       swState = { kind: "recording", segments: [RANGE], telops: [TELOP], meta: META_A };
-      pointer(band, "pointerup", 145, 5);
+      pointer(band, "pointerup", 130, 5);
     } finally {
       spy.mockRestore();
     }
@@ -2774,8 +2775,8 @@ describe("拡大バーの下のテロップの帯", () => {
     const spy = stubLayout();
     try {
       const band = firstBand();
-      pointer(band, "pointerdown", 125, 5);
-      pointer(band, "pointerup", 126, 5);
+      pointer(band, "pointerdown", 90, 5);
+      pointer(band, "pointerup", 91, 5);
     } finally {
       spy.mockRestore();
     }
@@ -2805,11 +2806,11 @@ describe("拡大バーの下のテロップの帯", () => {
     const spy = stubLayout();
     try {
       const band = firstBand();
-      pointer(band, "pointerdown", 125, 5);
-      pointer(band, "pointermove", 145, 5);
-      pointer(band, "pointerup", 145, 5);
-      pointer(band, "pointerdown", 125, 5);
-      pointer(band, "pointerup", 125, 5);
+      pointer(band, "pointerdown", 90, 5);
+      pointer(band, "pointermove", 130, 5);
+      pointer(band, "pointerup", 130, 5);
+      pointer(band, "pointerdown", 90, 5);
+      pointer(band, "pointerup", 90, 5);
     } finally {
       spy.mockRestore();
     }
@@ -2841,7 +2842,7 @@ describe("区間・テロップの窓", () => {
     expect(document.querySelectorAll("#yt-clip-list").length).toBe(1);
   });
 
-  test("一覧は区間・テロップの窓に入り、バーには拡大バー・テロップの帯の段・操作の行だけが残る", async () => {
+  test("一覧は区間・テロップの窓に入り、バーには詰める欄と操作の行だけが残る", async () => {
     await showEdit([TELOP]);
 
     const body = listBody();
@@ -2857,10 +2858,12 @@ describe("区間・テロップの窓", () => {
     expect(bar.querySelector("[data-role='segment']")).toBeNull();
     expect(bar.querySelector("[data-role='add-telop']")).toBeNull();
     expect(bar.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
-    // 並び: 拡大バー → テロップの帯の段 (フロートの窓の spec B.3) → 操作の行
-    expect(bar.children.length).toBe(3);
-    expect(bar.firstElementChild?.id).toBe("yt-clip-range");
-    expect(bar.children[1]?.getAttribute("data-role")).toBe("telop-track");
+    // 並び: 詰める欄 (見出しの行 → 拡大バー → テロップの帯の段 (フロートの窓の spec B.3) → 単語) → 操作の行
+    expect(bar.children.length).toBe(2);
+    const trim = bar.firstElementChild as HTMLElement;
+    expect(trim.dataset.role).toBe("trim");
+    expect(trim.children[1]?.id).toBe("yt-clip-range");
+    expect(trim.children[2]?.getAttribute("data-role")).toBe("telop-track");
     expect(
       bar.lastElementChild?.contains(document.getElementById("yt-clip-bar-status")),
     ).toBe(true);
@@ -4614,5 +4617,162 @@ describe("録画中・書き出し中のオフ (マスタースイッチの spec
     expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
     expect(barWindowElement().isConnected).toBe(true);
     expect(onMessage).not.toBeNull();
+  });
+});
+
+describe("詰める欄", () => {
+  const TWO: ClipRange[] = [
+    { startSec: 83, endSec: 98 },
+    { startSec: 242, endSec: 250 },
+  ];
+
+  function trimPart(role: string): HTMLElement {
+    const element = document.querySelector<HTMLElement>(`#yt-clip-bar [data-role='${role}']`);
+    if (element === null) throw new Error(`${role} がありません`);
+    return element;
+  }
+
+  function adjustEvents(): unknown[] {
+    return clipEvents().filter((event) => (event as { type: string }).type === "ADJUST_SEGMENT");
+  }
+
+  async function showTwo(): Promise<void> {
+    // 選択はテストをまたいで残る (未選択なら末尾を選ぶ規則)。idle で -1 に戻してから流す
+    emit({ kind: "idle" });
+    await flush();
+    emit({ kind: "ready", segments: TWO, telops: [], meta: META_A });
+    await flush();
+    sent = [];
+  }
+
+  test("バーの窓は詰める欄と操作の行。詰める欄の中に拡大バーとテロップの帯が入る", async () => {
+    await showTwo();
+    const trim = trimPart("trim");
+    expect(trim.parentElement?.id).toBe("yt-clip-bar");
+    expect(trim.contains(rangeBarElement())).toBe(true);
+    expect(trim.querySelector("[data-role='telop-track']")).not.toBeNull();
+  });
+
+  test("選んでいる区間を見出しに出し、‹ で前の区間へ移る", async () => {
+    await showTwo();
+    // 届いた直後は最後の区間が選ばれる (今の作法)
+    expect(trimPart("trim-title").textContent).toBe("区間 2 を詰める");
+    expect(trimPart("trim-range").textContent).toContain("4:02.00 – 4:10.00");
+
+    trimPart("trim-prev").click();
+    await flush();
+
+    expect(trimPart("trim-title").textContent).toBe("区間 1 を詰める");
+    // 拡大バーの窓も前後 2 秒で移る (81〜100)
+    expect(handleLabels()).toEqual(["開始 1:23", "終了 1:38"]);
+    expect(clipEvents()).toEqual([]);
+  });
+
+  test("＋0.1 で尻を伸ばし、ADJUST_SEGMENT を送る", async () => {
+    await showTwo();
+    trimPart("nudge-out-plus").click();
+    await flush();
+
+    expect(adjustEvents()).toEqual([{ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 242, endSec: 250.1 } }]);
+    // 答えを待たずに見出しを変える (拡大バーのドラッグと同じく楽観的に描く)
+    expect(trimPart("trim-range").textContent).toContain("4:10.10");
+  });
+
+  test("答えが届くまでは次の ±0.1 を送らない。届いたら、その答えに積む", async () => {
+    // 答えを待たずに積むと、先に送った分の答えで手元の区間が巻き戻り、並べ替わった後は隣の区間に当たる
+    await showTwo();
+    trimPart("nudge-in-minus").click();
+    trimPart("nudge-in-minus").click();
+    await flush();
+    expect(adjustEvents()).toEqual([{ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 241.9, endSec: 250 } }]);
+
+    // 状態機械の同報が届く (この harness では emit が同報の代わり)
+    emit(swState);
+    await flush();
+    trimPart("nudge-in-minus").click();
+    await flush();
+
+    expect(adjustEvents().at(-1)).toEqual({ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 241.8, endSec: 250 } });
+  });
+
+  test("届かなかったら、次の ±0.1 を受け直す", async () => {
+    await showTwo();
+    rejectMessageType = "clip/event";
+    trimPart("nudge-out-plus").click();
+    await flush();
+    rejectMessageType = null;
+    trimPart("nudge-out-plus").click();
+    await flush();
+
+    expect(adjustEvents()).toHaveLength(2);
+  });
+
+  test("ドラッグの答えを待つ間も ±0.1 は受けない (先に届く通知で巻き戻らない)", async () => {
+    await showTwo();
+    const track = rangeBarElement().querySelector<HTMLElement>("[data-role=track]");
+    if (track === null) throw new Error("トラックがありません");
+    track.getBoundingClientRect = () => ({ left: 0, width: 120 }) as DOMRect;
+    const outHandle = [...rangeBarElement().querySelectorAll<HTMLElement>("[aria-label]")][1];
+    if (outHandle === undefined) throw new Error("終了ハンドルがありません");
+    outHandle.setPointerCapture = () => undefined;
+    outHandle.releasePointerCapture = () => undefined;
+    // 窓 240〜252 (12 秒) を 120px にして、尻を 251 まで引く
+    outHandle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100 }));
+    outHandle.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 110 }));
+    outHandle.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 110 }));
+    trimPart("nudge-out-plus").click();
+    await flush();
+    expect(adjustEvents()).toEqual([{ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 242, endSec: 251 } }]);
+
+    emit(swState);
+    await flush();
+    trimPart("nudge-out-plus").click();
+    await flush();
+
+    expect(adjustEvents().at(-1)).toEqual({ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 242, endSec: 251.1 } });
+  });
+
+  test("ハンドルを掴んで動かさずに離しても、送らない (投稿した後の状態を戻さない)", async () => {
+    await showTwo();
+    const handles = [...rangeBarElement().querySelectorAll<HTMLElement>("[aria-label]")];
+    const outHandle = handles[1];
+    if (outHandle === undefined) throw new Error("終了ハンドルがありません");
+    outHandle.setPointerCapture = () => undefined;
+    outHandle.releasePointerCapture = () => undefined;
+    outHandle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 0 }));
+    outHandle.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 0 }));
+    await flush();
+
+    expect(adjustEvents()).toEqual([]);
+    expect(trimPart("trim-edge-out").dataset.active).toBe("true");
+  });
+
+  test("録画中は詰めない", async () => {
+    emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
+    await flush();
+    sent = [];
+
+    trimPart("nudge-out-plus").click();
+    await flush();
+
+    expect(adjustEvents()).toEqual([]);
+  });
+
+  test("▶ 尻 は尻の 2 秒前から再生する", async () => {
+    await showTwo();
+    trimPart("play-tail").click();
+    await flush();
+
+    expect(video.element.currentTime).toBe(248);
+    expect(statusText()).toContain("尻をまたいで再生中");
+  });
+
+  test("▶ 頭 は頭の 2 秒前から再生する", async () => {
+    await showTwo();
+    trimPart("play-head").click();
+    await flush();
+
+    expect(video.element.currentTime).toBe(240);
+    expect(statusText()).toContain("頭の 2 秒前から再生中");
   });
 });

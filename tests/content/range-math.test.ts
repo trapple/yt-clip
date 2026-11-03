@@ -1,11 +1,13 @@
 import { describe, expect, test } from "vitest";
 import {
   DEFAULT_CLIP_SEC,
-  MIN_WINDOW_SEC,
+  TRIM_MARGIN_SEC,
   clampHandle,
-  computeWindow,
+  computeTrimWindow,
   makeDefaultRange,
+  nudgeRange,
   ratioToTime,
+  snapSec,
   timeToRatio,
 } from "@/content/range-math";
 import { DEFAULT_MAX_CLIP_SEC, MIN_CLIP_SEC } from "@/shared/time";
@@ -41,46 +43,71 @@ describe("makeDefaultRange", () => {
   });
 });
 
-describe("computeWindow", () => {
-  test("範囲の前後に余裕を持たせる", () => {
-    // 30 秒の範囲 → 窓は 60 秒、中心は範囲の中心 (115)
-    expect(computeWindow({ startSec: 100, endSec: 130 }, 600)).toEqual({
-      startSec: 85,
-      endSec: 145,
-    });
+describe("computeTrimWindow", () => {
+  test("区間の前後 2 秒を映す", () => {
+    expect(computeTrimWindow({ startSec: 100, endSec: 108 }, 600)).toEqual({ startSec: 98, endSec: 110 });
+    expect(TRIM_MARGIN_SEC).toBe(2);
   });
 
-  test("短い範囲でも窓は最小幅を保つ", () => {
-    // 2 秒の範囲。2 倍では狭すぎるので最小幅が効く
-    const window = computeWindow({ startSec: 100, endSec: 102 }, 600);
-    expect(window.endSec - window.startSec).toBe(MIN_WINDOW_SEC);
-    expect((window.startSec + window.endSec) / 2).toBeCloseTo(101);
+  test("動画の頭と終わりで切る", () => {
+    expect(computeTrimWindow({ startSec: 1, endSec: 5 }, 600)).toEqual({ startSec: 0, endSec: 7 });
+    expect(computeTrimWindow({ startSec: 595, endSec: 599 }, 600)).toEqual({ startSec: 593, endSec: 600 });
   });
 
-  test("動画の先頭を越えない", () => {
-    const window = computeWindow({ startSec: 2, endSec: 8 }, 600);
-    expect(window.startSec).toBe(0);
-    // 先頭で切り詰めた分は後ろへ回し、幅は保つ
-    expect(window.endSec - window.startSec).toBe(MIN_WINDOW_SEC);
+  test("動画の長さが区間より短くても (広告の間など) 区間の尻までは映す", () => {
+    // 窓が区間より狭いと、ハンドルが窓の外になり描けない
+    expect(computeTrimWindow({ startSec: 100, endSec: 108 }, 30)).toEqual({ startSec: 98, endSec: 108 });
   });
 
-  test("動画の末尾を越えない", () => {
-    const window = computeWindow({ startSec: 592, endSec: 598 }, 600);
-    expect(window.endSec).toBe(600);
-    expect(window.endSec - window.startSec).toBe(MIN_WINDOW_SEC);
+  test("逆向きの範囲は投げる", () => {
+    expect(() => computeTrimWindow({ startSec: 150, endSec: 100 }, 600)).toThrow(RangeError);
+  });
+});
+
+describe("nudgeRange", () => {
+  const RANGE = { startSec: 10, endSec: 20 };
+
+  test("頭と尻を別々に動かす", () => {
+    expect(nudgeRange("in", -0.1, RANGE, 600, 60)).toEqual({ startSec: 9.9, endSec: 20 });
+    expect(nudgeRange("out", 0.1, RANGE, 600, 60)).toEqual({ startSec: 10, endSec: 20.1 });
   });
 
-  test("動画が窓より短い場合は動画全体が窓になる", () => {
-    expect(computeWindow({ startSec: 2, endSec: 8 }, 20)).toEqual({
-      startSec: 0,
-      endSec: 20,
-    });
+  test("足し算の誤差を残さない (100 分の 1 秒に丸める)", () => {
+    let range = RANGE;
+    for (let i = 0; i < 3; i += 1) range = nudgeRange("out", 0.1, range, 600, 60);
+    expect(range.endSec).toBe(20.3);
   });
 
-  test("順序が逆転した範囲は受け付けない", () => {
-    expect(() => computeWindow({ startSec: 150, endSec: 100 }, 600)).toThrow(
-      RangeError,
-    );
+  test("動画の頭と終わりを越えない", () => {
+    expect(nudgeRange("in", -0.1, { startSec: 0.05, endSec: 5 }, 600, 60)).toEqual({ startSec: 0, endSec: 5 });
+    expect(nudgeRange("out", 0.1, { startSec: 590, endSec: 599.95 }, 600, 60)).toEqual({ startSec: 590, endSec: 600 });
+  });
+
+  test("丸めても 1 秒を割らず、上限を超えない (100 分の 1 秒の格子の内側へ寄せる)", () => {
+    // 尻 101.126 の 1 秒手前 (100.126) で止まる。四捨五入すると 100.13 で長さ 0.996 秒になる
+    const shortest = nudgeRange("in", 0.1, { startSec: 100.05, endSec: 101.126 }, 600, 60);
+    expect(shortest.startSec).toBe(100.12);
+    expect(shortest.endSec - shortest.startSec).toBeGreaterThanOrEqual(1);
+    // 頭 10.004 から上限 60 秒 (70.004) で止まる。四捨五入すると 70.00 で 59.996 秒、上限は超えない
+    const longest = nudgeRange("out", 0.1, { startSec: 10.004, endSec: 69.95 }, 600, 60);
+    expect(longest.endSec - longest.startSec).toBeLessThanOrEqual(60);
+  });
+
+  test("1 秒より短くも、上限より長くもしない", () => {
+    expect(nudgeRange("in", 0.1, { startSec: 10, endSec: 11 }, 600, 60)).toEqual({ startSec: 10, endSec: 11 });
+    expect(nudgeRange("out", 0.1, { startSec: 10, endSec: 70 }, 600, 60)).toEqual({ startSec: 10, endSec: 70 });
+  });
+});
+
+describe("snapSec", () => {
+  test("許す幅の中で一番近い点に寄せる", () => {
+    expect(snapSec(10.04, [9, 10, 10.1, 11], 0.08)).toBe(10);
+    expect(snapSec(10.07, [9, 10, 10.1, 11], 0.08)).toBe(10.1);
+  });
+
+  test("許す幅の外なら動かさない", () => {
+    expect(snapSec(10.5, [10, 11], 0.08)).toBe(10.5);
+    expect(snapSec(10.5, [], 0.08)).toBe(10.5);
   });
 });
 
