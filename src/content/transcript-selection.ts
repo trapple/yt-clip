@@ -1,4 +1,4 @@
-import { MAX_TELOP_TEXT_LENGTH } from "@/shared/telop";
+import { clampTelopText } from "@/shared/telop";
 import { MIN_CLIP_SEC } from "@/shared/time";
 import { round2, type TranscriptLine } from "@/shared/transcript";
 import type { ClipRange, Telop } from "@/shared/types";
@@ -153,7 +153,7 @@ export function setLinesSelected(
       .map((line) => ({
         startSec: line.startSec,
         endSec: line.endSec,
-        text: line.text.slice(0, MAX_TELOP_TEXT_LENGTH),
+        text: clampTelopText(line.text),
         lineId: line.id,
       }));
     telops = [...telops, ...added];
@@ -173,7 +173,7 @@ export function toggleTelopHidden(clip: Clip, line: TranscriptLine): Clip | null
   const index = clip.telops.findIndex((telop) => telop.lineId === line.id);
   const telop = clip.telops[index];
   if (telop === undefined) return null;
-  const text = telop.text === "" ? line.text.slice(0, MAX_TELOP_TEXT_LENGTH) : "";
+  const text = telop.text === "" ? clampTelopText(line.text) : "";
   return {
     segments: clip.segments,
     telops: clip.telops.map((item, i) => (i === index ? { ...item, text } : item)),
@@ -207,7 +207,7 @@ export function syncLineTelops(clip: Clip, lines: TranscriptLine[], remembered: 
     .map((line) => ({
       startSec: line.startSec,
       endSec: line.endSec,
-      text: remembered.get(line.id) ?? line.text.slice(0, MAX_TELOP_TEXT_LENGTH),
+      text: remembered.get(line.id) ?? clampTelopText(line.text),
       lineId: line.id,
     }));
   if (!changed && added.length === 0) return null;

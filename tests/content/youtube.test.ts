@@ -26,6 +26,7 @@ import type { Message } from "@/shared/messages";
 import type { WindowId, WindowLayout } from "@/content/window-layout";
 import {
   FAILURE_MESSAGES,
+  type ClipEvent,
   type ClipRange,
   type ClipState,
   type Telop,
@@ -1824,6 +1825,55 @@ describe("合計が上限を超えた録画", () => {
   });
 });
 
+describe("録画を離れた後の状態の欄 (1c-4)", () => {
+  test("録画を中止して ready に戻ったら、「録画中…」を残さず区間の範囲の文言に戻す", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toContain("録画中…");
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:20 (10秒)");
+  });
+
+  test("書き出してプレビューに入ったら、「書き出しています…」を残さない", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    video.advanceFrame(20.1);
+    expect(statusText()).toBe("録画を書き出しています…");
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
+    command("recorder/stop");
+    await flush();
+    emit({ kind: "preview", clipId: "c1", segments: [RANGE], telops: [], meta: META_A, mimeType: "video/mp4" });
+    await flush();
+    expect(statusText()).toBe("録画できました。X に投稿 か 取り直す を選んでください");
+  });
+
+  test("合計が上限を超えて録画を始めなかったときの理由は、ready に戻っても残す", async () => {
+    changeSettings({ maxClipSec: 20 });
+    const two = [
+      { startSec: 0, endSec: 15 },
+      { startSec: 100, endSec: 115 },
+    ];
+    emit({ kind: "ready", segments: two, telops: [], meta: META_A });
+    await flush();
+    emit({ kind: "seeking", segments: two, telops: [], meta: META_A });
+    await flush();
+    emit({ kind: "ready", segments: two, telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toContain("上限");
+  });
+});
+
 describe("IN", () => {
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
@@ -2006,6 +2056,10 @@ describe("IN", () => {
       const events = clipEvents() as { type: string; range?: { startSec: number } }[];
       expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
       expect(events[0]?.range?.startSec).toBe(at);
+      // 作り直しは答えを待つ (1c-4)。router と同じく、作り直した区間の状態を通知してから次を押す
+      const made = (clipEvents()[0] as Extract<ClipEvent, { type: "MARK_IN" }>).range;
+      emit({ kind: "ready", segments: [made], telops: [], meta: META_A });
+      await flush();
     }
   });
 

@@ -18,6 +18,10 @@ export const BRIDGE_RESPONSE = "yt-clip/captions-response" as const;
 export const POT_WAIT_MS = 8000;
 /** 失敗の理由の文字数の上限。応答はページの他のスクリプトも偽れるので、巨大な文字列を受け取らない */
 export const MAX_ERROR_MESSAGE_LENGTH = 500;
+/** 言語コードの長さの上限 (BCP 47 の実用の長さ)。応答はページが偽れるので、巨大な文字列を保存に流さない */
+export const MAX_LANGUAGE_CODE_LENGTH = 35;
+/** 字幕の表示名の長さの上限 */
+export const MAX_TRACK_NAME_LENGTH = 200;
 
 export type CaptionTrack = {
   baseUrl: string;

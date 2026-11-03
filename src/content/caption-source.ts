@@ -1,5 +1,7 @@
 import {
   BRIDGE_REQUEST,
+  MAX_LANGUAGE_CODE_LENGTH,
+  MAX_TRACK_NAME_LENGTH,
   POT_WAIT_MS,
   isBridgeResponse,
   type BridgeAnswer,
@@ -166,8 +168,18 @@ export async function fetchOfficialTranscript(
   signal?: AbortSignal,
 ): Promise<OfficialResult> {
   const answer = await ask({ videoId, wantPot: true }, deps, signal);
-  const track = pickTrack(answer.tracks);
+  // 言語や名前が上限より長い track は使わない (応答はページが偽れる。巨大な文字列を保存に流さない)。応答ごと捨てると
+  // 無応答と見分けられず、頼み直した末に理由の分からない失敗になるので、その track だけ落とす
+  const tracks = answer.tracks.filter(
+    (candidate) =>
+      candidate.languageCode.length <= MAX_LANGUAGE_CODE_LENGTH && candidate.name.length <= MAX_TRACK_NAME_LENGTH,
+  );
+  const track = pickTrack(tracks);
   if (track === null) return { kind: "none", dubbed: answer.dubbed };
+  // 字幕の URL は頼んだ動画のものか (応答はページが偽れる。別の動画の字幕をこの動画の名で保存しない)
+  if (!isTimedtextUrl(track.baseUrl) || new URL(track.baseUrl).searchParams.get("v") !== videoId) {
+    throw new CaptionError("別の動画の字幕が返りました");
+  }
   if (answer.potUrl === null) throw new CaptionError("字幕の取得に要る情報を拾えませんでした");
   signal?.throwIfAborted();
   const body = await deps.fetchText(withPot(track.baseUrl, answer.potUrl));

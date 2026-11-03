@@ -74,6 +74,39 @@ describe("createTranscriptLoader", () => {
     expect(statuses.at(-1)).toEqual({ kind: "ready", videoId: "a", transcript: transcript("a"), dubbed: true });
   });
 
+  test("保存から読めたら、吹き替えの判定を待たずに ready を出し、判定が返ったら出し直す", async () => {
+    const dubbed = deferred<boolean>();
+    const { loader, statuses } = setup({ loadCached: async (id) => transcript(id), readDubbed: () => dubbed.promise });
+    loader.load("a");
+    await flush();
+    expect(statuses.at(-1)).toEqual({ kind: "ready", videoId: "a", transcript: transcript("a"), dubbed: false });
+    dubbed.resolve(true);
+    await flush();
+    expect(statuses.at(-1)).toEqual({ kind: "ready", videoId: "a", transcript: transcript("a"), dubbed: true });
+  });
+
+  test("保存から読めて吹き替えでなければ、ready は 1 回だけ", async () => {
+    const { loader, statuses } = setup({ loadCached: async (id) => transcript(id), readDubbed: async () => false });
+    loader.load("a");
+    await flush();
+    expect(statuses.filter((status) => status.kind === "ready")).toHaveLength(1);
+  });
+
+  test("判定を待つ間に別の動画へ移ったら、前の動画の判定で出し直さない", async () => {
+    const dubbed = deferred<boolean>();
+    const { loader, statuses } = setup({
+      loadCached: async (id) => transcript(id),
+      readDubbed: (id) => (id === "a" ? dubbed.promise : Promise.resolve(false)),
+    });
+    loader.load("a");
+    await flush();
+    loader.load("b");
+    await flush();
+    dubbed.resolve(true);
+    await flush();
+    expect(statuses.at(-1)).toMatchObject({ kind: "ready", videoId: "b", dubbed: false });
+  });
+
   test("保存から読んだとき、吹き替えの判定が読めなければ偽にし、warn を残す", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { loader, statuses } = setup({

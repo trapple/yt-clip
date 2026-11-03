@@ -1,3 +1,4 @@
+import { MAX_LANGUAGE_CODE_LENGTH } from "@/content/caption-bridge-protocol";
 import { isFiniteNumber, isRecord } from "@/shared/guards";
 import type { Transcript, TranscriptLine } from "@/shared/transcript";
 
@@ -17,6 +18,8 @@ export const MAX_TRANSCRIPT_BYTES = 300_000;
 type IndexEntry = { videoId: string; savedAt: number };
 
 export type TranscriptStorage = {
+  /** 持っている鍵の一覧。取れない環境 (getKeys の無い Chrome) では null (索引から漏れた鍵の掃除を飛ばす) */
+  keys(): Promise<string[]> | null;
   get(keys: string[]): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;
   remove(keys: string[]): Promise<void>;
@@ -24,6 +27,11 @@ export type TranscriptStorage = {
 
 /** 本物。chrome を呼ぶのは使うときだけ (import しただけで chrome を触らない) */
 export const chromeLocalStorage: TranscriptStorage = {
+  // getKeys は Chrome 130 から。@types/chrome の版に無いので型を足して呼ぶ。get(null) は毎回 9MB ほど読むので使わない
+  keys: () => {
+    const local = chrome.storage.local as typeof chrome.storage.local & { getKeys?: () => Promise<string[]> };
+    return local.getKeys !== undefined ? local.getKeys() : null;
+  },
   get: (keys) => chrome.storage.local.get(keys),
   set: (items) => chrome.storage.local.set(items),
   remove: (keys) => chrome.storage.local.remove(keys),
@@ -53,6 +61,7 @@ export function isTranscript(value: unknown): value is Transcript {
     typeof value.videoId === "string" &&
     (value.source === "youtube-manual" || value.source === "youtube-asr") &&
     typeof value.language === "string" &&
+    value.language.length <= MAX_LANGUAGE_CODE_LENGTH &&
     isFiniteNumber(value.savedAt) &&
     Array.isArray(value.lines) &&
     value.lines.every(isLine) &&
@@ -115,6 +124,21 @@ function isQuotaError(error: unknown): boolean {
 }
 
 /**
+ * 索引に無い `transcript:<id>` を消す。2 つのタブが同時に保存すると、後から書いた索引に先の動画が載らず、その鍵は
+ * 30 本の追い出しに掛からないまま残る。**消す直前に索引を読み直し**、書いた索引 (written) とその和に無い鍵だけを消す
+ * (この間に別のタブが書いた鍵を消さない)
+ */
+async function removeOrphans(storage: TranscriptStorage, written: readonly IndexEntry[]): Promise<void> {
+  const listing = storage.keys();
+  if (listing === null) return;
+  const keys = await listing;
+  const latest = readIndex((await storage.get([TRANSCRIPT_INDEX_KEY]))[TRANSCRIPT_INDEX_KEY]);
+  const kept = new Set([...written, ...latest].map((entry) => keyOf(entry.videoId)));
+  const orphans = keys.filter((key) => key.startsWith(TRANSCRIPT_KEY_PREFIX) && !kept.has(key));
+  if (orphans.length > 0) await storage.remove(orphans);
+}
+
+/**
  * 保存する。索引の先頭に入れ、30 本を超えた分を消す。容量が足りなければ古いものから 1 本ずつ消して入れ直す。
  * 消せるものが無くなっても入らなければ throw する
  */
@@ -142,6 +166,10 @@ export async function saveTranscript(
   for (;;) {
     try {
       await storage.set({ [keyOf(transcript.videoId)]: fitted, [TRANSCRIPT_INDEX_KEY]: kept });
+      // ※ 局所例外 (Fail Fast): 掃除に失敗しても保存は通っている (掃除は保存の目的ではない)。理由は残す
+      await removeOrphans(storage, kept).catch((error: unknown) => {
+        console.warn(`[yt-clip] 索引から漏れた文字起こしを消せませんでした: ${String(error)}`);
+      });
       return;
     } catch (error) {
       // 古いものを消して入れ直すのは容量が足りないときだけ。ほかの失敗で消すと、30 本ぜんぶ消してから throw する

@@ -32,6 +32,10 @@ const messageListeners: MessageListener[] = [];
 let state: ClipState = { kind: "idle" };
 let events: ClipEvent[] = [];
 let failNext = false;
+/** 真の間は、受け入れた操作の状態の通知を送らない (同報が落ちたとき) */
+let dropBroadcast = false;
+/** 真の間は、router と同じく状態の通知を応答より先に送る (既定は setTimeout で応答の後) */
+let broadcastFirst = false;
 
 async function flush(): Promise<void> {
   for (let round = 0; round < 6; round += 1) await new Promise((resolve) => setTimeout(resolve, 0));
@@ -103,7 +107,10 @@ beforeAll(async () => {
           const next = reduce(state, message.event);
           // router と同じく、拒まれた遷移 (internal-error) は状態を変えない
           if (!(next.kind === "failed" && next.reason === "internal-error")) {
-            setTimeout(() => emit(next), 0);
+            if (dropBroadcast) state = next;
+            // 応答の解決より先に積む (router と同じく、通知が応答より先に届く)
+            else if (broadcastFirst) queueMicrotask(() => emit(next));
+            else setTimeout(() => emit(next), 0);
             return { state: next };
           }
         }
@@ -124,6 +131,8 @@ beforeEach(async () => {
   await flush();
   events = [];
   failNext = false;
+  dropBroadcast = false;
+  broadcastFirst = false;
 });
 
 describe("文字起こしの欄 (段階 1b-2)", () => {
@@ -256,6 +265,46 @@ describe("文字起こしの欄 (段階 1b-2)", () => {
     await flush();
     expect(events).toEqual([]);
     expect(document.body.textContent).toContain("1 つの区間は 60 秒までです");
+  });
+
+  test("Shift で入れた結果の合計が上限を超えるなら、送らずに理由を出す (1c-4)", async () => {
+    // 2 秒の行を 6 秒おきに 40 行。間が 3 秒より空くので 1 行ずつ別の区間になり、1 区間は短いが合計は 60 秒を超える
+    const spaced = Array.from({ length: 40 }, (_, i) => ({ id: `s${i}`, startSec: i * 6, endSec: i * 6 + 2, text: `行 ${i}` }));
+    fake.onChange?.({
+      kind: "ready",
+      videoId: "video-a",
+      dubbed: false,
+      transcript: { videoId: "video-a", source: "youtube-asr", language: "ja", savedAt: 1, lines: spaced },
+    });
+    await flush();
+    rows()[0]?.click();
+    await flush();
+    events = [];
+    rows()[39]?.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    await flush();
+    expect(events).toEqual([]);
+    expect(document.querySelector("#yt-clip-bar-status")?.textContent).toContain("合計が上限 60 秒を超えます");
+    // 上限に収まる範囲なら Shift でも入る
+    rows()[3]?.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    await flush();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+  });
+
+  test("1 行ずつ押すときは、合計が上限を超えても入れる (録画で止める)", async () => {
+    const spaced = Array.from({ length: 30 }, (_, i) => ({ id: `s${i}`, startSec: i * 6, endSec: i * 6 + 2, text: `行 ${i}` }));
+    fake.onChange?.({
+      kind: "ready",
+      videoId: "video-a",
+      dubbed: false,
+      transcript: { videoId: "video-a", source: "youtube-asr", language: "ja", savedAt: 1, lines: spaced },
+    });
+    await flush();
+    for (let i = 0; i < 30; i += 1) {
+      rows()[i]?.click();
+      await flush();
+    }
+    expect(state).toMatchObject({ kind: "ready" });
+    expect("segments" in state ? state.segments.length : 0).toBe(30);
   });
 
   test("拒まれた Shift + クリックでは、起点を動かさない", async () => {
@@ -744,3 +793,209 @@ describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
   });
 });
 
+
+describe("広告の再生中 (1c-4)", () => {
+  const player = (): HTMLElement => document.querySelector<HTMLElement>("#movie_player")!;
+  const status = (): string | null => document.querySelector("#yt-clip-bar-status")?.textContent ?? null;
+  const barButton = (label: string): HTMLButtonElement => {
+    const found = [...document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button")].find((b) => b.textContent === label);
+    if (found === undefined) throw new Error(`ボタンが見つかりません: ${label}`);
+    return found;
+  };
+  const AD = "広告の再生中です。終了後にやり直してください";
+
+  test("区間が無いとき、行・IN・＋ 区間を追加 で区間を作らず理由を出す", async () => {
+    ready();
+    await flush();
+    player().classList.add("ad-showing");
+    try {
+      for (const press of [() => rows()[0]!.click(), () => barButton("IN").click(), () => barButton("＋ 区間を追加").click()]) {
+        events = [];
+        press();
+        await flush();
+        expect(events).toEqual([]);
+        expect(status()).toBe(AD);
+      }
+    } finally {
+      player().classList.remove("ad-showing");
+    }
+  });
+
+  test("区間があるとき、IN・OUT・＋ ここに字幕を足す でも変えない", async () => {
+    ready();
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    player().classList.add("ad-showing");
+    try {
+      const addTelop = (): HTMLButtonElement => document.querySelector<HTMLButtonElement>("#yt-clip-list [data-role='add-telop']")!;
+      for (const press of [() => barButton("IN").click(), () => barButton("OUT").click(), () => addTelop().click()]) {
+        events = [];
+        press();
+        await flush();
+        expect(events).toEqual([]);
+        expect(status()).toBe(AD);
+      }
+    } finally {
+      player().classList.remove("ad-showing");
+    }
+  });
+});
+
+describe("区間とテロップを変える操作の待ち (1c-4)", () => {
+  const barButton = (label: string): HTMLButtonElement => {
+    const found = [...document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button")].find((b) => b.textContent === label);
+    if (found === undefined) throw new Error(`ボタンが見つかりません: ${label}`);
+    return found;
+  };
+  const nudgeOutPlus = (): HTMLElement => document.querySelector<HTMLElement>("#yt-clip-bar [data-role='nudge-out-plus']")!;
+  const video = (): HTMLVideoElement => document.querySelector<HTMLVideoElement>("video")!;
+  const status = (): string | null => document.querySelector("#yt-clip-bar-status")?.textContent ?? null;
+  const BUSY = "前の操作の答えを待っています。少し待ってからもう一度押してください";
+
+  async function withDuration(run: () => Promise<void>): Promise<void> {
+    Object.defineProperty(video(), "duration", { configurable: true, value: 600 });
+    try {
+      await run();
+    } finally {
+      delete (video() as { duration?: number }).duration;
+    }
+  }
+
+  test("OUT の答えの前に ±0.1 を押しても送らない (OUT で動かした尻を戻さない)", async () => {
+    await withDuration(async () => {
+      ready();
+      emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+      await flush();
+      events = [];
+      video().currentTime = 8;
+      barButton("OUT").click();
+      nudgeOutPlus().click();
+      expect(events.map((event) => event.type)).toEqual(["MARK_OUT"]);
+      await flush();
+      expect(state).toMatchObject({ segments: [{ startSec: 0.8, endSec: 8 }] });
+    });
+  });
+
+  test("＋ 区間を追加の答えの前に行を押しても、欄の組を送らない", async () => {
+    await withDuration(async () => {
+      ready();
+      await flush();
+      video().currentTime = 100;
+      events = [];
+      barButton("＋ 区間を追加").click();
+      rows()[0]!.click();
+      expect(events.map((event) => event.type)).toEqual(["ADD_SEGMENT"]);
+      expect(status()).toBe(BUSY);
+      await flush();
+    });
+  });
+
+  test("行を押した答えの前に IN・OUT・＋ 区間を追加を押しても送らず、理由を出す", async () => {
+    await withDuration(async () => {
+      ready();
+      await flush();
+      events = [];
+      rows()[0]!.click();
+      for (const label of ["IN", "OUT", "＋ 区間を追加"]) {
+        barButton(label).click();
+        expect(status()).toBe(BUSY);
+      }
+      expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+      await flush();
+    });
+  });
+
+  test("欄の組 (SET_CLIP) の通知が落ちても、上限の後に答えを描いて IN が効く (whole-branch review)", async () => {
+    await withDuration(async () => {
+      ready();
+      await flush();
+      vi.useFakeTimers();
+      try {
+        dropBroadcast = true;
+        events = [];
+        rows()[0]!.click();
+        await vi.advanceTimersByTimeAsync(10);
+        dropBroadcast = false;
+        barButton("IN").click();
+        expect(status()).toBe(BUSY);
+        await vi.advanceTimersByTimeAsync(1600);
+        // 答えを描いたので、詰める欄にその区間が出て、IN が通る
+        expect(document.querySelector("#yt-clip-bar [data-role='trim-title']")?.textContent).toBe("区間 1 を詰める");
+        events = [];
+        video().currentTime = 1.5;
+        barButton("IN").click();
+        expect(events.map((event) => event.type)).toEqual(["ADJUST_SEGMENT"]);
+        await vi.advanceTimersByTimeAsync(10);
+      } finally {
+        dropBroadcast = false;
+        vi.useRealTimers();
+      }
+      await flush();
+    });
+  });
+
+  test("行を続けて押した後に後の組の通知だけ落ちても、上限の後に後の組を描き、押した行を消さない (再レビュー)", async () => {
+    ready();
+    await flush();
+    vi.useFakeTimers();
+    try {
+      broadcastFirst = true;
+      events = [];
+      rows()[0]!.click();
+      dropBroadcast = true;
+      rows()[2]!.click();
+      dropBroadcast = false;
+      await vi.advanceTimersByTimeAsync(10);
+      // 先の組 (行 0) の通知だけが届いた
+      expect(rows().map((row) => row.dataset.selected)).toEqual(["true", "false", "false"]);
+      await vi.advanceTimersByTimeAsync(1600);
+      expect(rows().map((row) => row.dataset.selected)).toEqual(["true", "false", "true"]);
+    } finally {
+      dropBroadcast = false;
+      vi.useRealTimers();
+    }
+    await flush();
+  });
+
+  test("作り直しの IN の答えの前に OUT を押しても送らない (古い頭で OUT を作らない)", async () => {
+    await withDuration(async () => {
+      ready();
+      // 字幕の行 (1〜9 秒) の無い区間にする (行が入ると、行のテロップを揃える組が先に走って IN が待たされる)
+      emit({ kind: "ready", segments: [{ startSec: 20, endSec: 30 }], telops: [], meta: META });
+      await flush();
+      events = [];
+      video().currentTime = 100;
+      barButton("IN").click();
+      video().currentTime = 105;
+      barButton("OUT").click();
+      expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+      expect(status()).toBe(BUSY);
+      await flush();
+    });
+  });
+
+  test("±0.1 が受け入れられたのに状態の通知が落ちても、上限の後に答えを描いて次の ±0.1 が効く", async () => {
+    await withDuration(async () => {
+      ready();
+      emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+      await flush();
+      vi.useFakeTimers();
+      try {
+        dropBroadcast = true;
+        events = [];
+        nudgeOutPlus().click();
+        await vi.advanceTimersByTimeAsync(10);
+        nudgeOutPlus().click();
+        expect(events.map((event) => event.type)).toEqual(["ADJUST_SEGMENT"]);
+        await vi.advanceTimersByTimeAsync(1600);
+        nudgeOutPlus().click();
+        expect(events.map((event) => event.type)).toEqual(["ADJUST_SEGMENT", "ADJUST_SEGMENT"]);
+        await vi.advanceTimersByTimeAsync(10);
+      } finally {
+        dropBroadcast = false;
+        vi.useRealTimers();
+      }
+      await flush();
+    });
+  });
+});

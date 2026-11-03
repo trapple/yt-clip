@@ -94,7 +94,7 @@ import {
   type Channel,
   type Settings,
 } from "@/shared/settings";
-import { MAX_TELOP_TEXT_LENGTH, hasRenderableTelops } from "@/shared/telop";
+import { MAX_TELOP_TEXT_LENGTH, clampTelopText, hasRenderableTelops } from "@/shared/telop";
 import type { TranscriptLine } from "@/shared/transcript";
 import { telopStyleOf, type TelopStyle } from "@/shared/telop-style";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
@@ -469,6 +469,30 @@ function rangeLabel(range: ClipRange): string {
 /** 状態の欄の最初の案内。区間が無いときに出す */
 const INITIAL_STATUS = "IN を押して開始位置を指定";
 
+/**
+ * 広告の再生中か。**区間とテロップを作る操作の頭で見る**: 広告の間は video の duration と currentTime が広告のもので、
+ * 区間が広告の長さに詰まる・広告の中の時刻で IN を打つ。理由を出して止める (録画の開始が広告で止まるのと同じ文言)
+ */
+function refuseDuringAd(): boolean {
+  if (!isAdPlaying()) return false;
+  setStatus(FAILURE_MESSAGES["ad-playing"]);
+  return true;
+}
+
+/** プレビューに入ったときの状態の欄。ボタンの文言 (ACTION_LABELS) と揃える */
+const PREVIEW_STATUS = "録画できました。X に投稿 か 取り直す を選んでください";
+
+/**
+ * 録画の進みの文言 (準備・録画中・区間の移動・書き出し) を状態の欄に書いたか。**書いたときだけ、録画を離れたら出し直す**
+ * (録画を離れただけで出し直すと、録画を始める前に出した理由 (合計が上限を超えている など) まで消す)
+ */
+let recordingStatusShown = false;
+
+function setRecordingStatus(text: string): void {
+  recordingStatusShown = true;
+  setStatus(text);
+}
+
 /** 操作が通ったときの状態の欄。選んでいる区間があればその範囲、無ければ最初の案内 (前の操作の理由を残さない) */
 function restingStatus(): string {
   const segment = selectedSegment();
@@ -581,6 +605,12 @@ function onMarkIn(): void {
     setStatus("録画中は範囲を変更できません");
     return;
   }
+  // 作り直し (startOver) と頭を動かす道 (onMarkSegmentStart) の両方に効かせる
+  if (refuseDuringAd()) return;
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return;
+  }
   const shown = currentSegments.length > 0 && rangeVideoId === currentVideoId();
   const simple = currentSegments.length === 1 && currentTelops.length === 0;
   if (shown && !simple) {
@@ -616,8 +646,10 @@ function startOver(): void {
   cancelPreviewWatch();
   // 楽観的に描かない。状態機械の答えを待ってから描く (区間 1 つの ready になり、それが選ばれる)。
   // rangeVideoId も答えの meta から取る (先に書くと、答えが来なかったとき前の動画の区間に今の動画の秒を書きうる)
-  send(
+  // 作り直しも答えを待つ (待たずに OUT を押すと、古い頭で OUT を作って「受け付けられませんでした」になる)
+  sendRange(
     { type: "MARK_IN", range, meta },
+    range,
     (state) => state.kind === "ready" && state.segments.length === 1 && hasSegment(state, range),
   );
 }
@@ -659,6 +691,11 @@ function onAddSegment(): void {
     setStatus("録画中は区間を変更できません");
     return;
   }
+  if (refuseDuringAd()) return;
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return;
+  }
 
   const video = getVideo();
   const meta = getVideoMeta();
@@ -672,7 +709,7 @@ function onAddSegment(): void {
   revealSegmentOnNextState = true;
   // 選ぶ区間が変わるので、前の区間を見ている再生の監視は用済み
   cancelPreviewWatch();
-  send({ type: "ADD_SEGMENT", range, meta });
+  sendRange({ type: "ADD_SEGMENT", range, meta }, range);
 }
 
 /** テロップを出す既定の長さ (秒) */
@@ -692,6 +729,7 @@ function onAddTelop(): void {
     setStatus("いまはテロップを変更できません");
     return;
   }
+  if (refuseDuringAd()) return;
   const video = getVideo();
   // メタデータを読む前は duration が NaN。そのまま足すと状態機械が throw する
   if (!Number.isFinite(video.duration)) {
@@ -765,7 +803,7 @@ function irreplaceableTelops(telops: Telop[]): number {
   return telops.filter((telop) => {
     if (telop.lineId === undefined) return true;
     const line = byId.get(telop.lineId);
-    return line === undefined || telop.text !== line.text.slice(0, MAX_TELOP_TEXT_LENGTH);
+    return line === undefined || telop.text !== clampTelopText(line.text);
   }).length;
 }
 
@@ -820,12 +858,17 @@ function onMarkSegmentStart(): void {
   // 頭を動かすと時間順の位置が変わりうる。選択は範囲で追う (selectRangeOnNextState)
   cancelPreviewWatch();
   selectRangeOnNextState = next;
-  send({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next }, (state) => hasSegment(state, next));
+  sendRange({ type: "ADJUST_SEGMENT", index: selectedIndex, range: next }, next);
 }
 
 function onMarkOut(): void {
   if (busy) {
     setStatus("録画中は範囲を変更できません");
+    return;
+  }
+  if (refuseDuringAd()) return;
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
     return;
   }
   const editing = selectedSegment();
@@ -860,7 +903,7 @@ function onMarkOut(): void {
   cancelPreviewWatch();
   // 楽観的に描かない。状態機械の答えを待ってから描く (`onAddSegment` と同じ)
   selectRangeOnNextState = next;
-  send({ type: "MARK_OUT", index: selectedIndex, sec: next.endSec }, (state) => hasSegment(state, next));
+  sendRange({ type: "MARK_OUT", index: selectedIndex, sec: next.endSec }, next);
 }
 
 /**
@@ -892,8 +935,10 @@ function onRangeCommitted(range: ClipRange): boolean {
     const durationSec = getVideo().duration;
 
     const current = selectedSegment();
-    if (current !== null && (sameRange(current, range) || pendingClip !== null)) {
+    if (current !== null && (sameRange(current, range) || clipOpBusy())) {
       paintRangeBar(current, durationSec);
+      // 待っている間のドラッグは戻す。黙って戻すと無反応に見えるので理由を出す (±0.1 と揃える)
+      if (!sameRange(current, range)) setStatus(CLIP_BUSY_MESSAGE);
       return false;
     }
 
@@ -904,20 +949,7 @@ function onRangeCommitted(range: ClipRange): boolean {
     paintRangeBar(range, durationSec);
     setStatus(rangeLabel(range));
     selectRangeOnNextState = range;
-    rangeAwaiting = range;
-    const settle = (): void => {
-      if (rangeAwaiting === range) rangeAwaiting = null;
-    };
-    send(
-      { type: "ADJUST_SEGMENT", index: selectedIndex, range },
-      (state) => {
-        const ok = hasSegment(state, range);
-        // 拒まれたら待つのをやめる (待ち続けると ±0.1 が二度と効かない)
-        if (!ok) settle();
-        return ok;
-      },
-      settle,
-    );
+    sendRange({ type: "ADJUST_SEGMENT", index: selectedIndex, range }, range);
     return true;
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
@@ -934,6 +966,52 @@ function onRangeCommitted(range: ClipRange): boolean {
 let rangeAwaiting: ClipRange | null = null;
 
 /**
+ * 区間の範囲を変える操作を送り、その範囲を持つ状態を描くまで待つ (`rangeAwaiting`)。拒まれた・届かなかったら待ちを下ろす
+ * (待ち続けると ±0.1 が二度と効かない。下ろすのは send が応答の状態を描くより前)。受け入れられたのに通知が来ないまま
+ * 上限が過ぎたら、答えの状態を描いて下ろす (`drawAnswerIfSilent`)
+ */
+function sendRange(
+  event: ClipEvent,
+  range: ClipRange,
+  /** 受け入れられたかの判定。既定は「送った範囲の区間がある」 */
+  accepted: (state: ClipState) => boolean = (state) => hasSegment(state, range),
+): void {
+  rangeAwaiting = range;
+  const settle = (): void => {
+    if (rangeAwaiting === range) rangeAwaiting = null;
+  };
+  send(
+    event,
+    (state) => {
+      if (!accepted(state)) {
+        settle();
+        return false;
+      }
+      drawAnswerIfSilent(state, () => rangeAwaiting === range, settle);
+      return true;
+    },
+    settle,
+  );
+}
+
+/**
+ * 送った操作の答え (応答の状態) を、通知が来ないときの代わりに描く。**応答を受けた時点で呼ぶ。** 上限が過ぎてもまだ
+ * 待っていたら待ちを下ろし、応答を受けてから何も描いていなければ答えの状態を描く。router は通知を応答より先に送るので、
+ * 応答の後に描いたものは答えより新しい状態で、古い答えで戻さない。**送った時点を基準にしない** (行を続けて押すと、
+ * 先に送った組の通知 = 後の答えより古い状態を「描いた」と数え、後の組を描かずに待ちだけ下ろす。押した行が黙って消える)
+ */
+function drawAnswerIfSilent(state: ClipState, still: () => boolean, release: () => void): void {
+  const id = runId;
+  const answeredAt = drawCount;
+  setTimeout(() => {
+    if (!isCurrentRun(id) || !still()) return;
+    // 先に下ろす。描いて下ろすのに任せると、別の動画へ移った後 (答えを取り込まない) には永久に下りない
+    release();
+    if (drawCount === answeredAt) applyStateToDisplay(state);
+  }, INDEXED_ANSWER_WAIT_MS);
+}
+
+/**
  * 詰める欄の −0.1 / ＋0.1 (と `,` `.`)。拡大バーのドラッグの確定と同じ経路 (`onRangeCommitted`) で送る。
  *
  * **前に送った範囲の答えが届くまで、次は受けない** (`rangeAwaiting` の doc)。欄の行を押した答え (`pendingClip`) を
@@ -941,7 +1019,12 @@ let rangeAwaiting: ClipRange | null = null;
  * 動かした端の映像を出す (止めて、その位置へ)
  */
 function onNudge(kind: HandleKind, deltaSec: number): void {
-  if (!canAdjustRange() || rangeAwaiting !== null || pendingClip !== null) return;
+  if (!canAdjustRange() || rangeAwaiting !== null) return;
+  // 前の ±0.1 の答えを待つ間は黙って数えない (押し続けたとき)。ほかの操作の答えを待つ間は理由を出す
+  if (clipOpBusy()) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return;
+  }
   const range = selectedSegment();
   if (range === null) return;
   try {
@@ -1607,6 +1690,13 @@ function applyStateToDisplay(state: ClipState): void {
       console.warn(`拡大バーの再描画に失敗しました: ${String(error)}`);
     }
   }
+  // 録画を離れた (中止・書き出し済み)。録画の間に書いた「録画中… (N秒)」「書き出しています…」を残さない。
+  // failed は上で失敗の文言を出している
+  if (recordingStatusShown && !BUSY_KINDS.has(state.kind)) {
+    recordingStatusShown = false;
+    if (state.kind !== "failed") setStatus(state.kind === "preview" ? PREVIEW_STATUS : restingStatus());
+  }
+
   // 区間が変わった答え (ハンドル・±0.1・IN / OUT・＋ 区間を追加・見出しの ✕) を描いたら、区間に入っている行のテロップに揃える
   syncTelopsToSegments();
 }
@@ -1757,7 +1847,7 @@ async function prepareRecording(
     if (!isCurrentRun(id)) return;
 
     send({ type: "SEEK_DONE" });
-    setStatus(`${qualityNote}録画の準備をしています…`);
+    setRecordingStatus(`${qualityNote}録画の準備をしています…`);
   } catch (error) {
     if (!isCurrentRun(id)) return;
     if (error instanceof DrmProtectedError) {
@@ -1876,7 +1966,7 @@ function watchSegmentEnd(
   }
 
   const remainingSec = Math.round(totalSec(segments.slice(index)));
-  setStatus(
+  setRecordingStatus(
     segments.length === 1
       ? `録画中… (${remainingSec}秒)`
       : `録画中… ${index + 1} / ${segments.length} 区間目 (残り ${remainingSec}秒)`,
@@ -1887,7 +1977,7 @@ function watchSegmentEnd(
     if (segments[index + 1] === undefined) {
       video.pause();
       send({ type: "OUT_REACHED" });
-      setStatus("録画を書き出しています…");
+      setRecordingStatus("録画を書き出しています…");
       return;
     }
     void advanceToSegment(video, segments, index + 1);
@@ -1919,7 +2009,7 @@ async function advanceToSegment(
   try {
     recorder.pause();
     video.pause();
-    setStatus(`${index + 1} / ${segments.length} 区間目へ移動中…`);
+    setRecordingStatus(`${index + 1} / ${segments.length} 区間目へ移動中…`);
 
     await seekTo(video, segment.startSec);
     // オフのページで再生を始めない・waitForFreshFrame の rVFC を張らない (spec §1)。下の handle の確かめは
@@ -2086,7 +2176,11 @@ function buildBar(): HTMLElement {
   rangeBar = createRangeBar({
     onScrub,
     onCommit: onRangeCommitted,
-    onSeekPlay: (sec) => void onSeekPlay(sec),
+    // トラックを押したら詰める欄にフォーカスを移す (ハンドルを掴んだときと同じく、続く , . が欄に届くように)
+    onSeekPlay: (sec) => {
+      trimPanel?.focus();
+      void onSeekPlay(sec);
+    },
     maxClipSec: () => maxClipSec,
     // 吸い付き先は今の動画の文字起こしの単語の切れ目 (別の動画の行は transcriptLines が返さない)
     snapPoints: (window) => snapPointsIn(transcriptLines(), window),
@@ -2279,16 +2373,28 @@ function clipKey(state: ClipState): string {
   return JSON.stringify([state.kind, "segments" in state ? state.segments : [], "telops" in state ? state.telops : []]);
 }
 
-/** 欄から組 (SET_CLIP) を送ってよいか。位置で送った答えを待っている間は送らず理由を出す */
+/**
+ * 区間とテロップを変える操作の答えを待っているか。**待っている間は次を受けない** (欄の組の丸ごと差し替え・位置で指す
+ * 操作・区間の範囲は、答えを待たずに混ぜると互いの結果を古い写しで戻す。OUT の直後の ±0.1 は OUT で動かした尻を戻す)。
+ * 待ちは下ろす条件が違うので 3 つの変数のまま持ち、判定だけここにまとめる
+ */
+function clipOpBusy(): boolean {
+  return pendingClip !== null || indexedAwaiting || rangeAwaiting !== null;
+}
+
+/**
+ * 欄から組 (SET_CLIP) を送ってよいか。位置で送った操作か区間の範囲の答えを待っている間は送らず理由を出す。
+ * **欄の組の答え (pendingClip) は待たない** (行は続けて押せる。clipBase が送った組に積む)
+ */
 function canSendClip(): boolean {
-  if (!indexedAwaiting) return true;
+  if (!indexedAwaiting && rangeAwaiting === null) return true;
   setStatus(CLIP_BUSY_MESSAGE);
   return false;
 }
 
 /** 位置で指す操作を送る。欄の組 (SET_CLIP) の答えか、前の位置の操作の答えを待っている間は送らず理由を出す */
 function sendIndexed(event: ClipEvent): boolean {
-  if (pendingClip !== null || indexedAwaiting) {
+  if (clipOpBusy()) {
     setStatus(CLIP_BUSY_MESSAGE);
     return false;
   }
@@ -2367,6 +2473,8 @@ function sendClip(next: Clip): void {
     (state) => {
       const ok = isClipOf(state, next);
       if (!ok) drop();
+      // 受け入れられたのに通知が落ちたら、上限の後に答えを描く (下りないと、IN / OUT・±0.1 まで待ったままになる)
+      else drawAnswerIfSilent(state, () => pendingClip === next, drop);
       return ok;
     },
     drop,
@@ -2438,6 +2546,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
     if (!busy) setStatus("いまは区間を変えられません");
     return;
   }
+  if (refuseDuringAd()) return;
   if (!canSendClip()) return;
   const lines = transcriptLines();
   const line = lines.find((item) => item.id === lineId);
@@ -2453,6 +2562,13 @@ function onToggleLine(lineId: string, extend: boolean): void {
   );
   if (tooLong !== undefined) {
     setStatus(`1 つの区間は ${maxClipSec} 秒までです。行を分けて選んでください (設定で上限を変えられます)`);
+    return;
+  }
+  // Shift で (起点からまとめて) 入れた結果の合計が上限を超えるなら送らない。間の空いた行を広く選ぶと区間が数千になる。
+  // 1 行ずつ押したときは今どおり作れて、録画で止める (回答 2026-11-04「合計が上限を超えたら止める」)。起点の無い Shift は
+  // 1 行だけなので見ない
+  if (ids.length > 1 && selected && totalSec(next.segments) > maxClipSec && totalSec(next.segments) > totalSec(base.segments)) {
+    setStatus(`選んだ行の合計が上限 ${maxClipSec} 秒を超えます。範囲を狭めて選んでください (設定で上限を変えられます)`);
     return;
   }
   // **最後の区間が消えるとき、テロップが残るなら送らない** (見出しの ✕ と同じ守り)。区間が 0 個になると
@@ -2947,6 +3063,7 @@ function resetModuleState(): void {
   observedPlayer = null;
   capturing = false;
   captureRun = 0;
+  recordingStatusShown = false;
 }
 
 /**
