@@ -245,6 +245,9 @@ export function startPlayback(
  * 指定位置への到達をフレーム単位で監視する。
  * timeupdate は発火間隔が粗く末尾が伸びるため rVFC を使う。
  * 戻り値を呼ぶと監視を解除する。
+ *
+ * **動画が終わったら (`ended`) そこで到達とみなす。** 最後のフレームの mediaTime は duration より少し手前なので、
+ * 動画の終わりに置いた尻 (OUT・文字起こしの最後の行) には rVFC だけでは届かず、録画が「録画中…」のまま止まる
  */
 export function onReachTime(
   video: HTMLVideoElement,
@@ -255,21 +258,32 @@ export function onReachTime(
   let cancelled = false;
   let handle = 0;
 
+  const stop = (): void => {
+    cancelled = true;
+    target.cancelVideoFrameCallback(handle);
+    video.removeEventListener("ended", onEnded);
+  };
+  const reach = (): void => {
+    stop();
+    onReach();
+  };
+  function onEnded(): void {
+    if (!cancelled) reach();
+  }
+
   const tick: FrameCallback = (_now, metadata) => {
     if (cancelled) return;
     if (metadata.mediaTime >= sec) {
-      onReach();
+      reach();
       return;
     }
     handle = target.requestVideoFrameCallback(tick);
   };
 
   handle = target.requestVideoFrameCallback(tick);
+  video.addEventListener("ended", onEnded);
 
-  return () => {
-    cancelled = true;
-    target.cancelVideoFrameCallback(handle);
-  };
+  return stop;
 }
 
 /** 新しいフレームが出るのを待つ上限 (ミリ秒) */
