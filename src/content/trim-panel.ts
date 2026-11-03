@@ -30,6 +30,8 @@ export type TrimView = {
   range: ClipRange | null;
   /** 全区間の合計 (秒) */
   totalSec: number;
+  /** 1 本のクリップの上限の秒数 (設定)。合計がこれを超えると録画できない */
+  maxClipSec: number;
   /** 拡大バーが映している窓。まだ無ければ null */
   window: TimeWindow | null;
   /** 窓に入る単語 (`wordsInWindow`) */
@@ -53,7 +55,7 @@ export function createTrimPanel(
   parts: { rangeBar: HTMLElement; telopTrack: HTMLElement },
   callbacks: TrimPanelCallbacks,
 ): TrimPanel {
-  let view: TrimView = { index: -1, count: 0, range: null, totalSec: 0, window: null, words: [] };
+  let view: TrimView = { index: -1, count: 0, range: null, totalSec: 0, maxClipSec: 0, window: null, words: [] };
   let enabled = false;
   /** キーで動かす端。はじめは頭 (モック「選んでいる端を動かす」) */
   let activeEdge: HandleKind = "in";
@@ -202,10 +204,16 @@ export function createTrimPanel(
     if (range !== null) {
       title.textContent = `区間 ${view.index + 1} を詰める`;
       const length = range.endSec - range.startSec;
-      rangeText.textContent = `${formatTimeCentis(range.startSec)} – ${formatTimeCentis(range.endSec)} · ${formatSecTenths(length)} 秒 · 合計 ${formatSecTenths(view.totalSec)} 秒`;
+      // 上限を超えたかは isOverLimit (timeline.ts) と同じ「合計 > 上限」。区間の配列ではなく合計の数で比べる
+      const over = view.totalSec > view.maxClipSec;
+      rangeText.textContent = `${formatTimeCentis(range.startSec)} – ${formatTimeCentis(range.endSec)} · ${formatSecTenths(length)} 秒 · 合計 ${formatSecTenths(view.totalSec)} / ${view.maxClipSec} 秒`;
+      rangeText.dataset.over = over ? "true" : "false";
+      rangeText.style.cssText = over ? TRIM_STYLE.rangeOver : TRIM_STYLE.range;
     } else {
       title.textContent = "区間はまだありません";
       rangeText.textContent = "文字起こしの行を押すか、＋ 区間を追加 で作れます";
+      rangeText.dataset.over = "false";
+      rangeText.style.cssText = TRIM_STYLE.range;
     }
     const hasPrev = range !== null && view.index > 0;
     const hasNext = range !== null && view.index < view.count - 1;

@@ -2850,12 +2850,12 @@ describe("区間・テロップの窓", () => {
     await showEdit([TELOP]);
 
     const body = listBody();
-    // 文字起こしの欄 → 区間の一覧 → テロップの一覧の順。設定は入らない (popup にある)
-    expect(body.children.length).toBe(3);
+    // 文字起こしの欄 (区間の見出しはこの中) → テロップの一覧の順。設定は入らない (popup にある)
+    expect(body.children.length).toBe(2);
     expect(body.children[0]?.getAttribute("data-role")).toBe("transcript");
-    expect(body.children[1]?.querySelectorAll("[data-role='segment']").length).toBe(1);
-    expect(body.children[2]?.querySelector("[data-role='add-telop']")).not.toBeNull();
-    expect(body.children[2]?.querySelectorAll("[data-role='telop']").length).toBe(1);
+    expect(body.children[0]?.querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(body.children[1]?.querySelector("[data-role='add-telop']")).not.toBeNull();
+    expect(body.children[1]?.querySelectorAll("[data-role='telop']").length).toBe(1);
     expect(body.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
 
     const bar = barElement();

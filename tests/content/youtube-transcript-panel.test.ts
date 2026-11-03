@@ -442,3 +442,53 @@ describe("詰める欄 (段階 1c-1)", () => {
     expect(title).toBe("区間 2 を詰める");
   });
 });
+
+describe("区間の見出し (段階 1c-2)", () => {
+  const headers = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>("#yt-clip-list [data-role='segment']")];
+
+  test("行を押すと、その行の上に区間の見出しが出て、詰めている区間に印が付く", async () => {
+    ready();
+    await flush();
+    rows()[1]!.click();
+    await flush();
+    const list = document.querySelector<HTMLElement>("[data-role='transcript-lines']")!;
+    const order = [...list.children].map((child) => (child as HTMLElement).dataset.role);
+    expect(order).toEqual(["line", "segment", "line", "line"]);
+    expect(headers()[0]?.querySelector("[data-role='segment-title']")?.textContent).toBe("区間 1 · 詰めている");
+  });
+
+  test("見出しを押すとその区間を詰める欄で詰める", async () => {
+    ready();
+    await flush();
+    rows()[0]!.click();
+    await flush();
+    // 3 秒より空いていないので 1 つに繋がらないよう、離れた区間を状態で作る
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }, { startSec: 6.8, endSec: 9.3 }],
+      telops: [],
+      meta: META,
+    });
+    await flush();
+    headers()[0]!.click();
+    await flush();
+    expect(document.querySelector("[data-role='trim-title']")?.textContent).toBe("区間 1 を詰める");
+    expect(headers()[0]?.dataset.selected).toBe("true");
+    expect(headers()[1]?.dataset.selected).toBe("false");
+  });
+
+  test("見出しの ✕ でその区間を消す", async () => {
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }, { startSec: 6.8, endSec: 9.3 }],
+      telops: [],
+      meta: META,
+    });
+    await flush();
+    events = [];
+    headers()[1]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events).toEqual([{ type: "REMOVE_SEGMENT", index: 1 }]);
+    expect(headers()).toHaveLength(1);
+  });
+});

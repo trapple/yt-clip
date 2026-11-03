@@ -7,6 +7,7 @@ const VIEW: TrimView = {
   count: 3,
   range: { startSec: 741.4, endSec: 749.8 },
   totalSec: 24.6,
+  maxClipSec: 60,
   window: { startSec: 739.4, endSec: 751.8 },
   words: [
     { startSec: 740, endSec: 741, text: "（前）" },
@@ -15,7 +16,7 @@ const VIEW: TrimView = {
   ],
 };
 
-const EMPTY: TrimView = { index: -1, count: 0, range: null, totalSec: 0, window: null, words: [] };
+const EMPTY: TrimView = { index: -1, count: 0, range: null, totalSec: 0, maxClipSec: 60, window: null, words: [] };
 
 function mount(view: TrimView = VIEW) {
   const callbacks = { onSelect: vi.fn(), onNudge: vi.fn(), onPlayAround: vi.fn() };
@@ -54,7 +55,17 @@ describe("見出しの行", () => {
   test("何番目の区間か、頭と尻・長さ・合計を出す", () => {
     const { panel } = mount();
     expect(part(panel, "trim-title").textContent).toBe("区間 2 を詰める");
-    expect(part(panel, "trim-range").textContent).toBe("12:21.40 – 12:29.80 · 8.4 秒 · 合計 24.6 秒");
+    expect(part(panel, "trim-range").textContent).toBe("12:21.40 – 12:29.80 · 8.4 秒 · 合計 24.6 / 60 秒");
+  });
+
+  test("合計が上限を超えたら警告の印と色を付ける (区間の一覧の合計の役目)", () => {
+    const { panel } = mount({ ...VIEW, totalSec: 61.2, maxClipSec: 60 });
+    expect(part(panel, "trim-range").textContent).toContain("合計 61.2 / 60 秒");
+    expect(part(panel, "trim-range").dataset.over).toBe("true");
+    expect(part(panel, "trim-range").style.cssText).toContain("font-weight: 600");
+
+    panel.update({ ...VIEW, totalSec: 24.6, maxClipSec: 60 });
+    expect(part(panel, "trim-range").dataset.over).toBe("false");
   });
 
   test("‹ › は行き先の区間の番号を出し、押すとその区間を選ぶ", () => {

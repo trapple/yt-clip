@@ -32,7 +32,6 @@ import {
   startRecording,
   type RecorderHandle,
 } from "@/content/recorder";
-import { createSegmentList, type SegmentList } from "@/content/segment-list";
 import { createDockManager, type DockManager } from "@/content/dock";
 import {
   createFloatingWindow,
@@ -58,6 +57,7 @@ import {
   type TranscriptLoader,
   type TranscriptStatus,
 } from "@/content/transcript-loader";
+import { placeTranscriptItems } from "@/content/transcript-items";
 import { createTranscriptPanel, type TranscriptPanel, type TranscriptView } from "@/content/transcript-panel";
 import {
   isLineInSegments,
@@ -163,7 +163,6 @@ let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
  * 状態機械は区間を時間順に並べるので、足した・動かした直後は範囲で引き直す (selectRangeOnNextState)。それ以外は数が変わったときだけ詰める
  */
 let selectedIndex = -1;
-let segmentList: SegmentList | null = null;
 let telopList: TelopList | null = null;
 /**
  * プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため)。
@@ -632,8 +631,8 @@ function startOver(): void {
  */
 function applyStateToSelection(): void {
   // 一覧に何を出すかの規則は `listedItems` の 1 箇所にまとめる (別の動画では空、など)
-  segmentList?.update(listedItems().segments, selectedIndex, maxClipSec);
-  refreshTrimPanel();
+  // 欄の見出しの「· 詰めている」を選び直した区間に合わせる (refreshTranscript は最後に詰める欄も描く)
+  refreshTranscript();
 
   const segment = selectedSegment();
   if (segment === null) return;
@@ -1405,6 +1404,7 @@ function refreshTrimPanel(): void {
     count: segments.length,
     range,
     totalSec: totalSec(segments),
+    maxClipSec,
     window,
     words: window === null ? [] : wordsInWindow(transcriptLines(), window),
   });
@@ -1442,8 +1442,6 @@ function refreshTelopTrack(): void {
  */
 function refreshLists(): void {
   const { segments, telops } = listedItems();
-  segmentList?.setEnabled(!busy);
-  segmentList?.update(segments, selectedIndex, maxClipSec);
   telopList?.setEnabled(canEditTelops());
   telopList?.update(telops, segments);
   refreshTranscript();
@@ -1469,13 +1467,10 @@ function isDockedInPage(id: WindowId): boolean {
  * 見ながら区間を足したときにそちらが潜る。**ドック中ならタブを前に出すだけ** (C2.2): ページの中の窓は中身なりの
  * 高さで中でスクロールしないので送る先が無く、ページもスクロールしない (右側パネルの spec §3 と同じ理由)。
  * 窓が隠れている (全画面など) ときは何もしない。出す判断は `refreshWindows` のもの。
- * index を渡さなければ末尾の行
+ * 欄の中のスクロールは `transcriptPanel.reveal` が済ませている (row はそれが返した要素)
  */
-function revealRow(list: HTMLElement | undefined, role: "segment" | "telop", index?: number): void {
-  if (list === undefined || listWindow.element.hidden) return;
-  const rows = list.querySelectorAll<HTMLElement>(`[data-role='${role}']`);
-  const row = rows[index ?? rows.length - 1];
-  if (row === undefined) return;
+function revealInWindow(row: HTMLElement | null): void {
+  if (row === null || listWindow.element.hidden) return;
   if (isDockedInPage("list")) {
     dockManager.activate("list");
     return;
@@ -1599,8 +1594,11 @@ function applyStateToDisplay(state: ClipState): void {
   // ずれていなくても確定済みの範囲で描き直す
   refreshLists();
   // 一覧と窓の表示が決まってから送る (出す → 送る の順)
-  if (revealSegment) revealRow(segmentList?.element, "segment", selectedIndex);
-  if (revealTelop) revealRow(telopList?.element, "telop");
+  if (revealSegment) revealInWindow(transcriptPanel?.reveal({ kind: "segment", index: selectedIndex }) ?? null);
+  if (revealTelop) {
+    const rows = telopList?.element.querySelectorAll<HTMLElement>("[data-role='telop']");
+    revealInWindow(rows?.[rows.length - 1] ?? null);
+  }
 
   // 選んでいる区間が変わったら、範囲と秒数を状態の欄に出す (IN / OUT / ＋ 区間を追加の答え)。ready のときだけ:
   // 録画中・プレビュー・失敗などは、それぞれの文言を上で出している
@@ -2022,6 +2020,29 @@ function readChannel(): Channel | null {
   return channel.id === "" ? null : channel;
 }
 
+/**
+ * 区間を消す (欄の見出しの ✕)。**テロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
+ * なると状態機械は idle に戻り、手入力の文言もまとめて消える
+ */
+function removeSegment(index: number): void {
+  if (busy) return;
+  if (index < 0 || index >= currentSegments.length) return;
+  if (currentSegments.length === 1 && currentTelops.length > 0) {
+    setStatus(telopsRemainMessage(currentTelops.length));
+    return;
+  }
+  removedIndexOnNextState = index;
+  send({ type: "REMOVE_SEGMENT", index });
+}
+
+/** 欄の見出し・詰める欄の ‹ › で区間を選んだ。その区間を詰める (録画中は選び直さない) */
+function selectSegment(index: number): void {
+  if (busy) return;
+  if (index < 0 || index >= listedItems().segments.length) return;
+  selectedIndex = index;
+  applyStateToSelection();
+}
+
 function buildBar(): HTMLElement {
   const bar = document.createElement("div");
   bar.id = BAR_ID;
@@ -2086,37 +2107,11 @@ function buildBar(): HTMLElement {
   trimPanel = createTrimPanel(
     { rangeBar: rangeBar.element, telopTrack: telopTrack.element },
     {
-      onSelect: (index) => {
-        if (index < 0 || index >= listedItems().segments.length) return;
-        selectedIndex = index;
-        applyStateToSelection();
-      },
+      onSelect: selectSegment,
       onNudge,
       onPlayAround: (kind) => void playAround(kind),
     },
   );
-
-  segmentList = createSegmentList({
-    onSelect: (index) => {
-      selectedIndex = index;
-      applyStateToSelection();
-    },
-    onPlay: (index) => {
-      selectedIndex = index;
-      applyStateToSelection();
-      void playRange();
-    },
-    onRemove: (index) => {
-      // **テロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
-      // なると状態機械は idle に戻り、手入力の文言もまとめて消える
-      if (currentSegments.length === 1 && currentTelops.length > 0) {
-        setStatus(telopsRemainMessage(currentTelops.length));
-        return;
-      }
-      removedIndexOnNextState = index;
-      send({ type: "REMOVE_SEGMENT", index });
-    },
-  });
 
   telopList = createTelopList({
     onAdd: onAddTelop,
@@ -2137,8 +2132,8 @@ function buildBar(): HTMLElement {
     onEditText: onEditLineText,
     onToggleHidden: onToggleLineHidden,
     onPlay: onPlayLine,
-    onSelectSegment: () => undefined,
-    onRemoveSegment: () => undefined,
+    onSelectSegment: selectSegment,
+    onRemoveSegment: removeSegment,
     onAddManual: () => undefined,
     onManualEdge: () => undefined,
     onManualText: () => false,
@@ -2154,7 +2149,7 @@ function buildBar(): HTMLElement {
   bar.append(trimPanel.element, row);
   // 一覧は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
   // 足すだけにすると、バーを作り直すたびに古い一覧が残って 2 重になる
-  listWindow.body.replaceChildren(transcriptPanel.element, segmentList.element, telopList.element);
+  listWindow.body.replaceChildren(transcriptPanel.element, telopList.element);
   return bar;
 }
 
@@ -2335,9 +2330,9 @@ function refreshTranscript(): void {
     header,
     dubbed: forThisVideo && (status.kind === "ready" || status.kind === "none") && status.dubbed,
     enabled: canEditFromTranscript(),
-    // 区間の見出しと手入力の行は Task 3・4 で繋ぐ
-    items: [],
-    trimmingIndex: -1,
+    // 区間の見出し。手入力の行は Task 4 で繋ぐ (それまではテロップの一覧が出す)
+    items: placeTranscriptItems(lines, segments, []),
+    trimmingIndex: segments.length === 0 ? -1 : selectedIndex,
     canAddManual: false,
     rows: lines.map((line) => {
       const selected = isLineInSegments(line, segments);
@@ -2845,7 +2840,6 @@ function resetModuleState(): void {
   currentTelops = [];
   recordingTelops = null;
   selectedIndex = -1;
-  segmentList = null;
   telopList = null;
   rangeBar = null;
   telopTrack = null;

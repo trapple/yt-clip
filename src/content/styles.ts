@@ -138,6 +138,8 @@ export const TRIM_STYLE = {
   head: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;",
   title: "font-weight:500;color:var(--ytc-text);white-space:nowrap;",
   range: "color:var(--ytc-text-sub);font-variant-numeric:tabular-nums;white-space:nowrap;",
+  /** 合計が上限を超えた。色だけで伝えない (「/ 60 秒」の文言と太さでも分かる) */
+  rangeOver: "color:#f28b82;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;",
   grow: "flex:1;",
   group: "display:inline-flex;gap:3px;align-items:center;color:var(--ytc-text-sub);padding:0 2px;border-radius:6px;",
   /** キーで動く端の組。文字を濃くして下線を引く (色だけに頼らない) */
@@ -179,21 +181,6 @@ export const TELOP_TRACK_STYLE = {
     "position:absolute;left:0;top:16px;height:14px;line-height:14px;font-size:11px;color:var(--ytc-text-sub);white-space:nowrap;cursor:default;",
 } as const;
 
-/** 区間の一覧。行は押せるので、押せることが分かる見た目にする */
-export const SEGMENT_STYLE = {
-  root: "display:flex;flex-direction:column;gap:4px;",
-  row: "display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;cursor:pointer;background:transparent;",
-  rowSelected:
-    "display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;cursor:pointer;background:var(--ytc-surface);",
-  label: "color:var(--ytc-text);font-size:12px;flex:1;",
-  // 行のクリックと混ざらないよう、小さくても押せる大きさを確保する
-  iconButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;min-width:28px;cursor:pointer;font-family:${FONT};font-size:12px;`,
-  total: "color:var(--ytc-text-sub);font-size:11px;text-align:right;",
-  // 超過は色だけで伝えない。文言でも「/ 60秒」と出しているので、
-  // 色が見えない環境でも判断できる
-  totalOver: "color:#f28b82;font-size:11px;text-align:right;font-weight:600;",
-} as const;
-
 /** テロップの一覧。区間の一覧と並ぶので見た目を揃える */
 export const TELOP_STYLE = {
   root: "display:flex;flex-direction:column;gap:4px;",
@@ -203,7 +190,7 @@ export const TELOP_STYLE = {
   rowHead: "display:flex;gap:8px;align-items:center;",
   label: "color:var(--ytc-text);font-size:12px;flex:1;",
   outside: "color:var(--ytc-text-sub);font-size:11px;",
-  iconButton: SEGMENT_STYLE.iconButton,
+  iconButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;min-width:28px;cursor:pointer;font-family:${FONT};font-size:12px;`,
   textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
   textarea: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;`,
 } as const;
