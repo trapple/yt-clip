@@ -744,3 +744,50 @@ describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
   });
 });
 
+
+describe("広告の再生中 (1c-4)", () => {
+  const player = (): HTMLElement => document.querySelector<HTMLElement>("#movie_player")!;
+  const status = (): string | null => document.querySelector("#yt-clip-bar-status")?.textContent ?? null;
+  const barButton = (label: string): HTMLButtonElement => {
+    const found = [...document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button")].find((b) => b.textContent === label);
+    if (found === undefined) throw new Error(`ボタンが見つかりません: ${label}`);
+    return found;
+  };
+  const AD = "広告の再生中です。終了後にやり直してください";
+
+  test("区間が無いとき、行・IN・＋ 区間を追加 で区間を作らず理由を出す", async () => {
+    ready();
+    await flush();
+    player().classList.add("ad-showing");
+    try {
+      for (const press of [() => rows()[0]!.click(), () => barButton("IN").click(), () => barButton("＋ 区間を追加").click()]) {
+        events = [];
+        press();
+        await flush();
+        expect(events).toEqual([]);
+        expect(status()).toBe(AD);
+      }
+    } finally {
+      player().classList.remove("ad-showing");
+    }
+  });
+
+  test("区間があるとき、IN・OUT・＋ ここに字幕を足す でも変えない", async () => {
+    ready();
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    player().classList.add("ad-showing");
+    try {
+      const addTelop = (): HTMLButtonElement => document.querySelector<HTMLButtonElement>("#yt-clip-list [data-role='add-telop']")!;
+      for (const press of [() => barButton("IN").click(), () => barButton("OUT").click(), () => addTelop().click()]) {
+        events = [];
+        press();
+        await flush();
+        expect(events).toEqual([]);
+        expect(status()).toBe(AD);
+      }
+    } finally {
+      player().classList.remove("ad-showing");
+    }
+  });
+});

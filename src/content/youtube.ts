@@ -469,6 +469,16 @@ function rangeLabel(range: ClipRange): string {
 /** 状態の欄の最初の案内。区間が無いときに出す */
 const INITIAL_STATUS = "IN を押して開始位置を指定";
 
+/**
+ * 広告の再生中か。**区間とテロップを作る操作の頭で見る**: 広告の間は video の duration と currentTime が広告のもので、
+ * 区間が広告の長さに詰まる・広告の中の時刻で IN を打つ。理由を出して止める (録画の開始が広告で止まるのと同じ文言)
+ */
+function refuseDuringAd(): boolean {
+  if (!isAdPlaying()) return false;
+  setStatus(FAILURE_MESSAGES["ad-playing"]);
+  return true;
+}
+
 /** プレビューに入ったときの状態の欄。ボタンの文言 (ACTION_LABELS) と揃える */
 const PREVIEW_STATUS = "録画できました。X に投稿 か 取り直す を選んでください";
 
@@ -595,6 +605,8 @@ function onMarkIn(): void {
     setStatus("録画中は範囲を変更できません");
     return;
   }
+  // 作り直し (startOver) と頭を動かす道 (onMarkSegmentStart) の両方に効かせる
+  if (refuseDuringAd()) return;
   const shown = currentSegments.length > 0 && rangeVideoId === currentVideoId();
   const simple = currentSegments.length === 1 && currentTelops.length === 0;
   if (shown && !simple) {
@@ -673,6 +685,7 @@ function onAddSegment(): void {
     setStatus("録画中は区間を変更できません");
     return;
   }
+  if (refuseDuringAd()) return;
 
   const video = getVideo();
   const meta = getVideoMeta();
@@ -706,6 +719,7 @@ function onAddTelop(): void {
     setStatus("いまはテロップを変更できません");
     return;
   }
+  if (refuseDuringAd()) return;
   const video = getVideo();
   // メタデータを読む前は duration が NaN。そのまま足すと状態機械が throw する
   if (!Number.isFinite(video.duration)) {
@@ -842,6 +856,7 @@ function onMarkOut(): void {
     setStatus("録画中は範囲を変更できません");
     return;
   }
+  if (refuseDuringAd()) return;
   const editing = selectedSegment();
   if (editing === null) {
     setStatus("先に区間を追加してください");
@@ -2459,6 +2474,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
     if (!busy) setStatus("いまは区間を変えられません");
     return;
   }
+  if (refuseDuringAd()) return;
   if (!canSendClip()) return;
   const lines = transcriptLines();
   const line = lines.find((item) => item.id === lineId);
