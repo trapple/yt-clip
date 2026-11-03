@@ -181,23 +181,9 @@ export const TELOP_TRACK_STYLE = {
     "position:absolute;left:0;top:16px;height:14px;line-height:14px;font-size:11px;color:var(--ytc-text-sub);white-space:nowrap;cursor:default;",
 } as const;
 
-/** テロップの一覧。区間の一覧と並ぶので見た目を揃える */
-export const TELOP_STYLE = {
-  root: "display:flex;flex-direction:column;gap:4px;",
-  header: "display:flex;align-items:center;gap:8px;",
-  title: "color:var(--ytc-text);font-size:12px;font-weight:600;flex:1;",
-  row: "display:flex;flex-direction:column;gap:4px;padding:4px 8px;border-radius:6px;background:var(--ytc-surface);",
-  rowHead: "display:flex;gap:8px;align-items:center;",
-  label: "color:var(--ytc-text);font-size:12px;flex:1;",
-  outside: "color:var(--ytc-text-sub);font-size:11px;",
-  iconButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;min-width:28px;cursor:pointer;font-family:${FONT};font-size:12px;`,
-  textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
-  textarea: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;`,
-} as const;
-
 /**
- * 文字起こしの欄 (`transcript-panel.ts`)。区間とテロップの一覧の上に並ぶので見た目を揃える。
- * **行の箱だけがスクロールする** (欄の下の一覧に手が届くよう、高さに上限を持つ)。
+ * 文字起こしの欄 (`transcript-panel.ts`)。区間の見出しと手入力の行もこの中に出る。
+ * **行の箱だけがスクロールする** (窓の中で欄の見出しの行が流れて消えないよう、高さに上限を持つ)。
  * 行は文字を選べなくする (Shift + クリックで文字が選ばれて、まとめて選ぶ操作の邪魔をしない)
  */
 const TRANSCRIPT_ROW =
@@ -236,8 +222,8 @@ export const TRANSCRIPT_STYLE = {
   manualEmpty: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);font-style:italic;`,
   manualActions: "grid-column:2 / -1;display:flex;gap:4px;flex-wrap:wrap;align-items:center;",
   outside: "color:var(--ytc-text-sub);font-size:11px;",
-  edit: `${TELOP_STYLE.textarea}user-select:text;`,
-  textButton: TELOP_STYLE.textButton,
+  edit: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;user-select:text;`,
+  textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
 } as const;
 
 /**

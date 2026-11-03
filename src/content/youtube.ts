@@ -45,7 +45,6 @@ import {
   initialListRect,
   type PanelWindow,
 } from "@/content/panel-window";
-import { createTelopList, type TelopList } from "@/content/telop-list";
 import { createTelopPreview, type TelopPreview } from "@/content/telop-preview";
 import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
 import { YT_SELECTORS } from "@/content/selectors";
@@ -163,7 +162,6 @@ let recordingTelops: { telops: Telop[]; style: TelopStyle } | null = null;
  * 状態機械は区間を時間順に並べるので、足した・動かした直後は範囲で引き直す (selectRangeOnNextState)。それ以外は数が変わったときだけ詰める
  */
 let selectedIndex = -1;
-let telopList: TelopList | null = null;
 /**
  * プレイヤーの上のテロップ。バーを作り直しても使い回す (video に付いているため)。
  * **オンの間だけある** (マスタースイッチの spec §2.1): start() が作り、stop() が destroy する (canvas・video の seeked・
@@ -1437,16 +1435,12 @@ function refreshTelopTrack(): void {
 }
 
 /**
- * 一覧と帯の段を手元の写しに合わせて描き直し、窓を出すかを決め直す。
- * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ
+ * 欄 (区間の見出しと手入力の行)・帯の段・詰める欄を手元の写しに合わせて描き直し、窓を出すかを決め直す。
+ * 状態の通知・バーの作り直し (`mount`)・SPA 遷移の 3 箇所から呼ぶ。詰める欄は refreshTranscript が最後に描く
  */
 function refreshLists(): void {
-  const { segments, telops } = listedItems();
-  telopList?.setEnabled(canEditTelops());
-  telopList?.update(telops, segments);
   refreshTranscript();
   refreshTelopTrack();
-  refreshTrimPanel();
   refreshWindows();
 }
 
@@ -1576,8 +1570,8 @@ function applyStateToDisplay(state: ClipState): void {
   // 直された後でも、これで取り戻せる
   rangeVideoId = stateMeta?.videoId ?? null;
 
+  // 詰める欄の有効は下の refreshLists (→ refreshTranscript → refreshTrimPanel) が同じ値で決める
   rangeBar?.setEnabled(canAdjustRange());
-  trimPanel?.setEnabled(canAdjustRange());
   refreshOverlay();
   refreshTelopPreview();
   renderActions(state.kind);
@@ -1595,9 +1589,11 @@ function applyStateToDisplay(state: ClipState): void {
   refreshLists();
   // 一覧と窓の表示が決まってから送る (出す → 送る の順)
   if (revealSegment) revealInWindow(transcriptPanel?.reveal({ kind: "segment", index: selectedIndex }) ?? null);
-  if (revealTelop) {
-    const rows = telopList?.element.querySelectorAll<HTMLElement>("[data-role='telop']");
-    revealInWindow(rows?.[rows.length - 1] ?? null);
+  if (revealTelop && currentTelops.length > 0) {
+    // ＋ ここに字幕を足す の答え。足した行 (末尾のテロップ) の直す欄を開いて見せる
+    const added = currentTelops.length - 1;
+    transcriptPanel?.editManual(added);
+    revealInWindow(transcriptPanel?.reveal({ kind: "manual", telopIndex: added }) ?? null);
   }
 
   // 選んでいる区間が変わったら、範囲と秒数を状態の欄に出す (IN / OUT / ＋ 区間を追加の答え)。ready のときだけ:
@@ -2035,6 +2031,12 @@ function removeSegment(index: number): void {
   send({ type: "REMOVE_SEGMENT", index });
 }
 
+/** 手入力の行の ✕。手入力の行はテロップそのもの (ADR 0003) */
+function removeTelop(index: number): void {
+  if (!canEditTelops()) return;
+  send({ type: "REMOVE_TELOP", index });
+}
+
 /** 欄の見出し・詰める欄の ‹ › で区間を選んだ。その区間を詰める (録画中は選び直さない) */
 function selectSegment(index: number): void {
   if (busy) return;
@@ -2113,19 +2115,7 @@ function buildBar(): HTMLElement {
     },
   );
 
-  telopList = createTelopList({
-    onAdd: onAddTelop,
-    onSetStart: (index) => onMoveTelopEdge(index, "start"),
-    onSetEnd: (index) => onMoveTelopEdge(index, "end"),
-    onPlay: (index) => void playTelop(index),
-    onRemove: (index) => {
-      if (!canEditTelops()) return;
-      send({ type: "REMOVE_TELOP", index });
-    },
-    onText: onTelopText,
-  });
-
-  // 文字起こしの欄 (ADR 0001)。区間・テロップの窓の先頭に置く。区間とテロップの一覧は 1c まで欄の下に残す
+  // 文字起こしの欄 (ADR 0001)。区間・テロップの窓に置く。区間の見出しと手入力の行も欄の中に出す (ADR 0003)
   // 欄は 1 度だけ作る。バーの根が YouTube の再描画で外れて buildBar が走るたびに、数千行を作り直さない
   transcriptPanel ??= createTranscriptPanel({
     onToggle: onToggleLine,
@@ -2134,11 +2124,11 @@ function buildBar(): HTMLElement {
     onPlay: onPlayLine,
     onSelectSegment: selectSegment,
     onRemoveSegment: removeSegment,
-    onAddManual: () => undefined,
-    onManualEdge: () => undefined,
-    onManualText: () => false,
-    onRemoveManual: () => undefined,
-    onPlayManual: () => undefined,
+    onAddManual: onAddTelop,
+    onManualEdge: onMoveTelopEdge,
+    onManualText: onTelopText,
+    onRemoveManual: removeTelop,
+    onPlayManual: (index) => void playTelop(index),
     onRetry: () => transcriptLoader?.retry(),
   });
 
@@ -2149,7 +2139,7 @@ function buildBar(): HTMLElement {
   bar.append(trimPanel.element, row);
   // 一覧は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
   // 足すだけにすると、バーを作り直すたびに古い一覧が残って 2 重になる
-  listWindow.body.replaceChildren(transcriptPanel.element, telopList.element);
+  listWindow.body.replaceChildren(transcriptPanel.element);
   return bar;
 }
 
@@ -2330,10 +2320,11 @@ function refreshTranscript(): void {
     header,
     dubbed: forThisVideo && (status.kind === "ready" || status.kind === "none") && status.dubbed,
     enabled: canEditFromTranscript(),
-    // 区間の見出し。手入力の行は Task 4 で繋ぐ (それまではテロップの一覧が出す)
-    items: placeTranscriptItems(lines, segments, []),
+    // 区間の見出しと手入力の行 (lineId の無いテロップ。ADR 0003)
+    items: placeTranscriptItems(lines, segments, telops),
     trimmingIndex: segments.length === 0 ? -1 : selectedIndex,
-    canAddManual: false,
+    // 区間があり、テロップを変えられる (ready / posted で、範囲を作った動画を見ている)。canEditTelops は区間がある状態でしか true にならない
+    canAddManual: canEditTelops(),
     rows: lines.map((line) => {
       const selected = isLineInSegments(line, segments);
       const telop = telopByLine.get(line.id);
@@ -2347,7 +2338,7 @@ function refreshTranscript(): void {
       };
     }),
   });
-  // 読み込みが済んだら詰める欄にも単語を出す (refreshLists からも呼ばれるので 2 回になるが冪等)
+  // 読み込みが済んだら詰める欄にも単語を出す (詰める欄の単語・合計も欄と同じ写しから描く)
   refreshTrimPanel();
 }
 
@@ -2840,7 +2831,6 @@ function resetModuleState(): void {
   currentTelops = [];
   recordingTelops = null;
   selectedIndex = -1;
-  telopList = null;
   rangeBar = null;
   telopTrack = null;
   trimPanel = null;

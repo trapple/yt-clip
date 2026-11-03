@@ -327,7 +327,7 @@ describe("文字起こしの欄 (段階 1b-2)", () => {
     expect(state).toMatchObject({ telops: [{ text: "直した", lineId: "youtube-asr:4.00" }] });
   });
 
-  test("最後の行を外すと手で足したテロップまで消えるときは、送らずに理由を出す (区間の一覧の ✕ と同じ)", async () => {
+  test("最後の行を外すと手で足したテロップまで消えるときは、送らずに理由を出す (見出しの ✕ と同じ)", async () => {
     ready();
     await flush();
     emit({
@@ -490,5 +490,90 @@ describe("区間の見出し (段階 1c-2)", () => {
     await flush();
     expect(events).toEqual([{ type: "REMOVE_SEGMENT", index: 1 }]);
     expect(headers()).toHaveLength(1);
+  });
+});
+
+describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
+  const manualRows = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>("#yt-clip-list [data-role='telop']")];
+  const addButton = (): HTMLButtonElement => document.querySelector<HTMLButtonElement>("#yt-clip-list [data-role='add-telop']")!;
+  const lineEditor = (): HTMLTextAreaElement | null => document.querySelector<HTMLTextAreaElement>("[data-role='line-edit']");
+  const video = (): HTMLVideoElement => document.querySelector<HTMLVideoElement>("video")!;
+
+  test("区間が無いと押せない", async () => {
+    ready();
+    await flush();
+    expect(addButton().disabled).toBe(true);
+  });
+
+  test("押すと今の位置から 3 秒のテロップを足し、行の時刻順の並びに入って文字を打つ欄が開く", async () => {
+    ready();
+    await flush();
+    rows()[0]!.click();
+    await flush();
+    Object.defineProperty(video(), "duration", { configurable: true, value: 600 });
+    video().currentTime = 5;
+    events = [];
+    try {
+      addButton().click();
+      await flush();
+    } finally {
+      // 後のテストに長さを持ち越さない
+      delete (video() as { duration?: number }).duration;
+    }
+    expect(events).toEqual([{ type: "ADD_TELOP", telop: { startSec: 5, endSec: 8, text: "" } }]);
+    const list = document.querySelector<HTMLElement>("[data-role='transcript-lines']")!;
+    const order = [...list.children].map((child) => {
+      const el = child as HTMLElement;
+      return el.dataset.role === "line" ? el.dataset.lineId : el.dataset.role;
+    });
+    // 5 秒は 4〜6 秒の行の後、7 秒の行の前
+    expect(order).toEqual(["segment", "youtube-asr:1.00", "youtube-asr:4.00", "telop", "youtube-asr:7.00"]);
+    expect(lineEditor()).not.toBeNull();
+    expect(document.activeElement).toBe(lineEditor());
+  });
+
+  test("打って Enter でテロップの文字にする", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "" }], meta: META });
+    await flush();
+    events = [];
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='manual-edit-button']")!.click();
+    lineEditor()!.value = "ここ重要";
+    lineEditor()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+    expect(events).toEqual([{ type: "UPDATE_TELOP", index: 0, telop: { startSec: 5, endSec: 8, text: "ここ重要" } }]);
+  });
+
+  test("頭を今に・尻を今に・✕", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    events = [];
+    video().currentTime = 6;
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='set-start']")!.click();
+    await flush();
+    expect(events.at(-1)).toEqual({ type: "UPDATE_TELOP", index: 0, telop: { startSec: 6, endSec: 8, text: "あ" } });
+    video().currentTime = 7;
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='set-end']")!.click();
+    await flush();
+    expect(events.at(-1)).toEqual({ type: "UPDATE_TELOP", index: 0, telop: { startSec: 6, endSec: 7, text: "あ" } });
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events.at(-1)).toEqual({ type: "REMOVE_TELOP", index: 0 });
+    expect(manualRows()).toHaveLength(0);
+  });
+
+  test("文字起こしを取り直しても手入力の行は残る", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    ready();
+    await flush();
+    expect(manualRows()).toHaveLength(1);
+  });
+
+  test("行から作ったテロップは手入力の行にしない", async () => {
+    ready();
+    await flush();
+    rows()[0]!.click();
+    await flush();
+    expect(manualRows()).toHaveLength(0);
   });
 });

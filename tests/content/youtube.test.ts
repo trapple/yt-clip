@@ -2472,10 +2472,8 @@ describe("テロップの一覧", () => {
   }
 
   function addTelopButton(): HTMLButtonElement {
-    // Task 4 まで: 欄の「＋ ここに字幕を足す」(押せない) が先に来るので、テロップの一覧の「＋ テロップ」(最後の 1 つ) を取る
-    const buttons = document.querySelectorAll<HTMLButtonElement>("[data-role='add-telop']");
-    const button = buttons[buttons.length - 1];
-    if (button === undefined) throw new Error("＋ テロップがありません");
+    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
+    if (button === null) throw new Error("＋ ここに字幕を足すがありません");
     return button;
   }
 
@@ -2493,7 +2491,7 @@ describe("テロップの一覧", () => {
     await flush();
   }
 
-  test("＋ テロップで今の位置から 3 秒のテロップを送る", async () => {
+  test("＋ ここに字幕を足すで今の位置から 3 秒のテロップを送る", async () => {
     await showReady([]);
     await seekVideo(12);
 
@@ -2527,13 +2525,24 @@ describe("テロップの一覧", () => {
     expect(statusText()).toBe("開始は終了より前にしてください");
   });
 
+  /** 手入力の行の ✎ で直す欄を開く */
+  function openEditor(): HTMLTextAreaElement {
+    telopRows()[0]?.querySelector<HTMLElement>("[data-role='manual-edit-button']")?.click();
+    const editor = document.querySelector<HTMLTextAreaElement>("[data-role='line-edit']");
+    if (editor === null) throw new Error("直す欄がありません");
+    return editor;
+  }
+
+  function pressEnter(editor: HTMLTextAreaElement): void {
+    editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  }
+
   test("文言を確定すると UPDATE_TELOP を送る", async () => {
     await showReady([TELOP]);
-    const textarea = telopRows()[0]?.querySelector("textarea");
-    if (textarea == null) throw new Error("入力欄がありません");
+    const editor = openEditor();
 
-    textarea.value = "やあ\n元気";
-    textarea.dispatchEvent(new Event("change"));
+    editor.value = "やあ\n元気";
+    pressEnter(editor);
 
     expect(clipEvents().at(-1)).toEqual({
       type: "UPDATE_TELOP",
@@ -2545,19 +2554,18 @@ describe("テロップの一覧", () => {
   test("500 文字を超える文言は送らず、理由を出して入力欄は残す", async () => {
     // 状態ごと保存され毎フレーム描かれる。上限を超えたものは状態機械に拒まれる
     await showReady([TELOP]);
-    const textarea = telopRows()[0]?.querySelector("textarea");
-    if (textarea == null) throw new Error("入力欄がありません");
+    const editor = openEditor();
 
-    textarea.value = "あ".repeat(501);
-    textarea.dispatchEvent(new Event("change"));
+    editor.value = "あ".repeat(501);
+    pressEnter(editor);
 
     expect(clipEvents()).toEqual([]);
     expect(statusText()).toBe("テロップは 500 文字までです (いま 501 文字)");
-    // 直してもらうので消さない
-    expect(textarea.value).toBe("あ".repeat(501));
+    // 直してもらうので消さない (直す欄も閉じない)
+    expect(document.querySelector<HTMLTextAreaElement>("[data-role='line-edit']")?.value).toBe("あ".repeat(501));
 
-    textarea.value = "あ".repeat(500);
-    textarea.dispatchEvent(new Event("change"));
+    editor.value = "あ".repeat(500);
+    pressEnter(editor);
 
     expect(clipEvents().at(-1)).toEqual({
       type: "UPDATE_TELOP",
@@ -2569,16 +2577,15 @@ describe("テロップの一覧", () => {
   test("500 文字を超えて送らなかった文言は、次の状態通知でも前の文言に戻さない", async () => {
     // フォーカスが外れた後の描き直しで telop.text を書くと、打った文字が黙って消える
     await showReady([TELOP]);
-    const textarea = telopRows()[0]?.querySelector("textarea");
-    if (textarea == null) throw new Error("入力欄がありません");
-    textarea.value = "あ".repeat(501);
-    textarea.dispatchEvent(new Event("change"));
+    const editor = openEditor();
+    editor.value = "あ".repeat(501);
+    pressEnter(editor);
 
-    // 別の操作 (開始を今に など) の状態通知。文言は前のまま
+    // 別の操作 (頭を今に など) の状態通知。文言は前のまま。手入力の行の並びは同じなので直す欄は閉じない
     emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [{ ...TELOP, startSec: 12 }] });
     await flush();
 
-    expect(textarea.value).toBe("あ".repeat(501));
+    expect(document.querySelector<HTMLTextAreaElement>("[data-role='line-edit']")?.value).toBe("あ".repeat(501));
   });
 
   test("テロップが残っていると最後の 1 区間は消せない", async () => {
@@ -2850,12 +2857,12 @@ describe("区間・テロップの窓", () => {
     await showEdit([TELOP]);
 
     const body = listBody();
-    // 文字起こしの欄 (区間の見出しはこの中) → テロップの一覧の順。設定は入らない (popup にある)
-    expect(body.children.length).toBe(2);
+    // 文字起こしの欄だけ (区間の見出しと手入力の行はこの中)。設定は入らない (popup にある)
+    expect(body.children.length).toBe(1);
     expect(body.children[0]?.getAttribute("data-role")).toBe("transcript");
     expect(body.children[0]?.querySelectorAll("[data-role='segment']").length).toBe(1);
-    expect(body.children[1]?.querySelector("[data-role='add-telop']")).not.toBeNull();
-    expect(body.children[1]?.querySelectorAll("[data-role='telop']").length).toBe(1);
+    expect(body.children[0]?.querySelector("[data-role='add-telop']")).not.toBeNull();
+    expect(body.children[0]?.querySelectorAll("[data-role='telop']").length).toBe(1);
     expect(body.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
 
     const bar = barElement();
@@ -2899,8 +2906,7 @@ describe("区間・テロップの窓", () => {
     }
 
     expect(document.querySelectorAll("#yt-clip-list")).toHaveLength(1);
-    // 欄の「＋ ここに字幕を足す」とテロップの一覧の「＋ テロップ」 (Task 4 で 1 つになる)
-    expect(listBody().querySelectorAll("[data-role='add-telop']")).toHaveLength(2);
+    expect(listBody().querySelectorAll("[data-role='add-telop']")).toHaveLength(1);
     expect(listBody().querySelectorAll("[data-role='segment']")).toHaveLength(1);
   });
 
@@ -3019,10 +3025,8 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
   }
 
   function addTelopButton(): HTMLButtonElement {
-    // Task 4 まで: 欄の「＋ ここに字幕を足す」(押せない) が先に来るので、テロップの一覧の「＋ テロップ」(最後の 1 つ) を取る
-    const buttons = document.querySelectorAll<HTMLButtonElement>("[data-role='add-telop']");
-    const button = buttons[buttons.length - 1];
-    if (button === undefined) throw new Error("＋ テロップがありません");
+    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
+    if (button === null) throw new Error("＋ ここに字幕を足すがありません");
     return button;
   }
 
@@ -3086,7 +3090,8 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
 
       emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
 
-      expect(listBody().scrollTop).toBe(900);
+      // 欄の行の箱には区間の見出し → テロップ → 足したテロップの順に並ぶ。足した行 (3 つ目: 1100px) の頭を本体の上端 (100px) に揃える
+      expect(listBody().scrollTop).toBe(1000);
 
       listBody().scrollTop = 0;
       emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
