@@ -258,6 +258,46 @@ describe("文字起こしの欄 (段階 1b-2)", () => {
     expect(document.body.textContent).toContain("1 つの区間は 60 秒までです");
   });
 
+  test("Shift で入れた結果の合計が上限を超えるなら、送らずに理由を出す (1c-4)", async () => {
+    // 2 秒の行を 6 秒おきに 40 行。間が 3 秒より空くので 1 行ずつ別の区間になり、1 区間は短いが合計は 60 秒を超える
+    const spaced = Array.from({ length: 40 }, (_, i) => ({ id: `s${i}`, startSec: i * 6, endSec: i * 6 + 2, text: `行 ${i}` }));
+    fake.onChange?.({
+      kind: "ready",
+      videoId: "video-a",
+      dubbed: false,
+      transcript: { videoId: "video-a", source: "youtube-asr", language: "ja", savedAt: 1, lines: spaced },
+    });
+    await flush();
+    rows()[0]?.click();
+    await flush();
+    events = [];
+    rows()[39]?.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    await flush();
+    expect(events).toEqual([]);
+    expect(document.querySelector("#yt-clip-bar-status")?.textContent).toContain("合計が上限 60 秒を超えます");
+    // 上限に収まる範囲なら Shift でも入る
+    rows()[3]?.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    await flush();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+  });
+
+  test("1 行ずつ押すときは、合計が上限を超えても入れる (録画で止める)", async () => {
+    const spaced = Array.from({ length: 30 }, (_, i) => ({ id: `s${i}`, startSec: i * 6, endSec: i * 6 + 2, text: `行 ${i}` }));
+    fake.onChange?.({
+      kind: "ready",
+      videoId: "video-a",
+      dubbed: false,
+      transcript: { videoId: "video-a", source: "youtube-asr", language: "ja", savedAt: 1, lines: spaced },
+    });
+    await flush();
+    for (let i = 0; i < 30; i += 1) {
+      rows()[i]?.click();
+      await flush();
+    }
+    expect(state).toMatchObject({ kind: "ready" });
+    expect("segments" in state ? state.segments.length : 0).toBe(30);
+  });
+
   test("拒まれた Shift + クリックでは、起点を動かさない", async () => {
     const many = Array.from({ length: 40 }, (_, i) => ({ id: `m${i}`, startSec: i * 3, endSec: i * 3 + 2, text: `行 ${i}` }));
     fake.onChange?.({

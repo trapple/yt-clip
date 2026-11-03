@@ -2492,6 +2492,13 @@ function onToggleLine(lineId: string, extend: boolean): void {
     setStatus(`1 つの区間は ${maxClipSec} 秒までです。行を分けて選んでください (設定で上限を変えられます)`);
     return;
   }
+  // Shift で (起点からまとめて) 入れた結果の合計が上限を超えるなら送らない。間の空いた行を広く選ぶと区間が数千になる。
+  // 1 行ずつ押したときは今どおり作れて、録画で止める (回答 2026-11-04「合計が上限を超えたら止める」)。起点の無い Shift は
+  // 1 行だけなので見ない
+  if (ids.length > 1 && selected && totalSec(next.segments) > maxClipSec && totalSec(next.segments) > totalSec(base.segments)) {
+    setStatus(`選んだ行の合計が上限 ${maxClipSec} 秒を超えます。範囲を狭めて選んでください (設定で上限を変えられます)`);
+    return;
+  }
   // **最後の区間が消えるとき、テロップが残るなら送らない** (見出しの ✕ と同じ守り)。区間が 0 個になると
   // 状態機械は idle に戻り、手で打ったテロップもまとめて消える
   if (next.segments.length === 0 && irreplaceableTelops(next.telops) > 0) {
