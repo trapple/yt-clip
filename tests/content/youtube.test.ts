@@ -2472,8 +2472,10 @@ describe("テロップの一覧", () => {
   }
 
   function addTelopButton(): HTMLButtonElement {
-    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
-    if (button === null) throw new Error("＋ テロップがありません");
+    // Task 4 まで: 欄の「＋ ここに字幕を足す」(押せない) が先に来るので、テロップの一覧の「＋ テロップ」(最後の 1 つ) を取る
+    const buttons = document.querySelectorAll<HTMLButtonElement>("[data-role='add-telop']");
+    const button = buttons[buttons.length - 1];
+    if (button === undefined) throw new Error("＋ テロップがありません");
     return button;
   }
 
@@ -2897,7 +2899,8 @@ describe("区間・テロップの窓", () => {
     }
 
     expect(document.querySelectorAll("#yt-clip-list")).toHaveLength(1);
-    expect(listBody().querySelectorAll("[data-role='add-telop']")).toHaveLength(1);
+    // 欄の「＋ ここに字幕を足す」とテロップの一覧の「＋ テロップ」 (Task 4 で 1 つになる)
+    expect(listBody().querySelectorAll("[data-role='add-telop']")).toHaveLength(2);
     expect(listBody().querySelectorAll("[data-role='segment']")).toHaveLength(1);
   });
 
@@ -3016,8 +3019,10 @@ describe("足した行を区間・テロップの窓の見える範囲に入れ�
   }
 
   function addTelopButton(): HTMLButtonElement {
-    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
-    if (button === null) throw new Error("＋ テロップがありません");
+    // Task 4 まで: 欄の「＋ ここに字幕を足す」(押せない) が先に来るので、テロップの一覧の「＋ テロップ」(最後の 1 つ) を取る
+    const buttons = document.querySelectorAll<HTMLButtonElement>("[data-role='add-telop']");
+    const button = buttons[buttons.length - 1];
+    if (button === undefined) throw new Error("＋ テロップがありません");
     return button;
   }
 

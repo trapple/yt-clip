@@ -10,7 +10,7 @@
 import { NUDGE_SEC, timeToRatio, type HandleKind, type TimeWindow } from "@/content/range-math";
 import { TRIM_STYLE } from "@/content/styles";
 import type { TrimWord } from "@/content/trim-words";
-import { formatTime, formatTimeCentis } from "@/shared/time";
+import { formatSecTenths, formatTime, formatTimeCentis } from "@/shared/time";
 import type { ClipRange } from "@/shared/types";
 
 export type TrimPanelCallbacks = {
@@ -43,9 +43,6 @@ export type TrimPanel = {
   /** キーで動かす端。拡大バーのハンドルを掴んだら呼ぶ */
   setActiveEdge(kind: HandleKind): void;
 };
-
-/** 秒を 0.1 秒の桁で出す (見出しの長さと合計) */
-const tenths = (sec: number): string => (Math.round(sec * 10) / 10).toFixed(1);
 
 /** 押されたキーが文字を打つ欄の中か。打っている文字を横取りしない */
 function isTyping(target: EventTarget | null): boolean {
@@ -205,7 +202,7 @@ export function createTrimPanel(
     if (range !== null) {
       title.textContent = `区間 ${view.index + 1} を詰める`;
       const length = range.endSec - range.startSec;
-      rangeText.textContent = `${formatTimeCentis(range.startSec)} – ${formatTimeCentis(range.endSec)} · ${tenths(length)} 秒 · 合計 ${tenths(view.totalSec)} 秒`;
+      rangeText.textContent = `${formatTimeCentis(range.startSec)} – ${formatTimeCentis(range.endSec)} · ${formatSecTenths(length)} 秒 · 合計 ${formatSecTenths(view.totalSec)} 秒`;
     } else {
       title.textContent = "区間はまだありません";
       rangeText.textContent = "文字起こしの行を押すか、＋ 区間を追加 で作れます";

@@ -217,6 +217,9 @@ const TRANSCRIPT_ROW =
   "display:grid;grid-template-columns:12px 40px 1fr auto;gap:4px;align-items:start;padding:3px 6px;border-radius:6px;cursor:pointer;user-select:none;";
 const TRANSCRIPT_TIME = `border:none;background:transparent;font-family:${FONT};font-size:11px;padding:2px 0;cursor:pointer;text-align:left;font-variant-numeric:tabular-nums;`;
 const TRANSCRIPT_TEXT = "font-size:12px;white-space:pre-wrap;word-break:break-word;";
+/** 手入力の行。時刻・印・文字の 3 列で、操作は次の段 (2 列目から) に折り返して並べる */
+const TRANSCRIPT_MANUAL =
+  "display:grid;grid-template-columns:12px 40px 1fr;gap:4px;align-items:start;padding:3px 6px;border-radius:6px;user-select:none;";
 export const TRANSCRIPT_STYLE = {
   root: "display:flex;flex-direction:column;gap:6px;",
   header: "display:flex;align-items:center;gap:8px;",
@@ -233,6 +236,19 @@ export const TRANSCRIPT_STYLE = {
   text: `${TRANSCRIPT_TEXT}color:var(--ytc-text);`,
   textHidden: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);text-decoration:line-through;`,
   actions: "display:flex;gap:4px;",
+  /** 区間の見出し。押せる (その区間を詰める)。区間の境目が分かるよう上に線を引く */
+  segment:
+    "display:flex;gap:8px;align-items:center;padding:6px 6px 2px;margin-top:4px;border-top:1px solid var(--ytc-border);cursor:pointer;user-select:none;font-size:11px;",
+  segmentTitle: "color:var(--ytc-accent);font-weight:700;white-space:nowrap;",
+  segmentRange:
+    "color:var(--ytc-text-sub);font-variant-numeric:tabular-nums;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+  /** 手入力の行。字幕の行と見分けるため、左の線を点線にする。区間の外は薄く */
+  manual: `${TRANSCRIPT_MANUAL}background:var(--ytc-surface);border-left:3px dashed var(--ytc-accent);`,
+  manualOutside: `${TRANSCRIPT_MANUAL}background:transparent;border-left:3px dashed var(--ytc-border);opacity:0.7;`,
+  manualMark: "color:var(--ytc-accent);font-size:10px;padding-top:3px;",
+  manualEmpty: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);font-style:italic;`,
+  manualActions: "grid-column:2 / -1;display:flex;gap:4px;flex-wrap:wrap;align-items:center;",
+  outside: "color:var(--ytc-text-sub);font-size:11px;",
   edit: `${TELOP_STYLE.textarea}user-select:text;`,
   textButton: TELOP_STYLE.textButton,
 } as const;

@@ -2137,6 +2137,13 @@ function buildBar(): HTMLElement {
     onEditText: onEditLineText,
     onToggleHidden: onToggleLineHidden,
     onPlay: onPlayLine,
+    onSelectSegment: () => undefined,
+    onRemoveSegment: () => undefined,
+    onAddManual: () => undefined,
+    onManualEdge: () => undefined,
+    onManualText: () => false,
+    onRemoveManual: () => undefined,
+    onPlayManual: () => undefined,
     onRetry: () => transcriptLoader?.retry(),
   });
 
@@ -2328,6 +2335,10 @@ function refreshTranscript(): void {
     header,
     dubbed: forThisVideo && (status.kind === "ready" || status.kind === "none") && status.dubbed,
     enabled: canEditFromTranscript(),
+    // 区間の見出しと手入力の行は Task 3・4 で繋ぐ
+    items: [],
+    trimmingIndex: -1,
+    canAddManual: false,
     rows: lines.map((line) => {
       const selected = isLineInSegments(line, segments);
       const telop = telopByLine.get(line.id);
