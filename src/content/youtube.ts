@@ -1955,6 +1955,9 @@ function buildBar(): HTMLElement {
     onCommit: onRangeCommitted,
     onSeekPlay: (sec) => void onSeekPlay(sec),
     maxClipSec: () => maxClipSec,
+    // 吸い付き先と掴んだ端は、詰める欄を組み込むときに繋ぐ
+    snapPoints: () => [],
+    onGrab: () => undefined,
   });
   rangeBar.element.id = RANGE_ID;
 

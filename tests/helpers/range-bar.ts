@@ -1,4 +1,5 @@
 import { createRangeBar, type RangeBar } from "@/content/range-bar";
+import type { HandleKind } from "@/content/range-math";
 import type { ClipRange } from "@/shared/types";
 
 export type BarHarness = {
@@ -12,6 +13,10 @@ export type BarHarness = {
   track: HTMLElement;
   /** IN / OUT ハンドル */
   handles: [HTMLElement, HTMLElement];
+  /** onGrab で知らされた端 */
+  grabbed: HandleKind[];
+  /** 吸い付き先。テストから書き換えられる */
+  snapPoints: { value: number[] };
 };
 
 export type BarOptions = {
@@ -21,6 +26,7 @@ export type BarOptions = {
   trackWidth?: number;
   maxClipSec?: number;
   enabled?: boolean;
+  snapPoints?: number[];
 };
 
 /**
@@ -41,12 +47,16 @@ export function mountRangeBar(options: BarOptions = {}): BarHarness {
   const committed: ClipRange[] = [];
   const seeked: number[] = [];
   const maxClipSec = { value: initialMax };
+  const grabbed: HandleKind[] = [];
+  const snapPoints = { value: options.snapPoints ?? [] };
 
   const bar = createRangeBar({
     onScrub: () => undefined,
     onCommit: (next) => committed.push(next),
     onSeekPlay: (sec) => seeked.push(sec),
     maxClipSec: () => maxClipSec.value,
+    snapPoints: () => snapPoints.value,
+    onGrab: (kind) => grabbed.push(kind),
   });
   document.body.append(bar.element);
   bar.update(range, videoDurationSec);
@@ -75,6 +85,8 @@ export function mountRangeBar(options: BarOptions = {}): BarHarness {
     maxClipSec,
     track,
     handles: [inHandle, outHandle],
+    grabbed,
+    snapPoints,
   };
 }
 
@@ -102,7 +114,8 @@ export function dragHandle(
   handle: HTMLElement,
   clientX: number,
   fromX = 0,
+  altKey = false,
 ): void {
   pressAt(handle, fromX);
-  handle.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX }));
+  handle.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX, altKey }));
 }

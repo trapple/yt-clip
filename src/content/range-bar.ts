@@ -2,6 +2,7 @@ import {
   clampHandle,
   computeTrimWindow,
   ratioToTime,
+  snapSec,
   timeToRatio,
   type HandleKind,
   type TimeWindow,
@@ -9,6 +10,9 @@ import {
 import { RANGE_STYLE } from "@/content/styles";
 import { formatTime } from "@/shared/time";
 import type { ClipRange } from "@/shared/types";
+
+/** ハンドルが単語の切れ目に吸い付く距離 (px)。秒ではなく画面の距離で決める: 窓の幅で 1px の秒数が変わる */
+export const SNAP_PX = 8;
 
 export type RangeBarCallbacks = {
   /** ドラッグ中。動画をその位置へ追従させる */
@@ -29,6 +33,13 @@ export type RangeBarCallbacks = {
    * OUT ボタン側 (`validateRange`) と食い違う
    */
   maxClipSec(): number;
+  /**
+   * 吸い付き先 (単語の切れ目。第 2 版のモック)。**掴んだときに 1 回だけ引く** (動かしている間に文字起こしが
+   * 変わっても、指の下で吸い付き先を変えない)。無ければ空
+   */
+  snapPoints(window: TimeWindow): readonly number[];
+  /** ハンドルを掴んだ。詰める欄のキー (`,` `.`) で動かす端にする */
+  onGrab(kind: HandleKind): void;
 };
 
 export type RangeBar = {
@@ -161,11 +172,19 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
     return ratioToTime((clientX - box.left) / box.width, window_);
   }
 
+  /** トラックの 1px が何秒か。幅が取れないときは 0 (吸い付かない) */
+  function secondsPerPixel(): number {
+    const width = track.getBoundingClientRect().width;
+    return width > 0 ? (window_.endSec - window_.startSec) / width : 0;
+  }
+
   function beginDrag(kind: HandleKind, handle: HTMLElement): void {
     handle.addEventListener("pointerdown", (event: PointerEvent) => {
       if (!enabled) return;
       event.preventDefault();
       handle.setPointerCapture(event.pointerId);
+      callbacks.onGrab(kind);
+      const points = callbacks.snapPoints(window_);
 
       /** ドラッグを終わらせる。捕捉とリスナをまとめて解く */
       const finish = (pointerId: number): void => {
@@ -185,13 +204,10 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
           return;
         }
 
-        range = clampHandle(
-          kind,
-          pointerToSec(moveEvent.clientX),
-          range,
-          window_,
-          callbacks.maxClipSec(),
-        );
+        const raw = pointerToSec(moveEvent.clientX);
+        // Alt を押している間は吸い付かない (モック)。吸い付きの幅は画面の距離で決める
+        const desired = moveEvent.altKey ? raw : snapSec(raw, points, SNAP_PX * secondsPerPixel());
+        range = clampHandle(kind, desired, range, window_, callbacks.maxClipSec());
         paint();
         // 動かしている側の位置を見せる。反対側は動いていない
         requestScrub(kind === "in" ? range.startSec : range.endSec);
