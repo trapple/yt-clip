@@ -879,9 +879,12 @@ function onMarkOut(): void {
  *
  * **範囲が変わっていなければ送らない** (窓の映し直しだけする)。掴んで離しただけ (キーで動かす端を選ぶため) で
  * ADJUST_SEGMENT を送ると、投稿した後の状態が ready へ戻り、投稿したクリップの参照が理由なく外れる。
- * 送ったら true (`undelivered` は届かなかったときに呼ぶ)
+ * 欄の行を押した答え (`pendingClip`) を待つ間も送らない (状態機械の区間の並びがまだ手元と違い、位置 (index) で当てる
+ * ADJUST_SEGMENT が別の区間に当たる)。拡大バーは今の区間で描き直す。
+ *
+ * 送ったら答えを待つ範囲 (`rangeAwaiting`) を覚えて true を返す
  */
-function onRangeCommitted(range: ClipRange, undelivered?: () => void): boolean {
+function onRangeCommitted(range: ClipRange): boolean {
   // 状態機械が受け付けない範囲変更は、画面にも反映しない
   if (!canAdjustRange()) return false;
 
@@ -894,8 +897,8 @@ function onRangeCommitted(range: ClipRange, undelivered?: () => void): boolean {
     const durationSec = getVideo().duration;
 
     const current = selectedSegment();
-    if (current !== null && sameRange(current, range)) {
-      paintRangeBar(range, durationSec);
+    if (current !== null && (sameRange(current, range) || pendingClip !== null)) {
+      paintRangeBar(current, durationSec);
       return false;
     }
 
@@ -906,7 +909,20 @@ function onRangeCommitted(range: ClipRange, undelivered?: () => void): boolean {
     paintRangeBar(range, durationSec);
     setStatus(rangeLabel(range));
     selectRangeOnNextState = range;
-    send({ type: "ADJUST_SEGMENT", index: selectedIndex, range }, (state) => hasSegment(state, range), undelivered);
+    rangeAwaiting = range;
+    const settle = (): void => {
+      if (rangeAwaiting === range) rangeAwaiting = null;
+    };
+    send(
+      { type: "ADJUST_SEGMENT", index: selectedIndex, range },
+      (state) => {
+        const ok = hasSegment(state, range);
+        // 拒まれたら待つのをやめる (待ち続けると ±0.1 が二度と効かない)
+        if (!ok) settle();
+        return ok;
+      },
+      settle,
+    );
     return true;
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
@@ -915,29 +931,28 @@ function onRangeCommitted(range: ClipRange, undelivered?: () => void): boolean {
 }
 
 /**
- * 詰める欄の ±0.1 で送って、状態機械の答え (状態の通知) を待っているか。**待つ間は次の ±0.1 を受けない。**
+ * 区間の範囲を送って (ドラッグの確定・±0.1)、その範囲を持つ状態の通知を待っている範囲。**待つ間は ±0.1 を受けない。**
  * 答えを待たずに積むと、先に送った分の答えが届いた時点で手元の区間が巻き戻る (押した分が消える)。頭が前の区間を
- * 越えて並べ替わった後に、古い位置 (index) のまま次を送ると、隣の区間を書き換える
+ * 越えて並べ替わった後に、古い位置 (index) のまま次を送ると、隣の区間を書き換える。
+ * **待つ範囲そのものを覚える** (真偽値にすると、先に送った別の操作の通知で早く下りる)
  */
-let nudgeInFlight = false;
+let rangeAwaiting: ClipRange | null = null;
 
 /**
  * 詰める欄の −0.1 / ＋0.1 (と `,` `.`)。拡大バーのドラッグの確定と同じ経路 (`onRangeCommitted`) で送る。
  *
- * **前に送った分の答えが届くまで、次は受けない** (`nudgeInFlight` の doc)。欄の行を押した答え (`pendingClip`) を
- * 待つ間も受けない: 状態機械の区間の並びがまだ手元と違い、位置 (index) で当てる ADJUST_SEGMENT が別の区間に当たる。
+ * **前に送った範囲の答えが届くまで、次は受けない** (`rangeAwaiting` の doc)。欄の行を押した答え (`pendingClip`) を
+ * 待つ間も受けない (`onRangeCommitted` の doc)。
  * 動かした端の映像を出す (止めて、その位置へ)
  */
 function onNudge(kind: HandleKind, deltaSec: number): void {
-  if (!canAdjustRange() || nudgeInFlight || pendingClip !== null) return;
+  if (!canAdjustRange() || rangeAwaiting !== null || pendingClip !== null) return;
   const range = selectedSegment();
   if (range === null) return;
   try {
     const next = nudgeRange(kind, deltaSec, range, getVideo().duration, maxClipSec);
     if (sameRange(next, range)) return;
-    nudgeInFlight = onRangeCommitted(next, () => {
-      nudgeInFlight = false;
-    });
+    onRangeCommitted(next);
     onScrub(kind === "in" ? next.startSec : next.endSec);
   } catch (error) {
     setStatus(`区間を詰められませんでした: ${String(error)}`);
@@ -1499,11 +1514,13 @@ function applyStateToDisplay(state: ClipState): void {
   }
   // 作り直しの確かめは、状態が届いたらやり直す (確かめた区間とテロップが変わっているかもしれない)
   startOverArmed = false;
-  // ±0.1 の答え。拒まれたとき (送った範囲を持たない状態) も届いた時点で待つのをやめる (待ち続けると欄が二度と効かない)
-  nudgeInFlight = false;
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
+  // 送った範囲の答えが届いたら待つのをやめる。区間を変えられない状態 (録画・失敗・idle など) になっても待たない
+  if (rangeAwaiting !== null && (!rangeEditable || liveSegments.some((segment) => sameRange(segment, rangeAwaiting!)))) {
+    rangeAwaiting = null;
+  }
   currentSegments = liveSegments;
   const previousTelopCount = currentTelops.length;
   currentTelops =
@@ -2828,7 +2845,7 @@ function resetModuleState(): void {
   lastKind = "idle";
   startOverArmed = false;
   selectRangeOnNextState = null;
-  nudgeInFlight = false;
+  rangeAwaiting = null;
   revealSegmentOnNextState = false;
   revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;

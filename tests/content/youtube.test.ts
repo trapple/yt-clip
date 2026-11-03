@@ -4707,6 +4707,31 @@ describe("詰める欄", () => {
     expect(adjustEvents()).toHaveLength(2);
   });
 
+  test("ドラッグの答えを待つ間も ±0.1 は受けない (先に届く通知で巻き戻らない)", async () => {
+    await showTwo();
+    const track = rangeBarElement().querySelector<HTMLElement>("[data-role=track]");
+    if (track === null) throw new Error("トラックがありません");
+    track.getBoundingClientRect = () => ({ left: 0, width: 120 }) as DOMRect;
+    const outHandle = [...rangeBarElement().querySelectorAll<HTMLElement>("[aria-label]")][1];
+    if (outHandle === undefined) throw new Error("終了ハンドルがありません");
+    outHandle.setPointerCapture = () => undefined;
+    outHandle.releasePointerCapture = () => undefined;
+    // 窓 240〜252 (12 秒) を 120px にして、尻を 251 まで引く
+    outHandle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100 }));
+    outHandle.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 110 }));
+    outHandle.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 110 }));
+    trimPart("nudge-out-plus").click();
+    await flush();
+    expect(adjustEvents()).toEqual([{ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 242, endSec: 251 } }]);
+
+    emit(swState);
+    await flush();
+    trimPart("nudge-out-plus").click();
+    await flush();
+
+    expect(adjustEvents().at(-1)).toEqual({ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 242, endSec: 251.1 } });
+  });
+
   test("ハンドルを掴んで動かさずに離しても、送らない (投稿した後の状態を戻さない)", async () => {
     await showTwo();
     const handles = [...rangeBarElement().querySelectorAll<HTMLElement>("[aria-label]")];
