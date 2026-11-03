@@ -2,30 +2,28 @@
  * 文字起こしの欄の検索の比べ方 (ADR 0004)。NFKC で揃え、英字の大小を区別しない。印を元の文字に付けるため、揃えた後の
  * 1 文字ごとに、元の文字のどこから来たかを持つ。
  *
- * **塊ごとに揃える。** 元の文字を「基の 1 文字 + 後ろに付く結合文字 (と半角の濁点・半濁点)」の塊に割り、塊ごとに NFKC に
- * かける。1 文字ずつだと半角の「ｶﾞ」が「カ + 結合の濁点」になって「ガ」に当たらない。文字列ごとだと元の位置が分からない
+ * **書記素ごとに揃える。** 元の文字を書記素 (見た目の 1 文字。半角の「ｶﾞ」・分解したハングルの字母・肌の色の付いた絵文字も
+ * 1 つ) に割り、書記素ごとに NFKC と小文字化にかける。1 コードポイントずつだと「ｶﾞ」が「カ + 結合の濁点」になって「ガ」に
+ * 当たらず、文字列ごとだと元の位置が分からない。**検索の文字も同じ関数で揃える** (文字列ごとの小文字化は語末の Σ を ς に
+ * するなど、書記素ごとと結果が違う)
  */
 
 export type NormalizedText = { text: string; starts: number[]; ends: number[] };
 export type MatchRange = { start: number; end: number };
 
-/** 基の 1 文字と、後ろに付く結合文字・半角の濁点 (U+FF9E)・半濁点 (U+FF9F) */
-const CLUSTER = /\P{M}[\p{M}ﾞﾟ]*|\p{M}+/gu;
-
-const fold = (text: string): string => text.normalize("NFKC").toLowerCase();
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 export function normalizeForSearch(source: string): NormalizedText {
   let text = "";
   const starts: number[] = [];
   const ends: number[] = [];
-  for (const match of source.matchAll(CLUSTER)) {
-    const start = match.index;
-    const end = start + match[0].length;
-    const folded = fold(match[0]);
+  for (const { segment, index } of graphemes.segment(source)) {
+    const end = index + segment.length;
+    const folded = segment.normalize("NFKC").toLowerCase();
     text += folded;
-    // 揃えた後の UTF-16 の 1 単位ごとに、塊の範囲を持つ (1 つの塊が数文字になることがある)
+    // 揃えた後の UTF-16 の 1 単位ごとに、書記素の範囲を持つ (1 つの書記素が数文字になることがある)
     for (let i = 0; i < folded.length; i += 1) {
-      starts.push(start);
+      starts.push(index);
       ends.push(end);
     }
   }
@@ -33,7 +31,7 @@ export function normalizeForSearch(source: string): NormalizedText {
 }
 
 export function normalizeQuery(query: string): string {
-  return fold(query.trim());
+  return normalizeForSearch(query.trim()).text;
 }
 
 export function findMatches(normalized: NormalizedText, query: string): MatchRange[] {
@@ -46,7 +44,7 @@ export function findMatches(normalized: NormalizedText, query: string): MatchRan
     const start = normalized.starts[at]!;
     const end = normalized.ends[at + query.length - 1]!;
     const last = ranges.at(-1);
-    // 1 つの塊が数文字に揃うと、続いた当たりが同じ元の文字を指しうる。重ねずにつなぐ
+    // 1 つの書記素が数文字に揃うと、続いた当たりが同じ元の文字を指しうる。重ねずにつなぐ
     if (last !== undefined && start < last.end) last.end = Math.max(last.end, end);
     else ranges.push({ start, end });
     from = at + query.length;

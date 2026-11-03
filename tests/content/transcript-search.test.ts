@@ -57,3 +57,17 @@ describe("findMatches", () => {
     expect(find("abc", "x")).toEqual([]);
   });
 });
+
+describe("本文と検索の文字を同じ規則で揃える (whole-branch review)", () => {
+  test("語末の Σ も、本文と同じに打てば当たる (文字列ごとの小文字化は語末を ς にする)", () => {
+    expect(find("ΟΔΟΣ", "ΟΔΟΣ")).toEqual([{ start: 0, end: 4 }]);
+  });
+
+  test("分解したハングルの字母は、合成済みの文字に当たる", () => {
+    expect(find("\u1100\u1161", "\uAC00")).toEqual([{ start: 0, end: 2 }]);
+  });
+
+  test("肌の色の付いた絵文字は途中で割らない", () => {
+    expect(find("👍🏽いいね", "👍")).toEqual([{ start: 0, end: 4 }]);
+  });
+});
