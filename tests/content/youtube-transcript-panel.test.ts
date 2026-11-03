@@ -603,5 +603,53 @@ describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
     expect(events).toEqual([{ type: "REMOVE_TELOP", index: 1 }]);
     expect(manualRows()).toHaveLength(0);
   });
+
+  test("行を押した答えを待つ間は、手入力の行を位置で指して変えない (詰まった位置で別のテロップを書き換えない)", async () => {
+    // テロップが [X (行 1 の字幕), A (手入力)]。行 1 を外す SET_CLIP が先に効くと A は位置 0 に詰まり、
+    // 古い位置 1 で送った UPDATE_TELOP は後ろの別のテロップを上書きするか、状態機械を internal-error に落とす
+    ready();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 9.3 }],
+      telops: [
+        { startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" },
+        { startSec: 5, endSec: 8, text: "あ" },
+      ],
+      meta: META,
+    });
+    await flush();
+    events = [];
+    rows()[0]!.click();
+    // 答えを待たずに押す
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='set-start']")!.click();
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+    expect(document.getElementById("yt-clip-bar-status")?.textContent).toBe(
+      "前の操作の答えを待っています。少し待ってからもう一度押してください",
+    );
+    await flush();
+    // 答えが描かれた後は押せる (A は位置 0 に詰まっている)
+    events = [];
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events).toEqual([{ type: "REMOVE_TELOP", index: 0 }]);
+  });
+
+  test("手入力の行を変えた答えを待つ間は、行を押しても古い写しで丸ごと差し替えない", async () => {
+    ready();
+    await flush();
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    events = [];
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    rows()[1]!.click();
+    expect(events.map((event) => event.type)).toEqual(["REMOVE_TELOP"]);
+    await flush();
+    events = [];
+    rows()[1]!.click();
+    await flush();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+  });
 });
 

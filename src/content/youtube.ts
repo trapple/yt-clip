@@ -278,12 +278,11 @@ let selectRangeOnNextState: ClipRange | null = null;
 /** 次に状態が届いたとき、選んだ区間の行を区間・テロップの窓の見える範囲に入れる (区間を足した直後) */
 let revealSegmentOnNextState = false;
 /**
- * 次に状態が届いたとき、テロップの一覧の末尾の行を区間・テロップの窓の見える範囲に入れる。
- *
- * `revealSegmentOnNextState` と同じ形。**クリックの時点では行がまだ無い** (状態機械の
- * 答えを待って描く) ので、応答を描いた後に 1 回だけ送る
+ * ＋ ここに字幕を足すで足したテロップ。それが載った状態が届いたら、その手入力の行の直す欄を開き、区間・テロップの窓の
+ * 見える範囲に入れる。**クリックの時点では行がまだ無い** (状態機械の答えを待って描く) ので、応答を描いた後に 1 回だけ。
+ * 載っていない状態 (拒まれた・前の操作の答え) では開かない (末尾の別のテロップの直す欄を開いてフォーカスを奪わない)
  */
-let revealLastTelopOnNextState = false;
+let revealTelopOnNextState: Telop | null = null;
 /**
  * 次に状態が届いたとき、この位置が消えたものとして選択を詰める。
  *
@@ -692,9 +691,10 @@ function onAddTelop(): void {
     setStatus("動画の終わりにはテロップを足せません");
     return;
   }
-  // 足した行を区間・テロップの窓の見える範囲に入れる (右側パネルの spec §3)
-  revealLastTelopOnNextState = true;
-  send({ type: "ADD_TELOP", telop: { startSec, endSec, text: "" } });
+  const telop = { startSec, endSec, text: "" };
+  if (!sendIndexed({ type: "ADD_TELOP", telop })) return;
+  // 足した行を区間・テロップの窓の見える範囲に入れ、直す欄を開く (右側パネルの spec §3)。足したテロップが載った状態で開く
+  revealTelopOnNextState = telop;
 }
 
 /**
@@ -713,7 +713,7 @@ function onMoveTelopEdge(index: number, edge: "start" | "end"): void {
     setStatus("開始は終了より前にしてください");
     return;
   }
-  send({ type: "UPDATE_TELOP", index, telop: next });
+  sendIndexed({ type: "UPDATE_TELOP", index, telop: next });
 }
 
 /**
@@ -727,8 +727,7 @@ function onTelopText(index: number, text: string): boolean {
   // 状態機械は上限を超えた文言を UI のバグとして拒む。送る前に止めて理由を出す。
   // 入力欄は消さない (削って直してもらう)
   if (rejectLongTelopText(text)) return false;
-  send({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
-  return true;
+  return sendIndexed({ type: "UPDATE_TELOP", index, telop: { ...telop, text } });
 }
 
 /** そのテロップの頭から再生する。範囲再生の監視は解く (押した場所からの再生が止まる) */
@@ -1445,6 +1444,16 @@ function applyStateToDisplay(state: ClipState): void {
   if (pendingClip !== null && (isClipOf(state, pendingClip) || (state.kind !== "ready" && state.kind !== "idle"))) {
     pendingClip = null;
   }
+  // 位置で送った操作の答えが返った後に状態を描いたら、待つのをやめる (router は通知を応答より先に送るので、ふつうは
+  // 応答の時点で済んでいる。応答の後に届いた状態は、答えを反映した後のもの)。区間を変えられない種類 (録画など) でも待たない
+  lastAppliedKey = clipKey(state);
+  if (
+    indexedAwaiting &&
+    (indexedResult !== null || (state.kind !== "ready" && state.kind !== "posted" && state.kind !== "idle"))
+  ) {
+    indexedAwaiting = false;
+    indexedResult = null;
+  }
   // 作り直しの確かめは、状態が届いたらやり直す (確かめた区間とテロップが変わっているかもしれない)
   startOverArmed = false;
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
@@ -1497,11 +1506,21 @@ function applyStateToDisplay(state: ClipState): void {
   }
   // 足した直後の 1 回だけ、足した行へ送る。描き終えてから送るので、ここでは覚えるだけ
   const revealSegment = revealSegmentOnNextState;
-  const revealTelop = revealLastTelopOnNextState;
+  // 足したテロップが載った状態でだけ開く。載っていない答え (前の操作の答え) が先に来たら、待っている間は覚えたまま
+  const revealTelop = revealTelopOnNextState;
+  let addedTelopIndex = -1;
+  if (revealTelop !== null) {
+    for (let i = currentTelops.length - 1; i >= 0; i -= 1) {
+      if (sameTelop(currentTelops[i]!, revealTelop)) {
+        addedTelopIndex = i;
+        break;
+      }
+    }
+  }
   // 欄から送った組の答えを待つ間に、先に送った組の答えが届いた (選びたい区間がまだ無い)。忘れずに次の答えで選ぶ
   if (wantedIndex >= 0 || pendingClip === null) selectRangeOnNextState = null;
   revealSegmentOnNextState = false;
-  revealLastTelopOnNextState = false;
+  if (addedTelopIndex >= 0 || !indexedAwaiting) revealTelopOnNextState = null;
   removedIndexOnNextState = null;
 
   const current = selectedSegment();
@@ -1533,11 +1552,10 @@ function applyStateToDisplay(state: ClipState): void {
   refreshLists();
   // 一覧と窓の表示が決まってから送る (出す → 送る の順)
   if (revealSegment) revealInWindow(transcriptPanel?.reveal({ kind: "segment", index: selectedIndex }) ?? null);
-  if (revealTelop && currentTelops.length > 0) {
-    // ＋ ここに字幕を足す の答え。足した行 (末尾のテロップ) の直す欄を開いて見せる
-    const added = currentTelops.length - 1;
-    transcriptPanel?.editManual(added);
-    revealInWindow(transcriptPanel?.reveal({ kind: "manual", telopIndex: added }) ?? null);
+  if (addedTelopIndex >= 0) {
+    // ＋ ここに字幕を足す の答え。足した行の直す欄を開いて見せる
+    transcriptPanel?.editManual(addedTelopIndex);
+    revealInWindow(transcriptPanel?.reveal({ kind: "manual", telopIndex: addedTelopIndex }) ?? null);
   }
 
   // 選んでいる区間が変わったら、範囲と秒数を状態の欄に出す (IN / OUT / ＋ 区間を追加の答え)。ready のときだけ:
@@ -1971,14 +1989,14 @@ function removeSegment(index: number): void {
     setStatus(telopsRemainMessage(currentTelops.length));
     return;
   }
+  if (!sendIndexed({ type: "REMOVE_SEGMENT", index })) return;
   removedIndexOnNextState = index;
-  send({ type: "REMOVE_SEGMENT", index });
 }
 
 /** 手入力の行の ✕。手入力の行はテロップそのもの (ADR 0003) */
 function removeTelop(index: number): void {
   if (!canEditTelops()) return;
-  send({ type: "REMOVE_TELOP", index });
+  sendIndexed({ type: "REMOVE_TELOP", index });
 }
 
 /** 欄の見出し・詰める欄の ‹ › で区間を選んだ。その区間を詰める (録画中は選び直さない) */
@@ -2143,6 +2161,17 @@ let transcriptStatus: TranscriptStatus = { kind: "idle" };
 let anchorLineId: string | null = null;
 /** 欄から送ったけれど、状態機械の答えがまだ届いていない組 (clipBase の doc) */
 let pendingClip: Clip | null = null;
+/**
+ * 位置 (index) で指す操作 (手入力の行の ADD / UPDATE / REMOVE_TELOP、見出しの ✕ の REMOVE_SEGMENT) の答えを待っている。
+ * **SET_CLIP (pendingClip) と混ぜない** (whole-branch review)。SET_CLIP が先に効くと位置が詰まり、古い位置で送った操作が
+ * 別のテロップを書き換える / 状態機械を internal-error に落とす。逆に位置で送った答えを待つ間に組を作ると、古い写しで
+ * 直した時刻や文字を黙って戻す
+ */
+let indexedAwaiting = false;
+/** 位置で送った操作の答え (適用後の状態の要約)。答えが返った後に状態を描いたら待つのをやめる。答えの前なら null */
+let indexedResult: string | null = null;
+/** 最後に描いた状態の要約 (clipKey)。応答より先に通知を描いていたかを見る */
+let lastAppliedKey = "";
 /** 外した行のテロップの文字 (行の id ごと)。入れ直したら戻す。動画が変わったら捨てる */
 const editedLineTexts = new Map<string, string>();
 /** 届いた状態が SET_CLIP を受けるか (acceptsSetClip)。欄の押せる / 押せないはこれで決める */
@@ -2184,6 +2213,46 @@ function canEditFromTranscript(): boolean {
  * SET_CLIP は丸ごと差し替えるので、答えを待つ間にもう 1 行押したとき、手元の写しから作ると先に押した行が消える
  * (service worker が寝ていると答えまで数百 ms かかる)。描くのは今までどおり状態機械の答えが届いてから
  */
+const CLIP_BUSY_MESSAGE = "前の操作の答えを待っています。少し待ってからもう一度押してください";
+
+/** 比べるための状態の要約 (種類と区間とテロップ)。応答と通知は別の object なので中身で比べる */
+function clipKey(state: ClipState): string {
+  return JSON.stringify([state.kind, "segments" in state ? state.segments : [], "telops" in state ? state.telops : []]);
+}
+
+/** 欄から組 (SET_CLIP) を送ってよいか。位置で送った答えを待っている間は送らず理由を出す */
+function canSendClip(): boolean {
+  if (!indexedAwaiting) return true;
+  setStatus(CLIP_BUSY_MESSAGE);
+  return false;
+}
+
+/** 位置で指す操作を送る。欄の組 (SET_CLIP) の答えか、前の位置の操作の答えを待っている間は送らず理由を出す */
+function sendIndexed(event: ClipEvent): boolean {
+  if (pendingClip !== null || indexedAwaiting) {
+    setStatus(CLIP_BUSY_MESSAGE);
+    return false;
+  }
+  indexedAwaiting = true;
+  indexedResult = null;
+  const settle = (): void => {
+    indexedAwaiting = false;
+    indexedResult = null;
+  };
+  send(
+    event,
+    (state) => {
+      // router は通知を応答より先に送るので、もう描いているかもしれない。描いていればここで待つのをやめる
+      const key = clipKey(state);
+      if (key === lastAppliedKey) settle();
+      else indexedResult = key;
+      return true;
+    },
+    settle,
+  );
+  return true;
+}
+
 function clipBase(): Clip {
   return pendingClip ?? listedItems();
 }
@@ -2289,6 +2358,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
     if (!busy) setStatus("いまは区間を変えられません");
     return;
   }
+  if (!canSendClip()) return;
   const lines = transcriptLines();
   const line = lines.find((item) => item.id === lineId);
   if (line === undefined) return;
@@ -2336,6 +2406,7 @@ function onToggleLine(lineId: string, extend: boolean): void {
 function onEditLineText(lineId: string, text: string): boolean {
   if (!canEditFromTranscript()) return false;
   if (rejectLongTelopText(text)) return false;
+  if (!canSendClip()) return false;
   const base = clipBase();
   if (!base.telops.some((telop) => telop.lineId === lineId)) return false;
   sendClip({
@@ -2348,6 +2419,7 @@ function onEditLineText(lineId: string, text: string): boolean {
 /** 「字幕に出さない」/「字幕に出す」 */
 function onToggleLineHidden(lineId: string): void {
   if (!canEditFromTranscript()) return;
+  if (!canSendClip()) return;
   const line = lineById(lineId);
   if (line === undefined) return;
   const next = toggleTelopHidden(clipBase(), line);
@@ -2772,7 +2844,10 @@ function resetModuleState(): void {
   selectRangeOnNextState = null;
   rangeAwaiting = null;
   revealSegmentOnNextState = false;
-  revealLastTelopOnNextState = false;
+  revealTelopOnNextState = null;
+  indexedAwaiting = false;
+  indexedResult = null;
+  lastAppliedKey = "";
   removedIndexOnNextState = null;
   rangeVideoId = null;
   busy = false;
