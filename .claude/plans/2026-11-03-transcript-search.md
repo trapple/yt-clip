@@ -1152,3 +1152,34 @@ git -C /Users/trapple/repos/github.com/trapple/yt-clip commit -m "docs(manual-ch
 - [選択] 頭 / 尻を今にの後の文言は、送れた時点で区間の範囲に戻す — 答えを待ってから戻すと、待ちの間に出た別の文言 (「テロップも消えました」など) と取り合う
 - [cross-review] plan を 1 回 (ゼロ context の実装者。scratch に Task 2〜6 を当てて tsc / vitest 1232 件で確かめた)。Issues 5 件 (↑↓ のキー・Task 6 のテストの組み立て・揃えると同じ文字で当たりが戻る・次へ移るたびに全行を描き直す・paintRow の差分が貼れない) を直した。直しは具体的なので 2 回目は回さず実装に引き継ぐ
 - [選択] refit は詰める欄が背の変わり目を知らせ、youtube.ts が呼ぶ — 背が変わるかを知っているのは詰める欄、窓を知っているのは youtube.ts
+- [cross-review] whole-branch review を 1 回 (保守担当 + 攻撃者)。Approved、Minor 3 件 (検索の文字と本文の揃え方の違い・選び直しで詰める欄を前の窓で一度描く・修飾キー付きの ↑↓) を直した (73c97d0 / fedee18 / 46ca394)。どれも失敗するテストで確かめた小さな直しなので、2 回目は回さない
+- [回答] crxjs の loader の警告は smoke で数えない (2026-11-03「この警告だけ数えない (推奨)」)
+
+## 完了の記録 (2026-11-03)
+
+- Task 1〜8 を commit (b6137ff / 7d30712 / 38d3c70 / e298d9b / 35d9995 / fcb6f62 / 783fea6・07b63f3 / 44c005e)。ADR 0004 は 26e4ce2、plan は 9bf0697
+- 計画からの逸脱:
+  - Task 4 と Task 5 の commit で youtube.ts の配線が混ざったため、作り直して分けた (各 commit で型が通る形)
+  - Task 6 のテストは、答え (setTimeout で届く ready) が次のテストの idle を上書きしたので、最後に `await flush()` を足した
+  - Task 7 は仮説 (prerender・sandbox の iframe) がどちらも外れた。Playwright で、同じタブで 2 回目以降に読み込むと loader の動的 import の先の chunk ごとに出ること、それでもバーと MAIN world の橋渡しが動くことを確かめた。Gate でユーザーに見せ、smoke でこの行だけ数えない形にした (README の切り分けにも書いた)。smoke は 9 項目すべて通過
+  - whole-branch review で、塊の割り方を `\P{M}[\p{M}ﾞﾟ]*` から `Intl.Segmenter` (書記素) に替えた
+- 普段の Chrome で確かめた (manual-check の記録)。IME・浮いた窓のスクロール・バーの詰め直しはユーザーが手で確かめた
+- 全テスト 1238 件・typecheck 通過
+
+### 1c-4 に持ち越すもの (持ち越しの片付け)
+
+- 欄の操作の待ち (`indexedAwaiting`) と ±0.1 の待ち (`rangeAwaiting`) は、通知が落ちると次の状態まで下りない。IN / OUT・＋ 区間を追加・拡大バーのドラッグは、欄の組 (SET_CLIP) と混ぜる守りをまだ持たない
+- 1c-1 から: ±0.1 の待ちに上限が無い・OUT 直後の ±0.1 の巻き戻り (帯を外した後は OUT と手入力の行の頭を今に / 尻を今にだけが残る)・トラックを押しても欄にフォーカスが移らない・長い配信は単語の時刻を落として保存する
+- 1b-2 から 10 件 (`.claude/plans/2026-11-03-transcript-cleanup.md` の Global Constraints の振り分け):
+  - 保存から読めたのに吹き替えの判定を待つ間「取っています…」のまま
+  - 保存する字幕が頼んだ動画のものかの確かめ・`language` / `name` の長さの上限
+  - 保存の索引の割り込みで漏れたキーが残る
+  - router が `apply` の前に `captureTabId` を書く
+  - `isClipOf` の受理判定が `JSON.stringify`
+  - Shift の範囲選択で区間が数千になる
+  - `text.slice(0, 500)` がサロゲートペアを割る
+  - 状態の欄の「録画中… (N秒)」「書き出しています…」が残る
+  - 広告の再生中に行を押すと duration が広告の長さ (＋ ここに字幕を足すも同じ)
+  - 別の動画で行を押すと前の動画の区間とテロップ (手入力も) を確かめずに置き換える
+- crxjs の loader の警告そのもの (止めるには loader の仕組みを替える。smoke は数えないようにした)
+- 1c-3 で見つけたもの: 検索は手入力の行を探さない (ADR 0004 の判断。要るなら印を付け直す仕組みを足す)
