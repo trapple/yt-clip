@@ -3,6 +3,8 @@ import {
   drawTelops,
   layoutTelops,
   resolveTelopStyle,
+  wrapRow,
+  wrapWidth,
 } from "@/content/telop-render";
 import { TELOP_FONT_PRESETS, type TelopStyle } from "@/shared/telop-style";
 import type { Telop } from "@/shared/types";
@@ -46,19 +48,24 @@ function makeContext() {
       calls.push(`stroke:${text}@${x},${y}`),
     fillText: (text: string, x: number, y: number) =>
       calls.push(`fill:${text}@${x},${y}`),
+    // 1 文字 100px (縁取りの太さは drawTelops が足す)
+    measureText: (text: string) => ({ width: [...text].length * 100 }),
   };
   return ctx;
 }
 
 describe("layoutTelops", () => {
+  /** 改行だけで行に分ける (折り返しは drawTelops と wrapRow で見る) */
+  const byNewline = (text: string): string[] => text.split("\n");
+
   test("1 行は下中央、下端から高さの 8% 空けた位置に置く", () => {
-    expect(layoutTelops(["a"], 1920, 1080, 64)).toEqual([
+    expect(layoutTelops(["a"], 1920, 1080, 64, byNewline)).toEqual([
       { text: "a", x: 960, y: 1080 - 1080 * 0.08 },
     ]);
   });
 
   test("改行で行を分け、行間は文字サイズの 1.2 倍", () => {
-    const lines = layoutTelops(["上\n下"], 1920, 1080, 100);
+    const lines = layoutTelops(["上\n下"], 1920, 1080, 100, byNewline);
     const bottom = 1080 - 1080 * 0.08;
     expect(lines).toEqual([
       { text: "上", x: 960, y: bottom - 120 },
@@ -67,7 +74,7 @@ describe("layoutTelops", () => {
   });
 
   test("複数のテロップは作った順に下から積む", () => {
-    const lines = layoutTelops(["先", "後"], 1920, 1080, 100);
+    const lines = layoutTelops(["先", "後"], 1920, 1080, 100, byNewline);
     const bottom = 1080 - 1080 * 0.08;
     expect(lines).toEqual([
       { text: "先", x: 960, y: bottom },
@@ -77,15 +84,19 @@ describe("layoutTelops", () => {
 
   test("大きさは動画の高さに比例する (1080 基準)", () => {
     // 540p では 1080p の半分の大きさで、見た目の比率が同じになる
-    const lines = layoutTelops(["上\n下"], 960, 540, 100);
+    const lines = layoutTelops(["上\n下"], 960, 540, 100, byNewline);
     const bottom = 540 - 540 * 0.08;
     expect(lines[0]?.y).toBeCloseTo(bottom - 60);
+  });
+
+  test("折り返す幅は、左右に 5% ずつ空けて縁取りの太さを引いたもの", () => {
+    expect(wrapWidth(1000, 16)).toBe(884);
   });
 
   test("canvas の上に完全に出た行は返さない", () => {
     // 改行だらけの文言でも、描く行数は高さ ÷ 行間で頭打ちになる
     const text = Array.from({ length: 500 }, (_, i) => `行${i}`).join("\n");
-    const lines = layoutTelops([text, "後"], 1920, 1080, 100);
+    const lines = layoutTelops([text, "後"], 1920, 1080, 100, byNewline);
     // 行間 120px、下端 993.6。y > 0 の行だけ残るので 9 行
     expect(lines.length).toBe(9);
     expect(lines.every((line) => line.y > 0)).toBe(true);
@@ -93,6 +104,34 @@ describe("layoutTelops", () => {
     expect(lines.map((line) => line.text)).toEqual(
       Array.from({ length: 9 }, (_, i) => `行${491 + i}`),
     );
+  });
+});
+
+describe("wrapRow", () => {
+  /** 1 文字 10px */
+  const measure = (text: string): number => [...text].length * 10;
+
+  test("収まる行はそのまま", () => {
+    expect(wrapRow("あいう", 30, measure)).toEqual(["あいう"]);
+  });
+
+  test("日本語は文字の間で折り返す", () => {
+    expect(wrapRow("あいうえおかきくけこ", 50, measure)).toEqual(["あいうえお", "かきくけこ"]);
+  });
+
+  test("英語は単語の間で折り返し、行の頭と尻の空白は落とす", () => {
+    expect(wrapRow("hello world foo", 110, measure)).toEqual(["hello world", "foo"]);
+    expect(wrapRow("hello world foo", 90, measure)).toEqual(["hello", "world foo"]);
+  });
+
+  test("1 単語だけで幅を超えるときは、その単語を文字の間で切る", () => {
+    expect(wrapRow("abcdefghij", 50, measure)).toEqual(["abcde", "fghij"]);
+    expect(wrapRow("go abcdefghij", 50, measure)).toEqual(["go", "abcde", "fghij"]);
+  });
+
+  test("句読点と閉じ括弧は行の頭に来ない (前の行に付けたまま)", () => {
+    expect(wrapRow("あいうえ。かき", 40, measure)).toEqual(["あいうえ。", "かき"]);
+    expect(wrapRow("「あいう」えお", 40, measure)).toEqual(["「あいう」", "えお"]);
   });
 });
 
@@ -151,6 +190,31 @@ describe("drawTelops", () => {
       1080,
     );
     expect(ctx.calls.some((call) => call.startsWith("stroke:"))).toBe(false);
+  });
+
+  test("画面の幅に収まらない行は折り返して描く (縁取りの太さも幅に入れる)", () => {
+    // 幅 1920 の 90% = 1728 から縁取り 16 を引いて 1712。1 文字 100 なので 17 文字で 1700、18 文字で 1800 を超える
+    const ctx = makeContext();
+    const long: Telop = { startSec: 10, endSec: 13, text: "あ".repeat(20) };
+    drawTelops(ctx as unknown as CanvasRenderingContext2D, [long], 11, STYLE, 1920, 1080);
+    const filled = ctx.calls.filter((call) => call.startsWith("fill:")).map((call) => call.split("@")[0]);
+    expect(filled).toEqual([`fill:${"あ".repeat(17)}`, `fill:${"あ".repeat(3)}`]);
+  });
+
+  test("同じ文言は毎フレーム折り返し直さない (幅を測り直さない)", () => {
+    const ctx = makeContext();
+    let measured = 0;
+    const measure = ctx.measureText;
+    ctx.measureText = (text: string) => {
+      measured += 1;
+      return measure(text);
+    };
+    const long: Telop = { startSec: 10, endSec: 13, text: "い".repeat(25) };
+    drawTelops(ctx as unknown as CanvasRenderingContext2D, [long], 11, STYLE, 1920, 1080);
+    const first = measured;
+    drawTelops(ctx as unknown as CanvasRenderingContext2D, [long], 11.03, STYLE, 1920, 1080);
+    expect(first).toBeGreaterThan(0);
+    expect(measured).toBe(first);
   });
 
   test("出す時間でなければ何も描かない", () => {

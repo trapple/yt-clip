@@ -82,6 +82,8 @@ beforeEach(() => {
     save: () => undefined,
     restore: () => undefined,
     strokeText: () => undefined,
+    // 折り返しの幅を測る。テロップは短いので折り返さない幅を返す
+    measureText: () => ({ width: 0 }),
     fillText: (text: string) => texts.push(text),
   };
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(

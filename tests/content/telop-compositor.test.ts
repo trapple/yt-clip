@@ -74,6 +74,8 @@ function makeCanvas(
     save: () => undefined,
     restore: () => undefined,
     strokeText: () => undefined,
+    // 折り返しの幅を測る。テロップは短いので折り返さない幅を返す
+    measureText: () => ({ width: 0 }),
     fillText: (text: string) => {
       if (options.fillThrows) throw new Error("fillText が壊れた");
       log.texts.push(text);

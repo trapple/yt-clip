@@ -331,6 +331,8 @@ function makeCanvasContext(
     save: () => undefined,
     restore: () => undefined,
     strokeText: () => undefined,
+    // 折り返しの幅を測る。テロップは短いので折り返さない幅を返す
+    measureText: () => ({ width: 0 }),
     fillText: options.fillText ?? (() => undefined),
   };
   return ctx as unknown as CanvasRenderingContext2D;
