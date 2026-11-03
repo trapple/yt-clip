@@ -2845,11 +2845,12 @@ describe("区間・テロップの窓", () => {
     await showEdit([TELOP]);
 
     const body = listBody();
-    // 区間の一覧 → テロップの一覧の順。設定は入らない (popup にある)
-    expect(body.children.length).toBe(2);
-    expect(body.children[0]?.querySelectorAll("[data-role='segment']").length).toBe(1);
-    expect(body.children[1]?.querySelector("[data-role='add-telop']")).not.toBeNull();
-    expect(body.children[1]?.querySelectorAll("[data-role='telop']").length).toBe(1);
+    // 文字起こしの欄 → 区間の一覧 → テロップの一覧の順。設定は入らない (popup にある)
+    expect(body.children.length).toBe(3);
+    expect(body.children[0]?.getAttribute("data-role")).toBe("transcript");
+    expect(body.children[1]?.querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(body.children[2]?.querySelector("[data-role='add-telop']")).not.toBeNull();
+    expect(body.children[2]?.querySelectorAll("[data-role='telop']").length).toBe(1);
     expect(body.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
 
     const bar = barElement();
@@ -2875,9 +2876,9 @@ describe("区間・テロップの窓", () => {
     expect(listElement().hidden).toBe(false);
   });
 
-  test("区間が 0 個なら区間・テロップの窓を出さない", async () => {
+  test("区間が 0 個でも、動画ページでは区間・テロップの窓 (文字起こしの欄) を出す", async () => {
     await flush();
-    expect(listElement().hidden).toBe(true);
+    expect(listElement().hidden).toBe(false);
   });
 
   test("バーを 2 回作り直しても、区間・テロップの窓と一覧は 1 つずつ", async () => {
@@ -2931,7 +2932,7 @@ describe("区間・テロップの窓", () => {
     expect(listElement().hidden).toBe(false);
   });
 
-  test("別の動画へ移ると一覧を空にして区間・テロップの窓を隠す。戻れば出す", async () => {
+  test("別の動画へ移ると一覧を空にするが、区間・テロップの窓 (文字起こしの欄) は出たまま。戻れば一覧も戻る", async () => {
     await showEdit([TELOP]);
     expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
 
@@ -2942,7 +2943,7 @@ describe("区間・テロップの窓", () => {
 
     expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(0);
     expect(listBody().querySelectorAll("[data-role='telop']").length).toBe(0);
-    expect(listElement().hidden).toBe(true);
+    expect(listElement().hidden).toBe(false);
 
     history.pushState({}, "", "/watch?v=video-a");
     document.body.append(document.createElement("div"));
@@ -4106,12 +4107,13 @@ describe("ドック枠とタブ", () => {
     expect(slot.contains(listElement())).toBe(true);
   });
 
-  test("別の動画へ移ると区間・テロップのタブが消えて右の枠が隠れ、戻ると出る", async () => {
+  test("別の動画へ移っても区間・テロップのタブ (文字起こしの欄) は残り、区間の一覧は空。戻っても出ている", async () => {
     history.pushState({}, "", "/watch?v=video-b");
     document.body.append(document.createElement("div"));
     await flush();
-    expect(tabLabels("side")).toEqual([]);
-    expect(slotElement("side").style.display).toBe("none");
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(slotElement("side").style.display).toBe("block");
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(0);
 
     history.pushState({}, "", "/watch?v=video-a");
     document.body.append(document.createElement("div"));

@@ -50,11 +50,20 @@ import { createTelopTrack, type TelopTrack } from "@/content/telop-track";
 import { YT_SELECTORS } from "@/content/selectors";
 import { createSwitchDriver } from "@/content/switch-driver";
 import {
+  TRANSCRIPT_SOURCE_LABEL,
   createDefaultTranscriptLoader,
   transcriptLogLine,
   type TranscriptLoader,
   type TranscriptStatus,
 } from "@/content/transcript-loader";
+import { createTranscriptPanel, type TranscriptPanel, type TranscriptView } from "@/content/transcript-panel";
+import {
+  isLineInSegments,
+  lineIdsBetween,
+  setLinesSelected,
+  toggleTelopHidden,
+  type Clip,
+} from "@/content/transcript-selection";
 import {
   TelopRenderError,
   assertTelopRenderable,
@@ -85,6 +94,7 @@ import {
   type Settings,
 } from "@/shared/settings";
 import { MAX_TELOP_TEXT_LENGTH, hasRenderableTelops } from "@/shared/telop";
+import type { TranscriptLine } from "@/shared/transcript";
 import { telopStyleOf, type TelopStyle } from "@/shared/telop-style";
 import { DEFAULT_MAX_CLIP_SEC, formatTime, validateRange } from "@/shared/time";
 import { isOverLimit, totalSec } from "@/shared/timeline";
@@ -353,6 +363,8 @@ let captureRun = 0;
 function send(
   event: ClipEvent,
   accepted?: (state: ClipState) => boolean,
+  /** 届かなかった・応答が無かったときに呼ぶ */
+  undelivered?: () => void,
 ): void {
   // 応答が届くまでにオフにした・作り直したら、画面に触らない (isCurrentRun の doc)
   const id = runId;
@@ -362,6 +374,7 @@ function send(
       if (!isCurrentRun(id)) return;
       if (response === undefined) {
         setStatus("拡張から応答がありませんでした");
+        undelivered?.();
         return;
       }
       if (accepted === undefined || accepted(response.state)) return;
@@ -376,6 +389,7 @@ function send(
     .catch((error: unknown) => {
       if (!isCurrentRun(id)) return;
       setStatus(`操作を送信できませんでした: ${String(error)}`);
+      undelivered?.();
     });
 }
 
@@ -483,8 +497,13 @@ function selectedSegment(): ClipRange | null {
  * 再生画面から離れること自体は異常ではないので、例外にはしない。
  */
 function currentVideoId(): string | null {
+  return videoIdOf(location.href);
+}
+
+/** URL の動画 ID。動画ページでなければ null */
+function videoIdOf(href: string): string | null {
   try {
-    return parseVideoId(location.href);
+    return parseVideoId(href);
   } catch {
     return null;
   }
@@ -1224,13 +1243,11 @@ function resetWindow(id: WindowId): void {
  *
  * どれも隠すのは、覚えた位置を読み込む前 / 全画面 / 動画ページ以外 (動画ページ以外ではページからも外す。
  * leaveVideoPage)。そのうえで、バーは中身の根 (BAR_ID) がバーの窓の中にある間 (文書につながっているかは見ない。
- * barPart)、区間・テロップの窓は一覧のどちらかが見えている間 (一覧は中身が無いと自分で
- * 隠れる) だけ出す
+ * barPart) だけ出す。区間・テロップの窓は、文字起こしの欄があるので動画ページではいつも出す
  */
 function refreshWindows(): void {
-  const listShown = [segmentList?.element, telopList?.element].some(
-    (part) => part !== undefined && !part.hidden,
-  );
+  // 文字起こしの欄があるので、区間・テロップの窓は動画ページではいつも出す (区間が無くても行を選べる)
+  const listShown = transcriptPanel !== null;
   // **`!= null` にする。** jsdom は fullscreenElement を持たず undefined を返すので、
   // `!== null` だとテストで常に全画面扱いになる。body 直下の fixed 要素は全画面の
   // 動画の上に残りうるので、全画面では出さない
@@ -1332,6 +1349,7 @@ function refreshLists(): void {
   segmentList?.update(segments, selectedIndex, maxClipSec);
   telopList?.setEnabled(canEditTelops());
   telopList?.update(telops, segments);
+  refreshTranscript();
   refreshTelopTrack();
   refreshWindows();
 }
@@ -1389,6 +1407,14 @@ function applyStateToDisplay(state: ClipState): void {
   const previous = selectedSegment();
 
   busy = BUSY_KINDS.has(state.kind);
+  // 欄の押せる / 押せないは refreshLists の中で決まるので、その前に今の種類を書く
+  lastKind = state.kind;
+  failedKeepsClip = state.kind === "failed" && state.segments.length > 0;
+  // 欄から送った組の答えが届いたら、待つのをやめる。録画などほかの種類になっても捨てる。
+  // 途中の答え (先に送った組) が届いた間は待ち続ける (後から送った組が本当の行き先)
+  if (pendingClip !== null && (isClipOf(state, pendingClip) || (state.kind !== "ready" && state.kind !== "idle"))) {
+    pendingClip = null;
+  }
   // 作り直しの確かめは、状態が届いたらやり直す (確かめた区間とテロップが変わっているかもしれない)
   startOverArmed = false;
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
@@ -1472,8 +1498,6 @@ function applyStateToDisplay(state: ClipState): void {
   // 一覧と窓の表示が決まってから送る (出す → 送る の順)
   if (revealSegment) revealRow(segmentList?.element, "segment", selectedIndex);
   if (revealTelop) revealRow(telopList?.element, "telop");
-
-  lastKind = state.kind;
 
   // 選んでいる区間が変わったら、範囲と秒数を状態の欄に出す (IN / OUT / ＋ 区間を追加の答え)。ready のときだけ:
   // 録画中・プレビュー・失敗などは、それぞれの文言を上で出している
@@ -1968,6 +1992,15 @@ function buildBar(): HTMLElement {
     onText: onTelopText,
   });
 
+  // 文字起こしの欄 (ADR 0001)。区間・テロップの窓の先頭に置く。区間とテロップの一覧は 1c まで欄の下に残す
+  transcriptPanel = createTranscriptPanel({
+    onToggle: onToggleLine,
+    onEditText: onEditLineText,
+    onToggleHidden: onToggleLineHidden,
+    onPlay: onPlayLine,
+    onRetry: () => transcriptLoader?.retry(),
+  });
+
   // バーは拡大バー → テロップの帯の段 → 操作の行だけ。拡大バーは幅がそのまま精度になるので、
   // 一覧の窓の幅には縮めず、幅を変えられるバーの窓に入れる (右側パネルの spec §1、フロートの窓の
   // spec A.1)。帯の段は拡大バーのトラックの**下**に置く: トラックの中に重ねると、区間のハンドルと
@@ -1975,7 +2008,7 @@ function buildBar(): HTMLElement {
   bar.append(rangeBar.element, telopTrack.element, row);
   // 一覧は区間・テロップの窓へ (窓の分割の spec C1.4)。**中身ごと入れ替える。**
   // 足すだけにすると、バーを作り直すたびに古い一覧が残って 2 重になる
-  listWindow.body.replaceChildren(segmentList.element, telopList.element);
+  listWindow.body.replaceChildren(transcriptPanel.element, segmentList.element, telopList.element);
   return bar;
 }
 
@@ -1988,7 +2021,9 @@ function buildBar(): HTMLElement {
 function watchPlayhead(): void {
   const step = (): void => {
     try {
-      rangeBar?.setPlayhead(getVideo().currentTime);
+      const time = getVideo().currentTime;
+      rangeBar?.setPlayhead(time);
+      transcriptPanel?.setCurrentTime(time);
     } catch {
       // 動画要素がまだ無いか差し替えの最中。位置を示しようがないので消す。
       // ここで投げると監視が止まり、以降ずっと更新されなくなる
@@ -2035,15 +2070,210 @@ function watchPlayerSize(): void {
 
 /** 文字起こしの用意 (ADR 0002)。オンの間だけある (start() が作り、stop() が外す) */
 let transcriptLoader: TranscriptLoader | null = null;
+/** 文字起こしの欄 (区間・テロップの窓の先頭)。バーと一緒に buildBar が作り直す */
+let transcriptPanel: TranscriptPanel | null = null;
+/** 文字起こしの最新の状態 (loader から)。欄を描き直すときに読む */
+let transcriptStatus: TranscriptStatus = { kind: "idle" };
+/** 直前に押した行 (Shift + クリックの起点) */
+let anchorLineId: string | null = null;
+/** 欄から送ったけれど、状態機械の答えがまだ届いていない組 (clipBase の doc) */
+let pendingClip: Clip | null = null;
+/** 外した行のテロップの文字 (行の id ごと)。入れ直したら戻す。動画が変わったら捨てる */
+const editedLineTexts = new Map<string, string>();
+/** 届いた状態が failed で、RETRY で戻れる区間を持っている (欄を押せなくする) */
+let failedKeepsClip = false;
 
 /**
- * 文字起こしの状態が変わった。段階 1a では表示する欄がまだ無いので、結末だけをコンソールに 1 行残す
+ * 文字起こしの状態が変わった。欄を描き直し、結末をコンソールに 1 行残す
  * (確かめ方は docs/manual-check.md の「文字起こし (公式字幕)」)。オフの後に届いたものは出さない
  */
 function onTranscriptStatus(status: TranscriptStatus): void {
   if (!running) return;
+  transcriptStatus = status;
   const line = transcriptLogLine(status);
   if (line !== null) console.info(line);
+  refreshTranscript();
+}
+
+/** 今の動画の文字起こしの行。今の動画のものでなければ空 */
+function transcriptLines(): TranscriptLine[] {
+  const status = transcriptStatus;
+  return status.kind === "ready" && status.videoId === currentVideoId() ? status.transcript.lines : [];
+}
+
+/**
+ * 文字起こしの欄で区間を変えてよいか。録画中・録画した後 (preview / composing / degraded) と、やり直せる区間を持つ
+ * failed では変えない (状態機械の SET_CLIP と同じ規則)。**今届いた状態の種類で見る**
+ * (applyStateToDisplay は refreshLists より前に lastKind と failedKeepsClip を書く)
+ */
+function canEditFromTranscript(): boolean {
+  if (busy) return false;
+  if (lastKind === "failed") return !failedKeepsClip;
+  return lastKind === "idle" || lastKind === "ready" || lastKind === "posted";
+}
+
+/**
+ * 欄の操作の元にする区間とテロップ。**送ったけれど答えがまだ来ていない組があれば、それを元にする。**
+ * SET_CLIP は丸ごと差し替えるので、答えを待つ間にもう 1 行押したとき、手元の写しから作ると先に押した行が消える
+ * (service worker が寝ていると答えまで数百 ms かかる)。描くのは今までどおり状態機械の答えが届いてから
+ */
+function clipBase(): Clip {
+  return pendingClip ?? listedItems();
+}
+
+/** 届いた状態が、送った組そのものか (区間が空なら idle) */
+function isClipOf(state: ClipState, clip: Clip): boolean {
+  if (clip.segments.length === 0) return state.kind === "idle";
+  return (
+    state.kind === "ready" &&
+    JSON.stringify(state.segments) === JSON.stringify(clip.segments) &&
+    JSON.stringify(state.telops) === JSON.stringify(clip.telops)
+  );
+}
+
+/**
+ * 欄から組を送る。拒まれたら (別の経路で録画に入った後など) 「受け付けられませんでした」を出し、待つ組を捨てる。
+ * **届かなかったときも捨てる** (残ると、＋ 区間を追加などほかの経路の結果を、欄の次の操作が上書きする)
+ */
+function sendClip(next: Clip): void {
+  pendingClip = next;
+  cancelPreviewWatch();
+  const drop = (): void => {
+    if (pendingClip === next) pendingClip = null;
+  };
+  send(
+    { type: "SET_CLIP", segments: next.segments, telops: next.telops, meta: getVideoMeta() },
+    (state) => {
+      const ok = isClipOf(state, next);
+      if (!ok) drop();
+      return ok;
+    },
+    drop,
+  );
+}
+
+/** 欄を今の状態で描き直す。区間に入っているかは状態機械の区間から決める (欄は選択を持たない) */
+function refreshTranscript(): void {
+  if (transcriptPanel === null) return;
+  const status = transcriptStatus;
+  // 前の動画の知らせ (吹き替え・字幕が無い・取れなかった) を、別の動画へ移った直後に出さない
+  const forThisVideo = status.kind !== "idle" && status.videoId === currentVideoId();
+  const { segments, telops } = listedItems();
+  const lines = transcriptLines();
+  const telopByLine = new Map(telops.filter((telop) => telop.lineId !== undefined).map((telop) => [telop.lineId, telop]));
+  const header: TranscriptView["header"] = !forThisVideo
+    ? { kind: "loading" }
+    : status.kind === "ready"
+      ? { kind: "ready", label: TRANSCRIPT_SOURCE_LABEL[status.transcript.source] }
+      : status.kind === "none"
+        ? { kind: "none" }
+        : status.kind === "failed"
+          ? { kind: "failed", reason: status.reason }
+          : { kind: "loading" };
+  transcriptPanel.update({
+    header,
+    dubbed: forThisVideo && (status.kind === "ready" || status.kind === "none") && status.dubbed,
+    enabled: canEditFromTranscript(),
+    rows: lines.map((line) => {
+      const selected = isLineInSegments(line, segments);
+      const telop = telopByLine.get(line.id);
+      return {
+        id: line.id,
+        startSec: line.startSec,
+        text: selected && telop !== undefined && telop.text !== "" ? telop.text : line.text,
+        selected,
+        hidden: selected && telop !== undefined && telop.text === "",
+        hasTelop: selected && telop !== undefined,
+      };
+    }),
+  });
+}
+
+/** 動画の長さ。分からなければ Infinity (区間の尻を止めない) */
+function videoDurationSec(): number {
+  const duration = getVideo().duration;
+  return Number.isFinite(duration) && duration > 0 ? duration : Number.POSITIVE_INFINITY;
+}
+
+/** 行を押した。入っていれば外し、入っていなければ入れる。Shift なら直前に押した行からまとめて */
+function onToggleLine(lineId: string, extend: boolean): void {
+  if (!canEditFromTranscript()) {
+    // 録画中は「録画中… (N秒)」を上書きしない (欄が薄いことで押せないと分かる)
+    if (!busy) setStatus("いまは区間を変えられません");
+    return;
+  }
+  const lines = transcriptLines();
+  const line = lines.find((item) => item.id === lineId);
+  if (line === undefined) return;
+  // 別の動画の区間は持ち越さない (listedItems は別の動画では空を返す)
+  const base = clipBase();
+  const selected = !isLineInSegments(line, base.segments);
+  const ids = extend && anchorLineId !== null ? lineIdsBetween(lines, anchorLineId, lineId) : [lineId];
+  const next = setLinesSelected(base, lines, ids, selected, videoDurationSec());
+  // 1 つの区間が上限を超えるなら送らない。拡大バーは 1 区間を上限より長くできず、つまみが跳ぶ (clampHandle)
+  const tooLong = next.segments.find(
+    (segment) => segment.endSec - segment.startSec > maxClipSec && !base.segments.some((old) => sameRange(old, segment)),
+  );
+  if (tooLong !== undefined) {
+    setStatus(`1 つの区間は ${maxClipSec} 秒までです。行を分けて選んでください (設定で上限を変えられます)`);
+    return;
+  }
+  // 起点は送るときだけ動かす (拒んだ Shift + クリックで起点がずれない)
+  anchorLineId = lineId;
+  // 外した行の直した文字を覚え、入れ直したら戻す (続けて 2 回押すと、外して入れ直すことになる)
+  const pickedIds = new Set(ids);
+  if (!selected) {
+    for (const telop of base.telops) {
+      if (telop.lineId !== undefined && pickedIds.has(telop.lineId)) editedLineTexts.set(telop.lineId, telop.text);
+    }
+  }
+  const telops = selected
+    ? next.telops.map((telop) => {
+        const remembered = telop.lineId === undefined || base.telops.includes(telop) ? undefined : editedLineTexts.get(telop.lineId);
+        return remembered === undefined ? telop : { ...telop, text: remembered };
+      })
+    : next.telops;
+  // 押した行を含む区間を選ぶ (拡大バーがその区間になる)
+  const holding = next.segments.find((segment) => isLineInSegments(line, [segment]));
+  if (holding !== undefined) selectRangeOnNextState = holding;
+  sendClip({ segments: next.segments, telops });
+}
+
+/** 行の文字を直した。その行のテロップの文字にする (送らなかったら false。直す欄を閉じない) */
+function onEditLineText(lineId: string, text: string): boolean {
+  if (!canEditFromTranscript()) return false;
+  if (text.length > MAX_TELOP_TEXT_LENGTH) {
+    setStatus(`テロップは ${MAX_TELOP_TEXT_LENGTH} 文字までです (いま ${text.length} 文字)`);
+    return false;
+  }
+  const base = clipBase();
+  if (!base.telops.some((telop) => telop.lineId === lineId)) return false;
+  sendClip({
+    segments: base.segments,
+    telops: base.telops.map((telop) => (telop.lineId === lineId ? { ...telop, text } : telop)),
+  });
+  return true;
+}
+
+/** 「字幕に出さない」/「字幕に出す」 */
+function onToggleLineHidden(lineId: string): void {
+  if (!canEditFromTranscript()) return;
+  const line = transcriptLines().find((item) => item.id === lineId);
+  if (line === undefined) return;
+  const next = toggleTelopHidden(clipBase(), line);
+  if (next === null) return;
+  sendClip(next);
+}
+
+/**
+ * 行の時刻を押した。その行の頭から再生する。**録画中は動かさない** (録画が壊れる。playTelop と同じ)。
+ * 録画中は「録画中… (N秒)」を上書きしないよう、何も言わない
+ */
+function onPlayLine(lineId: string): void {
+  if (busy) return;
+  const line = transcriptLines().find((item) => item.id === lineId);
+  if (line === undefined) return;
+  void onSeekPlay(line.startSec);
 }
 
 function mount(): void {
@@ -2393,7 +2623,15 @@ let themeObserver!: MutationObserver;
 /** YouTube は SPA 遷移するため DOM 変化を監視して再マウントする */
 function onPageMutated(): void {
   if (location.href !== lastHref) {
+    // 前の動画の行の起点と直した文字を持ち越さない。同じ動画で URL だけ変わったとき (&t= など) は捨てない
+    // (捨てると、答えを待つ間に先に押した行が消える)
+    const previousVideoId = videoIdOf(lastHref);
     lastHref = location.href;
+    if (currentVideoId() !== previousVideoId) {
+      anchorLineId = null;
+      pendingClip = null;
+      editedLineTexts.clear();
+    }
     lastHrefIsVideoPage = currentVideoId() !== null;
     // 動画ページへ戻ったら、外していた窓を先に body へ戻す。下の refreshLists が窓を出した直後に最初の位置を
     // 取り直す (placeInitial) ので、文書に無い窓 (寸法 0) を測らせない
@@ -2451,6 +2689,12 @@ function resetModuleState(): void {
   rangeVideoId = null;
   busy = false;
   rangeEditable = false;
+  transcriptPanel = null;
+  transcriptStatus = { kind: "idle" };
+  anchorLineId = null;
+  pendingClip = null;
+  editedLineTexts.clear();
+  failedKeepsClip = false;
   cancelWatch = null;
   cancelPreview = null;
   handle = null;
