@@ -1,6 +1,6 @@
 import {
   clampHandle,
-  computeWindow,
+  computeTrimWindow,
   ratioToTime,
   timeToRatio,
   type HandleKind,
@@ -240,7 +240,7 @@ export function createRangeBar(callbacks: RangeBarCallbacks): RangeBar {
 
     update(nextRange: ClipRange, videoDurationSec: number): void {
       range = nextRange;
-      window_ = computeWindow(nextRange, videoDurationSec);
+      window_ = computeTrimWindow(nextRange, videoDurationSec);
       updated = true;
       paint();
     },

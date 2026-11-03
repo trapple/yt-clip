@@ -3,6 +3,7 @@ import {
   DEFAULT_MAX_CLIP_SEC,
   MIN_CLIP_SEC,
   formatTime,
+  formatTimeCentis,
   toUrlSeconds,
   validateRange,
 } from "@/shared/time";
@@ -102,5 +103,18 @@ describe("最大秒数を差し替える", () => {
     if (result.ok) throw new Error("通ってはいけない");
     expect(result.message).toContain("10 秒までです");
     expect(result.message).toContain("30 秒");
+  });
+});
+
+describe("formatTimeCentis", () => {
+  test("100 分の 1 秒まで出す", () => {
+    expect(formatTimeCentis(741.4)).toBe("12:21.40");
+    expect(formatTimeCentis(5)).toBe("0:05.00");
+    expect(formatTimeCentis(3723.456)).toBe("1:02:03.46");
+  });
+
+  test("繰り上がりで秒の桁が 60 にならない", () => {
+    // 59.996 を秒と 100 分の 1 で別々に丸めると 0:59.100 や 0:60.00 になる
+    expect(formatTimeCentis(59.996)).toBe("1:00.00");
   });
 });

@@ -40,6 +40,18 @@ export function formatTime(totalSec: number): string {
   return `${hours}:${String(minutes).padStart(2, "0")}:${ss}`;
 }
 
+/**
+ * 再生位置を 100 分の 1 秒まで出す (m:ss.cc / h:mm:ss.cc)。詰める欄の見出しに使う (0.1 秒ずつ詰めるので、秒までだと
+ * 押しても変わって見えない)。**先に 100 分の 1 秒に丸めてから割る** (秒と端数を別々に丸めると 0:60.00 ができる)
+ */
+export function formatTimeCentis(totalSec: number): string {
+  assertPlayableSeconds(totalSec, "再生位置");
+  const centis = Math.round(totalSec * 100);
+  const whole = Math.floor(centis / 100);
+  const fraction = String(centis % 100).padStart(2, "0");
+  return `${formatTime(whole)}.${fraction}`;
+}
+
 /** YouTube URL の t= に載せる整数秒へ変換する */
 export function toUrlSeconds(sec: number): number {
   assertPlayableSeconds(sec, "再生位置");
