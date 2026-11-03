@@ -14,9 +14,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function memoryStorage(initial: Record<string, unknown> = {}, quota = Infinity) {
+function memoryStorage(initial: Record<string, unknown> = {}, quota = Infinity, listable = true) {
   const data: Record<string, unknown> = { ...initial };
   const storage: TranscriptStorage = {
+    keys: () => (listable ? Promise.resolve(Object.keys(data)) : null),
     get: async (keys) => Object.fromEntries(keys.filter((key) => key in data).map((key) => [key, data[key]])),
     set: async (items) => {
       const next = { ...data, ...items };
@@ -91,6 +92,49 @@ describe("saveTranscript / loadTranscript", () => {
       { videoId: "c", savedAt: 3 },
       { videoId: "b", savedAt: 2 },
     ]);
+  });
+
+  test("保存のたびに、索引から漏れた文字起こしを消す (prefix の違う鍵と索引にある鍵は残す)", async () => {
+    const { storage, data } = memoryStorage({
+      "transcript:a": transcript("a", 1),
+      "transcript:orphan": transcript("orphan", 0),
+      transcriptIndex: [{ videoId: "a", savedAt: 1 }],
+      windowLayout: { kept: true },
+    });
+    await saveTranscript(transcript("b", 2), storage);
+    expect(Object.keys(data).sort()).toEqual(["transcript:a", "transcript:b", "transcriptIndex", "windowLayout"]);
+  });
+
+  test("鍵の一覧を取れない環境では掃除を飛ばす", async () => {
+    const { storage, data } = memoryStorage({ "transcript:orphan": transcript("orphan", 0) }, Infinity, false);
+    await saveTranscript(transcript("b", 2), storage);
+    expect(data["transcript:orphan"]).toBeDefined();
+  });
+
+  test("掃除の直前に別のタブが書いた索引の鍵は消さない", async () => {
+    const { storage, data } = memoryStorage({});
+    const racing: TranscriptStorage = {
+      ...storage,
+      keys: () => {
+        // 鍵を数えた直後に、別のタブが c を保存して索引に載せた
+        data["transcript:c"] = transcript("c", 3);
+        data.transcriptIndex = [{ videoId: "c", savedAt: 3 }, { videoId: "b", savedAt: 2 }];
+        return Promise.resolve(Object.keys(data));
+      },
+    };
+    await saveTranscript(transcript("b", 2), racing);
+    expect(data["transcript:c"]).toBeDefined();
+    expect(data["transcript:b"]).toBeDefined();
+  });
+
+  test("掃除に失敗しても保存は通す (warn を残す)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { storage, data } = memoryStorage();
+    const failing: TranscriptStorage = { ...storage, keys: () => Promise.reject(new Error("boom")) };
+    await saveTranscript(transcript("b", 2), failing);
+    expect(data["transcript:b"]).toBeDefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("boom"));
+    warn.mockRestore();
   });
 
   test("容量以外の失敗では、古いものを消さずにそのまま throw する", async () => {
