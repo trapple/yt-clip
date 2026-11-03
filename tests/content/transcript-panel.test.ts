@@ -525,6 +525,17 @@ describe("検索 (ADR 0004)", () => {
     expect(role("search-count")?.textContent).toBe("1 / 2");
   });
 
+  test("修飾キー付きの ↑ ↓ は文字の選択に渡し、当たりを移らない", () => {
+    const { panel } = setup();
+    panel.update(many());
+    type("右");
+    // 1 回ごとに見る (偶数回まとめて押すと、2 件を 1 周して同じ所に戻り見分けられない)
+    for (const init of [{ shiftKey: true }, { metaKey: true }, { ctrlKey: true }, { altKey: true }]) {
+      key(searchInput(), { key: "ArrowDown", ...init });
+      expect(role("search-count")?.textContent).toBe("1 / 2");
+    }
+  });
+
   test("揃えると同じ文字 (後ろに空白を打った) なら、今の当たりを 1 件目へ戻さない", () => {
     const { panel } = setup();
     panel.update(many());

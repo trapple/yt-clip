@@ -301,10 +301,12 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
     event.stopPropagation();
     // IME の変換を確かめる Enter / 取り消す Esc / 候補を選ぶ ↑↓ は、検索欄のものではない
     if (event.isComposing || event.keyCode === 229) return;
-    if ((event.key === "Enter" && !event.shiftKey) || event.key === "ArrowDown") {
+    // 修飾キー付きの ↑ ↓ (Shift で選ぶ・Cmd で端へ) は検索欄の文字の操作に渡す
+    const plainArrow = !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey;
+    if ((event.key === "Enter" && !event.shiftKey) || (event.key === "ArrowDown" && plainArrow)) {
       event.preventDefault();
       step(1);
-    } else if ((event.key === "Enter" && event.shiftKey) || event.key === "ArrowUp") {
+    } else if ((event.key === "Enter" && event.shiftKey) || (event.key === "ArrowUp" && plainArrow)) {
       event.preventDefault();
       step(-1);
     } else if (event.key === "Escape") {
