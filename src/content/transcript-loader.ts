@@ -69,12 +69,14 @@ export function createTranscriptLoader(deps: LoaderDeps): TranscriptLoader {
         const cached = await deps.loadCached(videoId);
         if (mine !== generation) return;
         if (cached !== null) {
+          // 行は先に出す (判定は広告の間は最長 3 分待つ。待つ間「取っています…」のままにしない)。吹き替えなら出し直す
+          set({ kind: "ready", videoId, transcript: cached, dubbed: false });
           // ※ 局所例外 (Fail Fast): 判定が読めなくても文字起こしは使える。知らせるだけの機能なので偽に倒し、理由は残す
           const dubbed = await deps.readDubbed(videoId, signal).catch((error: unknown) => {
             if (!signal.aborted) console.warn(`[yt-clip] 吹き替えの判定を読めませんでした: ${String(error)}`);
             return false;
           });
-          if (mine === generation) set({ kind: "ready", videoId, transcript: cached, dubbed });
+          if (dubbed && mine === generation) set({ kind: "ready", videoId, transcript: cached, dubbed: true });
           return;
         }
         const result = await deps.fetchOfficial(videoId, signal);
