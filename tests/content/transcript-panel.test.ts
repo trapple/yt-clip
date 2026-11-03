@@ -248,7 +248,7 @@ test("setCurrentTime で、再生位置を含む行 (その位置より前で最
 
 describe("区間の見出しと手入力の行 (段階 1c-2)", () => {
   const SEGMENT = { kind: "segment", index: 0, startSec: 64.8, endSec: 73.3, before: 1 } as const;
-  const MANUAL = { kind: "manual", telopIndex: 2, startSec: 66, endSec: 69, text: "ここ重要", inSegment: true, before: 2 } as const;
+  const MANUAL = { kind: "manual", telopIndex: 2, startSec: 66, endSec: 69, text: "ここ重要", inSegment: true, fromLine: false, before: 2 } as const;
   const listChildren = (): string[] =>
     [...(role("transcript-lines")?.children ?? [])].map((child) => {
       const el = child as HTMLElement;
@@ -305,6 +305,10 @@ describe("区間の見出しと手入力の行 (段階 1c-2)", () => {
     panel.update(view({ items: [{ ...MANUAL, text: "" }] }));
     expect(inManual("manual-text")?.textContent).toBe("（まだ書いていません）");
     expect(inManual("manual-text")?.dataset.empty).toBe("true");
+
+    // 区間から外れた、字幕に出さないにした行のテロップ。書いていないのとは違う
+    panel.update(view({ items: [{ ...MANUAL, text: "", fromLine: true }] }));
+    expect(inManual("manual-text")?.textContent).toBe("（字幕に出さない行）");
   });
 
   test("手入力の行の文字はタグとして解釈しない", () => {

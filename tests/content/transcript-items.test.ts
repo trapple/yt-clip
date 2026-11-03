@@ -63,8 +63,8 @@ describe("placeTranscriptItems", () => {
       ],
     );
     expect(items.filter((item) => item.kind === "manual")).toEqual([
-      { kind: "manual", telopIndex: 1, startSec: 2, endSec: 3, text: "ツッコミ", inSegment: true, before: 1 },
-      { kind: "manual", telopIndex: 2, startSec: 25, endSec: 28, text: "", inSegment: false, before: 4 },
+      { kind: "manual", telopIndex: 1, startSec: 2, endSec: 3, text: "ツッコミ", inSegment: true, fromLine: false, before: 1 },
+      { kind: "manual", telopIndex: 2, startSec: 25, endSec: 28, text: "", inSegment: false, fromLine: false, before: 4 },
     ]);
   });
 
@@ -91,5 +91,19 @@ describe("placeTranscriptItems", () => {
       ],
     );
     expect(items.filter((item) => item.kind === "manual").map((item) => item.kind === "manual" && item.telopIndex)).toEqual([1, 2]);
+    expect(items.every((item) => item.kind !== "manual" || item.fromLine)).toBe(true);
+  });
+
+  test("文字起こしを取っている間 (行がまだ無い) は、行から作ったテロップを手入力の行にしない (取り終わると行に戻るので、ちらつかせない)", () => {
+    const items = placeTranscriptItems(
+      [],
+      [{ startSec: 0.8, endSec: 3.3 }],
+      [
+        { startSec: 1, endSec: 3, text: "行 1", lineId: "youtube-asr:1.00" },
+        { startSec: 2, endSec: 3, text: "ツッコミ" },
+      ],
+      false,
+    );
+    expect(items.filter((item) => item.kind === "manual").map((item) => item.kind === "manual" && item.text)).toEqual(["ツッコミ"]);
   });
 });

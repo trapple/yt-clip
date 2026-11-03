@@ -90,6 +90,8 @@ const DUBBED_TEXT =
   "吹き替えの音声が流れています。字幕は元の音声のものなので、録画の音と合わないことがあります";
 const NONE_TEXT = "この動画には公式字幕がありません。IN / OUT で区間を作り、＋ ここに字幕を足す でテロップを足せます";
 const EMPTY_MANUAL_TEXT = "（まだ書いていません）";
+/** 区間から外れた、字幕に出さないにした行のテロップ (文字が空)。書いていないのとは違う */
+const HIDDEN_LINE_TEXT = "（字幕に出さない行）";
 const ADD_MANUAL_TITLE = "今の再生位置から 3 秒の字幕 (テロップ) を足す";
 const ADD_MANUAL_BLOCKED_TITLE = "先に区間を作ってください (行を押す・IN / OUT・＋ 区間を追加)";
 
@@ -436,8 +438,8 @@ export function createTranscriptPanel(callbacks: TranscriptPanelCallbacks): Tran
       body = document.createElement("span");
       body.dataset.role = "manual-text";
       body.dataset.empty = item.text === "" ? "true" : "false";
-      body.textContent = item.text === "" ? EMPTY_MANUAL_TEXT : item.text;
-      body.style.cssText = item.text === "" ? TRANSCRIPT_STYLE.manualEmpty : TRANSCRIPT_STYLE.text;
+      body.textContent = item.text !== "" ? item.text : item.fromLine ? HIDDEN_LINE_TEXT : EMPTY_MANUAL_TEXT;
+      body.style.cssText = item.text === "" ? TRANSCRIPT_STYLE.manualEmpty : TRANSCRIPT_STYLE.manualText;
     }
     const actions = document.createElement("span");
     actions.style.cssText = TRANSCRIPT_STYLE.manualActions;

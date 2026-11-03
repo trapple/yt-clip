@@ -26,6 +26,8 @@ export type ManualTelopItem = {
   text: string;
   /** どれかの区間に重なる (重ならないテロップは録画に出ない) */
   inSegment: boolean;
+  /** 字幕の行から作ったテロップ (区間から外れた・行が無くなった)。空の文字は「字幕に出さない」にした行 */
+  fromLine: boolean;
   before: number;
 };
 
@@ -47,6 +49,11 @@ export function placeTranscriptItems(
   lines: readonly TranscriptLine[],
   segments: readonly ClipRange[],
   telops: readonly Telop[],
+  /**
+   * 行を取り終えている (取っている間は false)。取っている間は行が空なので、行から作ったテロップが全部「行が無い」に見える。
+   * 取り終わると行へ戻るので、その間は出さない (直す欄を開いていると並びが変わって閉じる)。取れなかった・字幕が無いときは true
+   */
+  linesReady = true,
 ): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   segments.forEach((segment, index) => {
@@ -66,7 +73,7 @@ export function placeTranscriptItems(
   };
   telops.forEach((telop, telopIndex) => {
     // 字幕の行 (区間に入っている行) が出すテロップは出さない
-    if (telop.lineId !== undefined && attached(telop.lineId)) return;
+    if (telop.lineId !== undefined && (!linesReady || attached(telop.lineId))) return;
     items.push({
       kind: "manual",
       telopIndex,
@@ -74,6 +81,7 @@ export function placeTranscriptItems(
       endSec: telop.endSec,
       text: telop.text,
       inSegment: overlapsSegments(telop, [...segments]),
+      fromLine: telop.lineId !== undefined,
       before: firstLineAtOrAfter(lines, telop.startSec),
     });
   });

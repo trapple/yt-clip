@@ -192,6 +192,8 @@ export const TRANSCRIPT_STYLE = {
   manualOutside: `${TRANSCRIPT_MANUAL}background:transparent;border-left:3px dashed var(--ytc-border);opacity:0.7;`,
   manualMark: "color:var(--ytc-accent);font-size:10px;padding-top:3px;",
   manualEmpty: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);font-style:italic;`,
+  /** 改行だらけの文字 (500 文字まで入る) でも欄を埋めないよう、4 行ぶんで切る (全文は ✎ で見る) */
+  manualText: `${TRANSCRIPT_TEXT}color:var(--ytc-text);max-height:6em;overflow:hidden;`,
   manualActions: "grid-column:2 / -1;display:flex;gap:4px;flex-wrap:wrap;align-items:center;",
   outside: "color:var(--ytc-text-sub);font-size:11px;",
   edit: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;user-select:text;`,

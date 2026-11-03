@@ -2324,7 +2324,8 @@ function refreshTranscript(): void {
     dubbed: forThisVideo && (status.kind === "ready" || status.kind === "none") && status.dubbed,
     enabled: canEditFromTranscript(),
     // 区間の見出しと手入力の行 (lineId の無いテロップ。ADR 0003)
-    items: placeTranscriptItems(lines, segments, telops),
+    // 取っている間は、行から作ったテロップを手入力の行にしない (取り終わると行へ戻る)
+    items: placeTranscriptItems(lines, segments, telops, header.kind !== "loading"),
     trimmingIndex: segments.length === 0 ? -1 : selectedIndex,
     // 区間があり、テロップを変えられる (ready / posted で、範囲を作った動画を見ている)。canEditTelops は区間がある状態でしか true にならない
     canAddManual: canEditTelops(),
