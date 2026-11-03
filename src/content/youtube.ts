@@ -977,7 +977,6 @@ function sendRange(
   accepted: (state: ClipState) => boolean = (state) => hasSegment(state, range),
 ): void {
   rangeAwaiting = range;
-  const sentAt = drawCount;
   const settle = (): void => {
     if (rangeAwaiting === range) rangeAwaiting = null;
   };
@@ -988,7 +987,7 @@ function sendRange(
         settle();
         return false;
       }
-      drawAnswerIfSilent(state, sentAt, () => rangeAwaiting === range, settle);
+      drawAnswerIfSilent(state, () => rangeAwaiting === range, settle);
       return true;
     },
     settle,
@@ -996,17 +995,19 @@ function sendRange(
 }
 
 /**
- * 送った操作の答え (応答の状態) を、通知が来ないときの代わりに描く。router は通知を応答より先に送るので、ふつうは
- * もう描いている。上限が過ぎてもまだ待っていたら待ちを下ろし、送ってから何も描いていなければ答えの状態を描く。
- * 何か描いていれば、描いたのは答えの通知かそれより新しい状態なので、古い答えで戻さない
+ * 送った操作の答え (応答の状態) を、通知が来ないときの代わりに描く。**応答を受けた時点で呼ぶ。** 上限が過ぎてもまだ
+ * 待っていたら待ちを下ろし、応答を受けてから何も描いていなければ答えの状態を描く。router は通知を応答より先に送るので、
+ * 応答の後に描いたものは答えより新しい状態で、古い答えで戻さない。**送った時点を基準にしない** (行を続けて押すと、
+ * 先に送った組の通知 = 後の答えより古い状態を「描いた」と数え、後の組を描かずに待ちだけ下ろす。押した行が黙って消える)
  */
-function drawAnswerIfSilent(state: ClipState, sentAt: number, still: () => boolean, release: () => void): void {
+function drawAnswerIfSilent(state: ClipState, still: () => boolean, release: () => void): void {
   const id = runId;
+  const answeredAt = drawCount;
   setTimeout(() => {
     if (!isCurrentRun(id) || !still()) return;
     // 先に下ろす。描いて下ろすのに任せると、別の動画へ移った後 (答えを取り込まない) には永久に下りない
     release();
-    if (drawCount === sentAt) applyStateToDisplay(state);
+    if (drawCount === answeredAt) applyStateToDisplay(state);
   }, INDEXED_ANSWER_WAIT_MS);
 }
 
@@ -2464,7 +2465,6 @@ function isClipOf(state: ClipState, clip: Clip): boolean {
 function sendClip(next: Clip): void {
   pendingClip = next;
   cancelPreviewWatch();
-  const sentAt = drawCount;
   const drop = (): void => {
     if (pendingClip === next) pendingClip = null;
   };
@@ -2474,7 +2474,7 @@ function sendClip(next: Clip): void {
       const ok = isClipOf(state, next);
       if (!ok) drop();
       // 受け入れられたのに通知が落ちたら、上限の後に答えを描く (下りないと、IN / OUT・±0.1 まで待ったままになる)
-      else drawAnswerIfSilent(state, sentAt, () => pendingClip === next, drop);
+      else drawAnswerIfSilent(state, () => pendingClip === next, drop);
       return ok;
     },
     drop,

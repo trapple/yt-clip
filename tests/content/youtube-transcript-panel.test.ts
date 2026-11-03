@@ -34,6 +34,8 @@ let events: ClipEvent[] = [];
 let failNext = false;
 /** 真の間は、受け入れた操作の状態の通知を送らない (同報が落ちたとき) */
 let dropBroadcast = false;
+/** 真の間は、router と同じく状態の通知を応答より先に送る (既定は setTimeout で応答の後) */
+let broadcastFirst = false;
 
 async function flush(): Promise<void> {
   for (let round = 0; round < 6; round += 1) await new Promise((resolve) => setTimeout(resolve, 0));
@@ -106,6 +108,8 @@ beforeAll(async () => {
           // router と同じく、拒まれた遷移 (internal-error) は状態を変えない
           if (!(next.kind === "failed" && next.reason === "internal-error")) {
             if (dropBroadcast) state = next;
+            // 応答の解決より先に積む (router と同じく、通知が応答より先に届く)
+            else if (broadcastFirst) queueMicrotask(() => emit(next));
             else setTimeout(() => emit(next), 0);
             return { state: next };
           }
@@ -128,6 +132,7 @@ beforeEach(async () => {
   events = [];
   failNext = false;
   dropBroadcast = false;
+  broadcastFirst = false;
 });
 
 describe("文字起こしの欄 (段階 1b-2)", () => {
@@ -927,6 +932,29 @@ describe("区間とテロップを変える操作の待ち (1c-4)", () => {
       }
       await flush();
     });
+  });
+
+  test("行を続けて押した後に後の組の通知だけ落ちても、上限の後に後の組を描き、押した行を消さない (再レビュー)", async () => {
+    ready();
+    await flush();
+    vi.useFakeTimers();
+    try {
+      broadcastFirst = true;
+      events = [];
+      rows()[0]!.click();
+      dropBroadcast = true;
+      rows()[2]!.click();
+      dropBroadcast = false;
+      await vi.advanceTimersByTimeAsync(10);
+      // 先の組 (行 0) の通知だけが届いた
+      expect(rows().map((row) => row.dataset.selected)).toEqual(["true", "false", "false"]);
+      await vi.advanceTimersByTimeAsync(1600);
+      expect(rows().map((row) => row.dataset.selected)).toEqual(["true", "false", "true"]);
+    } finally {
+      dropBroadcast = false;
+      vi.useRealTimers();
+    }
+    await flush();
   });
 
   test("作り直しの IN の答えの前に OUT を押しても送らない (古い頭で OUT を作らない)", async () => {
