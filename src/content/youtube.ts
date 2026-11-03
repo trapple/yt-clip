@@ -1448,6 +1448,7 @@ function applyStateToDisplay(state: ClipState): void {
   // 位置で送った操作の答えが返った後に状態を描いたら、待つのをやめる (router は通知を応答より先に送るので、ふつうは
   // 応答の時点で済んでいる。応答の後に届いた状態は、答えを反映した後のもの)。区間を変えられない種類 (録画など) でも待たない
   lastAppliedKey = clipKey(state);
+  drawCount += 1;
   if (
     indexedAwaiting &&
     (indexedResult !== null || (state.kind !== "ready" && state.kind !== "posted" && state.kind !== "idle"))
@@ -2176,6 +2177,8 @@ let indexedAwaiting = false;
 let indexedResult: string | null = null;
 /** 最後に描いた状態の要約 (clipKey)。応答より先に通知を描いていたかを見る */
 let lastAppliedKey = "";
+/** 状態を描いた回数。位置で指す操作を送ってから 1 度でも描いたか (= 通知が来ている) を見る */
+let drawCount = 0;
 /** 外した行のテロップの文字 (行の id ごと)。入れ直したら戻す。動画が変わったら捨てる */
 const editedLineTexts = new Map<string, string>();
 /** 届いた状態が SET_CLIP を受けるか (acceptsSetClip)。欄の押せる / 押せないはこれで決める */
@@ -2242,6 +2245,7 @@ function sendIndexed(event: ClipEvent): boolean {
   indexedAwaiting = true;
   indexedResult = null;
   const id = runId;
+  const sentAt = drawCount;
   const settle = (): void => {
     indexedAwaiting = false;
     indexedResult = null;
@@ -2251,7 +2255,9 @@ function sendIndexed(event: ClipEvent): boolean {
     (state) => {
       // router は通知を応答より先に送るので、もう描いているかもしれない。描いていればここで待つのをやめる
       const key = clipKey(state);
-      if (key === lastAppliedKey) {
+      // 送ってから 1 度でも描いていれば、描いたのはこの答えの通知か、それより新しい状態。待つのをやめるだけにする
+      // (古い答えで描き直さない。後の操作の通知が応答より先に届いたとき、その結果を戻さない)
+      if (key === lastAppliedKey || drawCount !== sentAt) {
         settle();
         return true;
       }
@@ -2872,6 +2878,7 @@ function resetModuleState(): void {
   indexedAwaiting = false;
   indexedResult = null;
   lastAppliedKey = "";
+  drawCount = 0;
   if (indexedFallback !== null) clearTimeout(indexedFallback);
   indexedFallback = null;
   removedIndexOnNextState = null;
