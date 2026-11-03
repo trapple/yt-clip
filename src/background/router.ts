@@ -235,7 +235,7 @@ export function createRouter(
    *
    * @returns 適用前の状態。拒まれた場合は `null`
    */
-  async function apply(event: ClipEvent): Promise<ClipState | null> {
+  async function apply(event: ClipEvent, owner: number | null = null): Promise<ClipState | null> {
     const next = reduce(state, event);
     // FAIL は明示的な失敗通知であり、`reduce` の invalid() フォールバックとは
     // 区別する。区別しないと「FAIL はどの状態からでも受理される」という
@@ -248,6 +248,8 @@ export function createRouter(
       return null;
     }
 
+    // 受け入れたイベントを送ったタブを録画対象にする。publish が新しいタブへ通知を届けるよう、publish の前に書く
+    if (owner !== null) captureTabId = owner;
     const previous = state;
     await publish(next);
     return previous;
@@ -392,24 +394,19 @@ export function createRouter(
     // **区間を作るイベントはどちらも録画対象のタブを決める。** ＋ 区間を追加で
     // 作った最初の区間は MARK_IN ではなく ADD_SEGMENT で作られるため、
     // MARK_IN だけを見ていると captureTabId が null のまま録画に進み、
-    // recorder/start がどこへも飛ばずに seeking で固まる
-    if (
-      (event.type === "MARK_IN" || event.type === "ADD_SEGMENT") &&
-      senderTabId !== undefined
-    ) {
-      captureTabId = senderTabId;
-    }
+    // recorder/start がどこへも飛ばずに seeking で固まる。
     // **区間・テロップを動かしたタブ、録画を押したタブも録画対象にする (録画中でなければ)。** 区間を作ったタブを
     // 閉じても状態は ready のまま残る。別のタブで同じ動画を開いて IN (頭合わせ) や OUT を押したとき、そのタブを
     // 覚えないと、状態の通知も録画の指示もどこへも届かず、画面が変わらないまま録画が seeking で固まる。
-    // 録画中は奪わない (走っている録画のタブから指示を外さない)。popup からのイベントはタブを持たないので変えない
-    if (
+    // 録画中は奪わない (走っている録画のタブから指示を外さない)。popup からのイベントはタブを持たないので変えない。
+    // **ここでは移す先を決めるだけ。** 書くのは apply が受け入れたとき (拒まれた操作で録画対象を移さない)
+    const owner =
       senderTabId !== undefined &&
-      !BUSY_KINDS.has(state.kind) &&
-      TAB_OWNING_EVENTS.has(event.type)
-    ) {
-      captureTabId = senderTabId;
-    }
+      (event.type === "MARK_IN" ||
+        event.type === "ADD_SEGMENT" ||
+        (!BUSY_KINDS.has(state.kind) && TAB_OWNING_EVENTS.has(event.type)))
+        ? senderTabId
+        : null;
 
     // seek 完了は即座に反映しない。録画が始まってから recording へ進める
     if (event.type === "SEEK_DONE") {
@@ -417,7 +414,7 @@ export function createRouter(
       return;
     }
 
-    const previous = await apply(event);
+    const previous = await apply(event, owner);
     if (previous === null) return;
 
     // 副作用は「イベントが届いたから」ではなく「状態が実際に進んだから」実行する。

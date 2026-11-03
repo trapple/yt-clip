@@ -1180,3 +1180,29 @@ describe("区間の追加での録画対象タブ", () => {
     expect(h.sentToTab.slice(sentBefore).some((entry) => entry.tabId === 9)).toBe(false);
   });
 });
+
+describe("録画対象のタブ (1c-4)", () => {
+  test("拒まれたイベントでは録画対象のタブを移さない", async () => {
+    const persisted: Array<number | null> = [];
+    const h = makeHarness({ persist: async (snapshot) => void persisted.push(snapshot.captureTabId) });
+    await markRange(h.router, 1);
+    // タブ 2 から、無い区間を指す ADJUST_SEGMENT (状態機械が拒む)
+    await h.router.handle(
+      { type: "clip/event", event: { type: "ADJUST_SEGMENT", index: 5, range: { startSec: 1, endSec: 2 } } },
+      2,
+    );
+    h.sentToTab.length = 0;
+    await h.router.handle({ type: "clip/event", event: { type: "START_RECORDING" } });
+    expect(h.router.getState().kind).toBe("seeking");
+    expect(h.sentToTab.map((sent) => sent.tabId)).toEqual([1]);
+    expect(persisted.at(-1)).toBe(1);
+  });
+
+  test("受け入れたイベントでは送ったタブへ移し、その状態の通知もそのタブへ届ける", async () => {
+    const h = makeHarness();
+    await markRange(h.router, 1);
+    h.sentToTab.length = 0;
+    await h.router.handle({ type: "clip/event", event: { type: "MARK_OUT", index: 0, sec: 35 } }, 2);
+    expect(h.sentToTab).toContainEqual({ tabId: 2, message: { type: "state/changed", state: h.router.getState() } });
+  });
+});
