@@ -174,6 +174,9 @@ describe("fitToBudget", () => {
 test("isTranscript", () => {
   expect(isTranscript(transcript("a", 1))).toBe(true);
   expect(isTranscript({ ...transcript("a", 1), source: "other" })).toBe(false);
+  // 言語コードはページから届く。上限より長い保存値は読まない
+  expect(isTranscript({ ...transcript("a", 1), language: "x".repeat(36) })).toBe(false);
+  expect(isTranscript({ ...transcript("a", 1), language: "x".repeat(35) })).toBe(true);
   expect(isTranscript({ ...transcript("a", 1), lines: [{ id: "x", startSec: "0", endSec: 1, text: "" }] })).toBe(false);
   expect(isTranscript(null)).toBe(false);
 });

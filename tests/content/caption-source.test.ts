@@ -17,6 +17,8 @@ import {
 import {
   BRIDGE_REQUEST,
   BRIDGE_RESPONSE,
+  MAX_LANGUAGE_CODE_LENGTH,
+  MAX_TRACK_NAME_LENGTH,
   type BridgeAnswer,
   type CaptionTrack,
 } from "@/content/caption-bridge-protocol";
@@ -112,6 +114,31 @@ describe("fetchOfficialTranscript", () => {
         lines: [{ id: "youtube-manual:1.00", startSec: 1, endSec: 3, text: "こんにちは" }],
       },
     });
+  });
+
+  test("字幕の URL が頼んだ動画のものでなければ throw する (別の動画の字幕をこの動画の名で保存しない)", async () => {
+    const other = { ...track("ja", "asr"), baseUrl: "https://www.youtube.com/api/timedtext?v=other&lang=ja&kind=asr" };
+    const { deps: d, fetched } = deps({ answers: [{ ok: true, tracks: [other], potUrl: POT_URL, dubbed: false }] });
+    await expect(fetchOfficialTranscript("vid", d)).rejects.toThrow("別の動画の字幕が返りました");
+    expect(fetched).toEqual([]);
+    const noV = { ...track("ja", "asr"), baseUrl: "https://www.youtube.com/api/timedtext?lang=ja&kind=asr" };
+    const second = deps({ answers: [{ ok: true, tracks: [noV], potUrl: POT_URL, dubbed: false }] });
+    await expect(fetchOfficialTranscript("vid", second.deps)).rejects.toThrow("別の動画の字幕が返りました");
+  });
+
+  test("言語や名前が上限より長い字幕は候補から落とす (応答ごと捨てない)", async () => {
+    const longLanguage = { ...track("ja", "manual"), languageCode: "x".repeat(MAX_LANGUAGE_CODE_LENGTH + 1) };
+    const longName = { ...track("ja", "manual"), name: "x".repeat(MAX_TRACK_NAME_LENGTH + 1) };
+    const { deps: d } = deps({
+      answers: [{ ok: true, tracks: [longLanguage, longName, track("ja", "asr")], potUrl: POT_URL, dubbed: false }],
+    });
+    const result = await fetchOfficialTranscript("vid", d);
+    expect(result).toMatchObject({ kind: "ready", transcript: { source: "youtube-asr" } });
+    const onlyLong = deps({ answers: [{ ok: true, tracks: [longName], potUrl: POT_URL, dubbed: false }] });
+    expect(await fetchOfficialTranscript("vid", onlyLong.deps)).toEqual({ kind: "none", dubbed: false });
+    const edge = { ...track("ja", "manual"), name: "x".repeat(MAX_TRACK_NAME_LENGTH) };
+    const fits = deps({ answers: [{ ok: true, tracks: [edge], potUrl: POT_URL, dubbed: false }] });
+    expect(await fetchOfficialTranscript("vid", fits.deps)).toMatchObject({ kind: "ready" });
   });
 
   test("字幕が無ければ none", async () => {

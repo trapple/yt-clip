@@ -1,3 +1,4 @@
+import { MAX_LANGUAGE_CODE_LENGTH } from "@/content/caption-bridge-protocol";
 import { isFiniteNumber, isRecord } from "@/shared/guards";
 import type { Transcript, TranscriptLine } from "@/shared/transcript";
 
@@ -53,6 +54,7 @@ export function isTranscript(value: unknown): value is Transcript {
     typeof value.videoId === "string" &&
     (value.source === "youtube-manual" || value.source === "youtube-asr") &&
     typeof value.language === "string" &&
+    value.language.length <= MAX_LANGUAGE_CODE_LENGTH &&
     isFiniteNumber(value.savedAt) &&
     Array.isArray(value.lines) &&
     value.lines.every(isLine) &&
