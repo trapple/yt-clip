@@ -61,6 +61,7 @@ import {
   isLineInSegments,
   lineIdsBetween,
   setLinesSelected,
+  syncLineTelops,
   toggleTelopHidden,
   type Clip,
 } from "@/content/transcript-selection";
@@ -742,6 +743,19 @@ function rejectLongTelopText(text: string): boolean {
 }
 
 /** 最後の区間を消すとテロップも消えるので止める、の理由 (見出しの ✕ と欄の行で同じ文言) */
+/**
+ * 最後の区間と一緒に消えると作り直せないテロップの数。手入力の行・直した (字幕に出さないにした) 行・行が無い (取り直した、
+ * 取っている間) もの。**直していない行のテロップは数えない** (区間に入れ直せば syncLineTelops がまた作る)
+ */
+function irreplaceableTelops(telops: Telop[]): number {
+  const byId = new Map(transcriptLines().map((line) => [line.id, line]));
+  return telops.filter((telop) => {
+    if (telop.lineId === undefined) return true;
+    const line = byId.get(telop.lineId);
+    return line === undefined || telop.text !== line.text.slice(0, MAX_TELOP_TEXT_LENGTH);
+  }).length;
+}
+
 function telopsRemainMessage(count: number): string {
   return `テロップが ${count} 件残っています。先にテロップを消してください`;
 }
@@ -1580,6 +1594,8 @@ function applyStateToDisplay(state: ClipState): void {
       console.warn(`拡大バーの再描画に失敗しました: ${String(error)}`);
     }
   }
+  // 区間が変わった答え (ハンドル・±0.1・IN / OUT・＋ 区間を追加・見出しの ✕) を描いたら、区間に入っている行のテロップに揃える
+  syncTelopsToSegments();
 }
 
 /** 指定した範囲を通しで再生して内容を確認する */
@@ -1981,17 +1997,18 @@ function readChannel(): Channel | null {
 }
 
 /**
- * 区間を消す (欄の見出しの ✕)。**テロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
+ * 区間を消す (欄の見出しの ✕)。**作り直せないテロップが残っている間は最後の 1 区間を消させない。** 区間が 0 個に
  * なると状態機械は idle に戻り、手入力の文言もまとめて消える
  */
 function removeSegment(index: number): void {
   if (busy) return;
   if (index < 0 || index >= currentSegments.length) return;
-  if (currentSegments.length === 1 && currentTelops.length > 0) {
+  const remain = irreplaceableTelops(currentTelops);
+  if (currentSegments.length === 1 && remain > 0) {
     // 取っている間は、区間から外れた字幕の行のテロップを欄に出していない (placeTranscriptItems の linesReady)
     const loading = transcriptHeader(transcriptStatus, transcriptStatus.kind !== "idle" && transcriptStatus.videoId === currentVideoId()).kind === "loading";
     const hidden = loading && currentTelops.some((telop) => telop.lineId !== undefined);
-    setStatus(hidden ? `${telopsRemainMessage(currentTelops.length)} (文字起こしを取り終えると欄に出ます)` : telopsRemainMessage(currentTelops.length));
+    setStatus(hidden ? `${telopsRemainMessage(remain)} (文字起こしを取り終えると欄に出ます)` : telopsRemainMessage(remain));
     return;
   }
   if (!sendIndexed({ type: "REMOVE_SEGMENT", index })) return;
@@ -2194,6 +2211,24 @@ function onTranscriptStatus(status: TranscriptStatus): void {
   const line = transcriptLogLine(status);
   if (line !== null) console.info(line);
   refreshTranscript();
+  // 取り終えたら、先に IN / OUT で作っていた区間の中の行もテロップにする
+  syncTelopsToSegments();
+}
+
+/**
+ * **区間に入っている字幕の行 = テロップが出る** に揃える (回答 2026-11-03「区間に入った行は全部テロップに」)。状態機械は
+ * 文字起こしの行を知らないので、行を持っているこのタブが、区間が変わった答えを描いた後に SET_CLIP で揃える。
+ *
+ * 揃えるのは ready のときだけ (posted で SET_CLIP を送ると、投稿したクリップが外れる。範囲を触れば ready に戻ってから揃う)。
+ * 欄の組・位置で指す操作・±0.1 の答えを待っている間は揃えない (答えが届いて描いたときにまた呼ばれる)
+ */
+function syncTelopsToSegments(): void {
+  if (lastKind !== "ready" || !canEditTelops() || !transcriptEditable) return;
+  if (pendingClip !== null || indexedAwaiting || rangeAwaiting !== null) return;
+  const lines = transcriptLines();
+  if (lines.length === 0) return;
+  const next = syncLineTelops(listedItems(), lines, editedLineTexts);
+  if (next !== null) sendClip(next);
 }
 
 /** 今の動画の文字起こしの行を id で引く */
@@ -2407,8 +2442,8 @@ function onToggleLine(lineId: string, extend: boolean): void {
   }
   // **最後の区間が消えるとき、テロップが残るなら送らない** (見出しの ✕ と同じ守り)。区間が 0 個になると
   // 状態機械は idle に戻り、手で打ったテロップもまとめて消える
-  if (next.segments.length === 0 && next.telops.length > 0) {
-    setStatus(telopsRemainMessage(next.telops.length));
+  if (next.segments.length === 0 && irreplaceableTelops(next.telops) > 0) {
+    setStatus(telopsRemainMessage(irreplaceableTelops(next.telops)));
     return;
   }
   // 起点は送るときだけ動かす (拒んだ Shift + クリックで起点がずれない)

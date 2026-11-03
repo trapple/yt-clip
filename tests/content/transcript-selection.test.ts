@@ -3,6 +3,7 @@ import {
   isLineInSegments,
   lineIdsBetween,
   setLinesSelected,
+  syncLineTelops,
   toggleTelopHidden,
   type Clip,
 } from "@/content/transcript-selection";
@@ -214,3 +215,56 @@ describe("toggleTelopHidden", () => {
     expect(toggleTelopHidden(empty, lines[1]!)).toBeNull();
   });
 });
+
+describe("syncLineTelops (区間に入っている行 = テロップが出る)", () => {
+  // lines[0] = 0-2、lines[1] = 3-5、lines[2] = 6-8
+  const telopOf = (i: number, text?: string) => ({
+    startSec: lines[i]!.startSec,
+    endSec: lines[i]!.endSec,
+    text: text ?? lines[i]!.text,
+    lineId: lines[i]!.id,
+  });
+
+  test("揃っていれば null (送らない)", () => {
+    const clip: Clip = { segments: [{ startSec: -0.2, endSec: 2.3 }], telops: [telopOf(0)] };
+    expect(syncLineTelops(clip, lines, new Map())).toBeNull();
+  });
+
+  test("区間を広げて入った行のテロップを末尾に足す (前からのテロップの位置は動かさない)", () => {
+    const manual = { startSec: 1, endSec: 2, text: "手入力" };
+    const clip: Clip = { segments: [{ startSec: 0, endSec: 5.3 }], telops: [manual, telopOf(0)] };
+    expect(syncLineTelops(clip, lines, new Map())?.telops).toEqual([manual, telopOf(0), telopOf(1)]);
+  });
+
+  test("区間から外れた行のテロップを消し、直した文字を覚える。また入ると覚えた文字で戻す", () => {
+    const remembered = new Map<string, string>();
+    const narrowed = syncLineTelops(
+      { segments: [{ startSec: 0, endSec: 2.3 }], telops: [telopOf(0), telopOf(1, "直した")] },
+      lines,
+      remembered,
+    );
+    expect(narrowed?.telops).toEqual([telopOf(0)]);
+    expect(remembered.get(lines[1]!.id)).toBe("直した");
+
+    const widened = syncLineTelops({ segments: [{ startSec: 0, endSec: 5.3 }], telops: [telopOf(0)] }, lines, remembered);
+    expect(widened?.telops).toEqual([telopOf(0), telopOf(1, "直した")]);
+  });
+
+  test("手入力のテロップと、行が無くなった (取り直した) テロップは触らない", () => {
+    const manual = { startSec: 30, endSec: 31, text: "区間の外の手入力" };
+    const gone = { startSec: 1, endSec: 2, text: "消えた行", lineId: "youtube-manual:1.00" };
+    const clip: Clip = { segments: [{ startSec: 0, endSec: 2.3 }], telops: [manual, gone, telopOf(0)] };
+    expect(syncLineTelops(clip, lines, new Map())).toBeNull();
+  });
+
+  test("字幕に出さない (文字が空) の行は、区間に入っている間はそのまま", () => {
+    const clip: Clip = { segments: [{ startSec: 0, endSec: 2.3 }], telops: [telopOf(0, "")] };
+    expect(syncLineTelops(clip, lines, new Map())).toBeNull();
+  });
+
+  test("区間は変えない", () => {
+    const segments = [{ startSec: 0, endSec: 5.3 }];
+    expect(syncLineTelops({ segments, telops: [] }, lines, new Map())?.segments).toBe(segments);
+  });
+});
+
