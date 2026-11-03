@@ -13,7 +13,11 @@ import type { ClipRange, Telop } from "@/shared/types";
 /** 区間の見出し。`index` は状態機械の区間の位置 (時間順) */
 export type SegmentHeaderItem = { kind: "segment"; index: number; startSec: number; endSec: number; before: number };
 
-/** 手入力の行 = `lineId` の無いテロップ (ADR 0003)。`telopIndex` は状態機械のテロップの位置 */
+/**
+ * 手入力の行 = `lineId` の無いテロップ (ADR 0003)。`telopIndex` は状態機械のテロップの位置。
+ * **字幕の行に付いていないテロップもここに出す** (行が区間に入っていない・行が無い)。字幕の行は区間に入っている
+ * ときしかテロップを出さないので、ここで出さないと見えないまま残り、最後の区間を外せなくなる
+ */
 export type ManualTelopItem = {
   kind: "manual";
   telopIndex: number;
@@ -53,8 +57,16 @@ export function placeTranscriptItems(
     const before = previous !== undefined && isLineInSegments(previous, [segment]) ? at - 1 : at;
     items.push({ kind: "segment", index, startSec: segment.startSec, endSec: segment.endSec, before });
   });
+  // 行の id 引き。行から作ったテロップがあるときだけ作る (8000 行を毎回引かない)
+  let byId: Map<string, TranscriptLine> | null = null;
+  const attached = (lineId: string): boolean => {
+    byId ??= new Map(lines.map((line) => [line.id, line]));
+    const line = byId.get(lineId);
+    return line !== undefined && isLineInSegments(line, [...segments]);
+  };
   telops.forEach((telop, telopIndex) => {
-    if (telop.lineId !== undefined) return;
+    // 字幕の行 (区間に入っている行) が出すテロップは出さない
+    if (telop.lineId !== undefined && attached(telop.lineId)) return;
     items.push({
       kind: "manual",
       telopIndex,

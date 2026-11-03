@@ -76,4 +76,20 @@ describe("placeTranscriptItems", () => {
     );
     expect(items.map((item) => (item.kind === "segment" ? "見出し" : item.text))).toEqual(["その前", "見出し", "頭から"]);
   });
+
+  test("区間から外れた字幕の行のテロップ・行が無くなったテロップも手入力の行として出す (見えないまま残さない)", () => {
+    const items = placeTranscriptItems(
+      LINES,
+      [{ startSec: 0.8, endSec: 3.3 }],
+      [
+        // 行 1 は区間に入っている: 字幕の行が出すので出さない
+        { startSec: 1, endSec: 3, text: "行 1", lineId: "youtube-asr:1.00" },
+        // 行 20 は区間に入っていない (見出しの ✕ で区間を消した後など)
+        { startSec: 20, endSec: 22, text: "行 20", lineId: "youtube-asr:20.00" },
+        // 取り直して行が無くなった
+        { startSec: 30, endSec: 31, text: "消えた行", lineId: "youtube-manual:30.00" },
+      ],
+    );
+    expect(items.filter((item) => item.kind === "manual").map((item) => item.kind === "manual" && item.telopIndex)).toEqual([1, 2]);
+  });
 });

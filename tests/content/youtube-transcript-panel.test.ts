@@ -576,4 +576,32 @@ describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
     await flush();
     expect(manualRows()).toHaveLength(0);
   });
+
+  test("見出しの ✕ で区間を消すと、その行のテロップは手入力の行として残り、✕ で消せる (見えないまま残さない)", async () => {
+    ready();
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 0.8, endSec: 3.3 }, { startSec: 6.8, endSec: 9.3 }],
+      telops: [
+        { startSec: 1, endSec: 3, text: "さあ残り 30 秒", lineId: "youtube-asr:1.00" },
+        { startSec: 7, endSec: 9, text: "えーと", lineId: "youtube-asr:7.00" },
+      ],
+      meta: META,
+    });
+    await flush();
+    expect(manualRows()).toHaveLength(0);
+    document.querySelectorAll<HTMLElement>("#yt-clip-list [data-role='segment']")[1]!
+      .querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(manualRows()).toHaveLength(1);
+    expect(manualRows()[0]!.querySelector("[data-role='manual-text']")?.textContent).toBe("えーと");
+
+    events = [];
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events).toEqual([{ type: "REMOVE_TELOP", index: 1 }]);
+    expect(manualRows()).toHaveLength(0);
+  });
 });
+
