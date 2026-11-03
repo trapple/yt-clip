@@ -876,10 +876,14 @@ function onMarkOut(): void {
  * 拡大バーから直接呼ばれるので click 用の guard を通らない。ここで落とすと
  * 範囲が service worker へ送られず、画面の見た目だけが新しい範囲になって
  * 実際の状態と食い違う
+ *
+ * **範囲が変わっていなければ送らない** (窓の映し直しだけする)。掴んで離しただけ (キーで動かす端を選ぶため) で
+ * ADJUST_SEGMENT を送ると、投稿した後の状態が ready へ戻り、投稿したクリップの参照が理由なく外れる。
+ * 送ったら true (`undelivered` は届かなかったときに呼ぶ)
  */
-function onRangeCommitted(range: ClipRange): void {
+function onRangeCommitted(range: ClipRange, undelivered?: () => void): boolean {
   // 状態機械が受け付けない範囲変更は、画面にも反映しない
-  if (!canAdjustRange()) return;
+  if (!canAdjustRange()) return false;
 
   cancelPreviewWatch();
 
@@ -889,6 +893,12 @@ function onRangeCommitted(range: ClipRange): void {
     // 「画面と状態の食い違い」が起きる
     const durationSec = getVideo().duration;
 
+    const current = selectedSegment();
+    if (current !== null && sameRange(current, range)) {
+      paintRangeBar(range, durationSec);
+      return false;
+    }
+
     currentSegments = currentSegments.map((segment, index) =>
       index === selectedIndex ? range : segment,
     );
@@ -896,26 +906,38 @@ function onRangeCommitted(range: ClipRange): void {
     paintRangeBar(range, durationSec);
     setStatus(rangeLabel(range));
     selectRangeOnNextState = range;
-    send({ type: "ADJUST_SEGMENT", index: selectedIndex, range }, (state) => hasSegment(state, range));
+    send({ type: "ADJUST_SEGMENT", index: selectedIndex, range }, (state) => hasSegment(state, range), undelivered);
+    return true;
   } catch (error) {
     setStatus(`範囲を確定できませんでした: ${String(error)}`);
+    return false;
   }
 }
 
 /**
+ * 詰める欄の ±0.1 で送って、状態機械の答え (状態の通知) を待っているか。**待つ間は次の ±0.1 を受けない。**
+ * 答えを待たずに積むと、先に送った分の答えが届いた時点で手元の区間が巻き戻る (押した分が消える)。頭が前の区間を
+ * 越えて並べ替わった後に、古い位置 (index) のまま次を送ると、隣の区間を書き換える
+ */
+let nudgeInFlight = false;
+
+/**
  * 詰める欄の −0.1 / ＋0.1 (と `,` `.`)。拡大バーのドラッグの確定と同じ経路 (`onRangeCommitted`) で送る。
  *
- * **手元の写し (楽観的に描いた範囲) に積む。** 答えを待たずに続けて押しても、前に押した分が消えない。
+ * **前に送った分の答えが届くまで、次は受けない** (`nudgeInFlight` の doc)。欄の行を押した答え (`pendingClip`) を
+ * 待つ間も受けない: 状態機械の区間の並びがまだ手元と違い、位置 (index) で当てる ADJUST_SEGMENT が別の区間に当たる。
  * 動かした端の映像を出す (止めて、その位置へ)
  */
 function onNudge(kind: HandleKind, deltaSec: number): void {
-  if (!canAdjustRange()) return;
+  if (!canAdjustRange() || nudgeInFlight || pendingClip !== null) return;
   const range = selectedSegment();
   if (range === null) return;
   try {
     const next = nudgeRange(kind, deltaSec, range, getVideo().duration, maxClipSec);
     if (sameRange(next, range)) return;
-    onRangeCommitted(next);
+    nudgeInFlight = onRangeCommitted(next, () => {
+      nudgeInFlight = false;
+    });
     onScrub(kind === "in" ? next.startSec : next.endSec);
   } catch (error) {
     setStatus(`区間を詰められませんでした: ${String(error)}`);
@@ -1477,6 +1499,8 @@ function applyStateToDisplay(state: ClipState): void {
   }
   // 作り直しの確かめは、状態が届いたらやり直す (確かめた区間とテロップが変わっているかもしれない)
   startOverArmed = false;
+  // ±0.1 の答え。拒まれたとき (送った範囲を持たない状態) も届いた時点で待つのをやめる (待ち続けると欄が二度と効かない)
+  nudgeInFlight = false;
   // 投稿した後も範囲を触れる。触ると状態機械が ready へ戻し、
   // 古い範囲のクリップは外れる
   rangeEditable = state.kind === "ready" || state.kind === "posted";
@@ -1524,7 +1548,8 @@ function applyStateToDisplay(state: ClipState): void {
   // 足した直後の 1 回だけ、足した行へ送る。描き終えてから送るので、ここでは覚えるだけ
   const revealSegment = revealSegmentOnNextState;
   const revealTelop = revealLastTelopOnNextState;
-  selectRangeOnNextState = null;
+  // 欄から送った組の答えを待つ間に、先に送った組の答えが届いた (選びたい区間がまだ無い)。忘れずに次の答えで選ぶ
+  if (wantedIndex >= 0 || pendingClip === null) selectRangeOnNextState = null;
   revealSegmentOnNextState = false;
   revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;
@@ -2803,6 +2828,7 @@ function resetModuleState(): void {
   lastKind = "idle";
   startOverArmed = false;
   selectRangeOnNextState = null;
+  nudgeInFlight = false;
   revealSegmentOnNextState = false;
   revealLastTelopOnNextState = false;
   removedIndexOnNextState = null;

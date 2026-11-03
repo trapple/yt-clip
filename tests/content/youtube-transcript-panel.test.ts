@@ -429,4 +429,16 @@ describe("詰める欄 (段階 1c-1)", () => {
       delete (video as { duration?: number }).duration;
     }
   });
+
+  test("答えを待たずに続けて押すと、詰める欄は後に押した行の区間を開く", async () => {
+    // 先に押した行の答えが、後の行を送った後に届く。その答えには後の行の区間がまだ無いが、選びたい区間を忘れない
+    ready();
+    await flush();
+    rows()[0]?.click();
+    rows()[2]?.click();
+    await flush();
+
+    const title = document.querySelector("#yt-clip-bar [data-role='trim-title']")?.textContent;
+    expect(title).toBe("区間 2 を詰める");
+  });
 });

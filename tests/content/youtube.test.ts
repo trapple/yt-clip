@@ -4678,13 +4678,48 @@ describe("詰める欄", () => {
     expect(trimPart("trim-range").textContent).toContain("4:10.10");
   });
 
-  test("続けて押すと、前に押した分に積む", async () => {
+  test("答えが届くまでは次の ±0.1 を送らない。届いたら、その答えに積む", async () => {
+    // 答えを待たずに積むと、先に送った分の答えで手元の区間が巻き戻り、並べ替わった後は隣の区間に当たる
     await showTwo();
     trimPart("nudge-in-minus").click();
     trimPart("nudge-in-minus").click();
     await flush();
+    expect(adjustEvents()).toEqual([{ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 241.9, endSec: 250 } }]);
+
+    // 状態機械の同報が届く (この harness では emit が同報の代わり)
+    emit(swState);
+    await flush();
+    trimPart("nudge-in-minus").click();
+    await flush();
 
     expect(adjustEvents().at(-1)).toEqual({ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 241.8, endSec: 250 } });
+  });
+
+  test("届かなかったら、次の ±0.1 を受け直す", async () => {
+    await showTwo();
+    rejectMessageType = "clip/event";
+    trimPart("nudge-out-plus").click();
+    await flush();
+    rejectMessageType = null;
+    trimPart("nudge-out-plus").click();
+    await flush();
+
+    expect(adjustEvents()).toHaveLength(2);
+  });
+
+  test("ハンドルを掴んで動かさずに離しても、送らない (投稿した後の状態を戻さない)", async () => {
+    await showTwo();
+    const handles = [...rangeBarElement().querySelectorAll<HTMLElement>("[aria-label]")];
+    const outHandle = handles[1];
+    if (outHandle === undefined) throw new Error("終了ハンドルがありません");
+    outHandle.setPointerCapture = () => undefined;
+    outHandle.releasePointerCapture = () => undefined;
+    outHandle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 0 }));
+    outHandle.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 0 }));
+    await flush();
+
+    expect(adjustEvents()).toEqual([]);
+    expect(trimPart("trim-edge-out").dataset.active).toBe("true");
   });
 
   test("録画中は詰めない", async () => {
