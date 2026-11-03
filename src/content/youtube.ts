@@ -2090,6 +2090,8 @@ function buildBar(): HTMLElement {
       onSelect: selectSegment,
       onNudge,
       onPlayAround: (kind) => void playAround(kind),
+      // 単語の段の出し入れでバーの背が 20px ほど変わる。浮いた窓が画面の下からはみ出さないよう詰め直す (枠の中では何もしない)
+      onHeightChange: () => barWindow.refit(),
     },
   );
 

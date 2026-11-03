@@ -20,6 +20,8 @@ export type TrimPanelCallbacks = {
   onNudge(kind: HandleKind, deltaSec: number): void;
   /** 繋ぎ目を聞き直す。in = 頭の 2 秒前から、out = 尻をまたいで */
   onPlayAround(kind: HandleKind): void;
+  /** 単語の段を出した・消した (欄の背が変わった)。浮いた窓を画面に詰め直すのは呼び手の役目 */
+  onHeightChange(): void;
 };
 
 export type TrimView = {
@@ -172,9 +174,12 @@ export function createTrimPanel(
     const window = view.window;
     const range = view.range;
     const shown = window !== null && range !== null ? view.words : [];
+    const hide = shown.length === 0;
+    const changed = words.hidden !== hide;
     // **display も切り替える。** 根の inline の display:flex は [hidden] に勝ち、空の段が背を取り続ける
-    words.hidden = shown.length === 0;
-    words.style.display = shown.length === 0 ? "none" : "flex";
+    words.hidden = hide;
+    words.style.display = hide ? "none" : "flex";
+    if (changed) callbacks.onHeightChange();
     if (window === null || range === null) {
       lane.replaceChildren();
       return;

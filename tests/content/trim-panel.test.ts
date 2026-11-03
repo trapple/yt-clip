@@ -20,7 +20,7 @@ const VIEW: TrimView = {
 const EMPTY: TrimView = { index: -1, count: 0, range: null, totalSec: 0, maxClipSec: 60, over: false, window: null, words: [] };
 
 function mount(view: TrimView = VIEW) {
-  const callbacks = { onSelect: vi.fn(), onNudge: vi.fn(), onPlayAround: vi.fn() };
+  const callbacks = { onSelect: vi.fn(), onNudge: vi.fn(), onPlayAround: vi.fn(), onHeightChange: vi.fn() };
   const rangeBar = document.createElement("div");
   rangeBar.id = "range";
   const panel = createTrimPanel({ rangeBar }, callbacks);
@@ -249,5 +249,20 @@ describe("キー", () => {
     const { panel } = mount();
     panel.setActiveEdge("in");
     expect(document.activeElement).toBe(panel.element);
+  });
+});
+
+describe("背の変わり目", () => {
+  test("単語の段を出した・消したときだけ知らせる (窓を画面に詰め直すため)", () => {
+    const { panel, callbacks } = mount();
+    callbacks.onHeightChange.mockClear();
+    panel.update(VIEW);
+    expect(callbacks.onHeightChange).not.toHaveBeenCalled();
+    panel.update({ ...VIEW, words: [] });
+    expect(callbacks.onHeightChange).toHaveBeenCalledTimes(1);
+    panel.update({ ...VIEW, words: [] });
+    expect(callbacks.onHeightChange).toHaveBeenCalledTimes(1);
+    panel.update(VIEW);
+    expect(callbacks.onHeightChange).toHaveBeenCalledTimes(2);
   });
 });
