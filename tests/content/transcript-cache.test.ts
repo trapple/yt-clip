@@ -111,6 +111,14 @@ describe("saveTranscript / loadTranscript", () => {
     await expect(saveTranscript(transcript("a", 1), storage)).rejects.toThrow("QUOTA");
   });
 
+  test("収まらない文字起こしは保存しない。前に保存したものも消す (開くたびに取る)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { storage, data } = memoryStorage({ "transcript:a": transcript("a", 1, 1) });
+    await saveTranscript(transcript("a", 2, 100), storage, 2000);
+    expect(data["transcript:a"]).toBeUndefined();
+    expect(await loadTranscript("a", storage)).toBeNull();
+  });
+
   test("無いものは null", async () => {
     const { storage } = memoryStorage();
     expect(await loadTranscript("nothing", storage)).toBeNull();
@@ -153,17 +161,13 @@ describe("fitToBudget", () => {
       JSON.stringify({ ...value, lines: value.lines.map(({ id, startSec, endSec, text }) => ({ id, startSec, endSec, text })) }),
     ).length;
     const fitted = fitToBudget(value, withoutWordsSize);
-    expect(fitted.lines).toHaveLength(3);
-    expect(fitted.lines.every((line) => line.words === undefined)).toBe(true);
+    expect(fitted?.lines).toHaveLength(3);
+    expect(fitted?.lines.every((line) => line.words === undefined)).toBe(true);
   });
 
-  test("それでも収まらなければ後ろの行を落とす", () => {
+  test("単語の時刻を落としても収まらなければ null (行を落として保存すると、開き直したとき欄が途中で終わる)", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const fitted = fitToBudget(transcript("a", 1, 100), 2000);
-    expect(fitted.lines.length).toBeGreaterThan(0);
-    expect(fitted.lines.length).toBeLessThan(100);
-    expect(fitted.lines[0]?.id).toBe("youtube-asr:0.00");
-    expect(new TextEncoder().encode(JSON.stringify(fitted)).length).toBeLessThanOrEqual(2000);
+    expect(fitToBudget(transcript("a", 1, 100), 2000)).toBeNull();
   });
 });
 

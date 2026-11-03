@@ -61,29 +61,23 @@ export function isTranscript(value: unknown): value is Transcript {
   );
 }
 
-/** 収まらなければ単語の時刻を落とし、それでも収まらなければ後ろの行を落とす。落としたら warn を残す */
-export function fitToBudget(transcript: Transcript, maxBytes: number): Transcript {
+/**
+ * 収まらなければ単語の時刻を落とす。**それでも収まらなければ null (保存しない)**。後ろの行を落として保存すると、
+ * 開き直したとき保存から読むので、欄が途中で終わったまま取り直さない (whole-branch review で、2 時間の自動字幕が
+ * 54 分で切れた)。保存しなければ、開くたびに取る
+ */
+export function fitToBudget(transcript: Transcript, maxBytes: number): Transcript | null {
   if (byteLength(transcript) <= maxBytes) return transcript;
   const withoutWords: Transcript = {
     ...transcript,
     lines: transcript.lines.map((line) => ({ id: line.id, startSec: line.startSec, endSec: line.endSec, text: line.text })),
   };
-  console.warn(`[yt-clip] 文字起こしが大きいため、単語の時刻を落として保存します: ${transcript.videoId}`);
-  if (byteLength(withoutWords) <= maxBytes) return withoutWords;
-
-  let used = byteLength({ ...withoutWords, lines: [] });
-  const kept: TranscriptLine[] = [];
-  for (const line of withoutWords.lines) {
-    // +1 は配列の区切りの `,`
-    const size = byteLength(line) + 1;
-    if (used + size > maxBytes) break;
-    used += size;
-    kept.push(line);
+  if (byteLength(withoutWords) <= maxBytes) {
+    console.warn(`[yt-clip] 文字起こしが大きいため、単語の時刻を落として保存します: ${transcript.videoId}`);
+    return withoutWords;
   }
-  console.warn(
-    `[yt-clip] 文字起こしが大きいため、後ろの ${withoutWords.lines.length - kept.length} 行を落として保存します: ${transcript.videoId}`,
-  );
-  return { ...withoutWords, lines: kept };
+  console.warn(`[yt-clip] 文字起こしが大きすぎるため保存しません (開くたびに取ります): ${transcript.videoId}`);
+  return null;
 }
 
 function readIndex(value: unknown): IndexEntry[] {
@@ -128,9 +122,16 @@ function isQuotaError(error: unknown): boolean {
 export async function saveTranscript(
   transcript: Transcript,
   storage: TranscriptStorage = chromeLocalStorage,
+  maxBytes: number = MAX_TRANSCRIPT_BYTES,
 ): Promise<void> {
-  const fitted = fitToBudget(transcript, MAX_TRANSCRIPT_BYTES);
+  const fitted = fitToBudget(transcript, maxBytes);
   const index = readIndex((await storage.get([TRANSCRIPT_INDEX_KEY]))[TRANSCRIPT_INDEX_KEY]);
+  if (fitted === null) {
+    // 前の版で後ろを落として保存したものが残っていれば消す (読むと欄が途中で終わる)
+    await storage.remove([keyOf(transcript.videoId)]);
+    await storage.set({ [TRANSCRIPT_INDEX_KEY]: index.filter((entry) => entry.videoId !== transcript.videoId) });
+    return;
+  }
   const next: IndexEntry[] = [
     { videoId: transcript.videoId, savedAt: transcript.savedAt },
     ...index.filter((entry) => entry.videoId !== transcript.videoId),
