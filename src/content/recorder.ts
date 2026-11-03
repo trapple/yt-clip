@@ -19,6 +19,18 @@ export type RecorderHandle = {
   stop(): Promise<Blob>;
 };
 
+/**
+ * 録画に使う映像トラックの差し替え。テロップを焼き込むときに合成した映像を渡す。
+ *
+ * **解放も一緒に受け取る。** 録画の解放は `recorder.onstop` から呼ばれ、録画が
+ * 自動で止まった経路でも走る。合成側の解放をそこに繋がないと、自動停止のときに
+ * 描画ループと canvas のトラックが残る
+ */
+export type VideoOverride = {
+  track: MediaStreamTrack;
+  release(): void;
+};
+
 export type RecorderOptions = {
   /**
    * 明示的な `stop()` より前に録画が終わってしまったときに呼ばれる。
@@ -26,6 +38,8 @@ export type RecorderOptions = {
    * これが無いと OUT 到達まで (最大 60 秒) 異常に気付けない。
    */
   onUnexpectedStop(error: Error): void;
+  /** 映像を差し替える。無ければ `video.captureStream()` の映像をそのまま録る */
+  videoOverride?: VideoOverride;
 };
 
 /** captureStream は標準の型定義に含まれないため補う */
@@ -67,20 +81,30 @@ export type RecordingStream = {
  *
  * 取得したトラックの `getSettings()` は `channelCount` を報告しないため、
  * **何 ch なのかは判定できない**。よって音声がある限り常に通す。
+ *
+ * `videoOverride` があれば映像はそちらを使う (テロップを焼き込んだ合成映像)。
  */
 export function buildRecordingStream(
   captured: MediaStream,
   createAudioContext: () => AudioContext = () => new AudioContext(),
+  videoOverride?: VideoOverride,
 ): RecordingStream {
   const releaseCaptured = (): void => {
+    videoOverride?.release();
     for (const track of captured.getTracks()) {
       track.stop();
     }
   };
+  const videoTracks =
+    videoOverride === undefined ? captured.getVideoTracks() : [videoOverride.track];
 
   const audioTrack = captured.getAudioTracks()[0];
   if (audioTrack === undefined) {
-    return { stream: captured, release: releaseCaptured };
+    return {
+      stream:
+        videoOverride === undefined ? captured : new MediaStream(videoTracks),
+      release: releaseCaptured,
+    };
   }
 
   try {
@@ -99,7 +123,7 @@ export function buildRecordingStream(
     }
 
     return {
-      stream: new MediaStream([...captured.getVideoTracks(), downmixed]),
+      stream: new MediaStream([...videoTracks, downmixed]),
       release(): void {
         downmixed.stop();
         void context.close();
@@ -113,7 +137,13 @@ export function buildRecordingStream(
     console.warn(
       `音声をステレオに落とせませんでした。X への添付が通らない可能性があります: ${String(error)}`,
     );
-    return { stream: captured, release: releaseCaptured };
+    return {
+      stream:
+        videoOverride === undefined
+          ? captured
+          : new MediaStream([...videoTracks, audioTrack]),
+      release: releaseCaptured,
+    };
   }
 }
 
@@ -143,7 +173,11 @@ export async function startRecording(
     throw new Error("この環境では動画を直接録画できません");
   }
 
-  const recording = buildRecordingStream(target.captureStream());
+  const recording = buildRecordingStream(
+    target.captureStream(),
+    undefined,
+    options.videoOverride,
+  );
   const stream = recording.stream;
 
   /** 取得済みのリソースを解放する。二度呼ばれても安全 */

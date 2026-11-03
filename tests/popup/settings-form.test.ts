@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, test } from "vitest";
 import { CHANNEL } from "../helpers/fixtures";
-import { createFieldInput, createSettingsPanel } from "@/content/settings-panel";
+import { createFieldInput, createSettingsForm } from "@/popup/settings-form";
 import {
   DEFAULT_SETTINGS,
   SETTINGS_FIELDS,
@@ -27,7 +27,7 @@ function makeDeps(
         Object.assign(store, patch);
         return Promise.resolve();
       },
-      getContext: () => context,
+      getContext: () => Promise.resolve(context),
     },
   };
 }
@@ -52,11 +52,11 @@ function saveButton(panel: { element: HTMLElement }): HTMLButtonElement {
 const flush = (): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, 0));
 
-describe("createSettingsPanel", () => {
+describe("createSettingsForm", () => {
   test("項目定義の数だけ入力欄が出る", () => {
     // 設定を足すときに触るのは SETTINGS_FIELDS だけ、という約束を固定する
     const { deps } = makeDeps();
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
 
     // select の項目もあるので input だけを数えない
     expect(panel.element.querySelectorAll("input, select")).toHaveLength(
@@ -64,39 +64,44 @@ describe("createSettingsPanel", () => {
     );
   });
 
-  test("最初は閉じている", () => {
-    const { deps } = makeDeps();
-    expect(createSettingsPanel(deps).element.hidden).toBe(true);
-  });
-
-  test("開くと保存済みの値が入る", async () => {
+  test("読み込むと保存済みの値が入る", async () => {
     const { deps } = makeDeps({
       hashtagsByChannel: { [CHANNEL.id]: ["切り抜き", "VTuber"] },
     });
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
 
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
-    expect(panel.element.hidden).toBe(false);
     expect(inputOf(panel, "hashtags").value).toBe("#切り抜き #VTuber");
   });
 
-  test("もう一度押すと閉じる", () => {
+  test("読み終えるまで保存を押せない", async () => {
+    // 空の入力欄のまま保存すると、既定値で上書きする
     const { deps } = makeDeps();
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
+    expect(saveButton(panel).disabled).toBe(true);
 
-    panel.toggle();
-    panel.toggle();
+    await panel.fill();
 
-    expect(panel.element.hidden).toBe(true);
+    expect(saveButton(panel).disabled).toBe(false);
+  });
+
+  test("読めなければ保存を押させず、理由を出す", async () => {
+    const panel = createSettingsForm({
+      load: () => Promise.reject(new Error("読めません")),
+      getContext: () => Promise.resolve({ channel: CHANNEL }),
+    });
+
+    await panel.fill();
+
+    expect(saveButton(panel).disabled).toBe(true);
+    expect(panel.element.textContent).toContain("設定を読めませんでした");
   });
 
   test("保存すると正規化された値が書き込まれる", async () => {
     const { saved, deps } = makeDeps();
-    const panel = createSettingsPanel(deps);
-    panel.toggle();
-    await flush();
+    const panel = createSettingsForm(deps);
+    await panel.fill();
 
     inputOf(panel, "hashtags").value = "切り抜き #VTuber、切り抜き";
     saveButton(panel).click();
@@ -112,9 +117,8 @@ describe("createSettingsPanel", () => {
   test("保存した後は正規化された形が入力欄に出る", async () => {
     // 何が保存されたかを見せる。# の有無や重複がどう扱われたか分かる
     const { deps } = makeDeps();
-    const panel = createSettingsPanel(deps);
-    panel.toggle();
-    await flush();
+    const panel = createSettingsForm(deps);
+    await panel.fill();
 
     inputOf(panel, "hashtags").value = "切り抜き 切り抜き";
     saveButton(panel).click();
@@ -123,29 +127,85 @@ describe("createSettingsPanel", () => {
     expect(inputOf(panel, "hashtags").value).toBe("#切り抜き");
   });
 
-  test("開き直すと読み直す", async () => {
-    // 別のタブで変えた設定を、古い値で上書きしないため
-    const { store, deps } = makeDeps();
-    const panel = createSettingsPanel(deps);
-    panel.toggle();
+  test("保存は読み込んだときの文脈で行う", async () => {
+    // popup を開いている間はタブを移れない。保存のたびに問い合わせ直さない
+    const { saved, deps } = makeDeps();
+    let calls = 0;
+    const panel = createSettingsForm({
+      ...deps,
+      getContext: () => {
+        calls += 1;
+        return Promise.resolve({ channel: CHANNEL });
+      },
+    });
+    await panel.fill();
+
+    inputOf(panel, "hashtags").value = "あとで";
+    saveButton(panel).click();
     await flush();
 
-    panel.toggle();
-    store.hashtagsByChannel = { [CHANNEL.id]: ["あとで変えた"] };
-    panel.toggle();
+    expect(calls).toBe(1);
+    expect(saved[0]).toMatchObject({ hashtagsByChannel: { [CHANNEL.id]: ["あとで"] } });
+  });
+
+  test("書き込みが済んだら onSaved を呼ぶ (popup はここで閉じる)", async () => {
+    const { saved, deps } = makeDeps();
+    const order: string[] = [];
+    const panel = createSettingsForm({
+      ...deps,
+      save: async (patch) => {
+        await deps.save(patch);
+        order.push("save");
+      },
+      onSaved: () => order.push("onSaved"),
+    });
+    await panel.fill();
+
+    saveButton(panel).click();
     await flush();
 
-    expect(inputOf(panel, "hashtags").value).toBe("#あとで変えた");
+    expect(saved).toHaveLength(1);
+    // 閉じると popup の処理ごと止まる。書き終える前に閉じない
+    expect(order).toEqual(["save", "onSaved"]);
+  });
+
+  test("通らない項目があれば onSaved を呼ばない (閉じずに理由を見せる)", async () => {
+    const { saved, deps } = makeDeps();
+    let closed = false;
+    const panel = createSettingsForm({ ...deps, onSaved: () => (closed = true) });
+    await panel.fill();
+
+    inputOf(panel, "maxClipSec").value = "141";
+    saveButton(panel).click();
+    await flush();
+
+    expect(saved).toHaveLength(0);
+    expect(closed).toBe(false);
+    expect(panel.element.textContent).toContain("最大秒数");
+  });
+
+  test("書けなければ onSaved を呼ばない", async () => {
+    let closed = false;
+    const panel = createSettingsForm({
+      load: () => Promise.resolve(DEFAULT_SETTINGS),
+      save: () => Promise.reject(new Error("書き込めません")),
+      onSaved: () => (closed = true),
+    });
+    await panel.fill();
+
+    saveButton(panel).click();
+    await flush();
+
+    expect(closed).toBe(false);
   });
 
   test("保存できなければ黙らずに伝える", async () => {
     // 保存できていないのに黙っていると、設定したつもりで投稿してしまう
-    const panel = createSettingsPanel({
+    const panel = createSettingsForm({
       load: () => Promise.resolve(DEFAULT_SETTINGS),
       save: () => Promise.reject(new Error("書き込めません")),
     });
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     saveButton(panel).click();
     await flush();
@@ -158,10 +218,9 @@ describe("入力を受け付けないとき", () => {
   test("理由を出して保存しない", async () => {
     // 保存できなかったことを黙ると、設定したつもりで録画に進んでしまう
     const { deps, saved } = makeDeps();
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     inputOf(panel, "maxClipSec").value = "999";
     saveButton(panel).click();
@@ -175,10 +234,9 @@ describe("入力を受け付けないとき", () => {
     // 一部だけ書き込むと、何が保存されて何が保存されなかったかを
     // 画面から判断できない
     const { deps, saved } = makeDeps();
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     inputOf(panel, "hashtags").value = "切り抜き";
     inputOf(panel, "maxClipSec").value = "abc";
@@ -190,10 +248,9 @@ describe("入力を受け付けないとき", () => {
 
   test("直して押し直せば保存できる", async () => {
     const { deps, saved } = makeDeps();
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     inputOf(panel, "maxClipSec").value = "999";
     saveButton(panel).click();
@@ -214,11 +271,10 @@ describe("チャンネルを特定できない画面", () => {
       { hashtagsByChannel: { [CHANNEL.id]: ["切り抜き"] } },
       { channel: null },
     );
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
 
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     expect(inputOf(panel, "hashtags").disabled).toBe(true);
     // 理由を出す。無効なだけだと壊れているように見える
@@ -227,11 +283,10 @@ describe("チャンネルを特定できない画面", () => {
 
   test("チャンネルに依らない項目は入力できる", async () => {
     const { deps } = makeDeps({}, { channel: null });
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
 
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     expect(inputOf(panel, "maxClipSec").disabled).toBe(false);
   });
@@ -242,10 +297,9 @@ describe("チャンネルを特定できない画面", () => {
       { hashtagsByChannel: { [CHANNEL.id]: ["切り抜き"] } },
       { channel: null },
     );
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     inputOf(panel, "maxClipSec").value = "30";
     saveButton(panel).click();
@@ -259,11 +313,10 @@ describe("チャンネルを特定できない画面", () => {
 describe("どのチャンネルの設定かを見せる", () => {
   test("説明にチャンネル名が出る", async () => {
     const { deps } = makeDeps();
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
 
-    panel.toggle();
-    await flush();
+    await panel.fill();
 
     expect(panel.element.textContent).toContain(CHANNEL.name);
   });
@@ -272,7 +325,7 @@ describe("どのチャンネルの設定かを見せる", () => {
 describe("入力欄の種類", () => {
   test("text の項目は input として出る", () => {
     const { deps } = makeDeps();
-    const panel = createSettingsPanel(deps);
+    const panel = createSettingsForm(deps);
     document.body.append(panel.element);
 
     expect(inputOf(panel, "maxClipSec").tagName).toBe("INPUT");
@@ -307,5 +360,42 @@ describe("入力欄の種類", () => {
     expect(
       [...element.querySelectorAll("option")].map((o) => o.textContent),
     ).toEqual(["あ", "い"]);
+  });
+});
+
+describe("テロップの見た目", () => {
+  test("色の項目は色の入力欄になる", () => {
+    const field = SETTINGS_FIELDS.find((f) => f.key === "telopFillColor");
+    if (field === undefined) throw new Error("項目がありません");
+    const input = createFieldInput(field) as HTMLInputElement;
+    expect(input.type).toBe("color");
+  });
+
+  test("フォントの項目は候補付きのテキスト欄になる", () => {
+    const panel = createSettingsForm(makeDeps().deps);
+    const input = inputOf(panel, "telopFont");
+    expect(input.type).toBe("text");
+    const listId = input.getAttribute("list");
+    expect(listId).not.toBeNull();
+    const datalist = panel.element.querySelector(`#${listId ?? ""}`);
+    const values = [...(datalist?.querySelectorAll("option") ?? [])].map(
+      (option) => option.value,
+    );
+    expect(values).toEqual(["ゴシック", "明朝", "丸ゴシック"]);
+  });
+
+  test("テロップの 2 項目を同時に変えても両方が保存される", async () => {
+    // 1 つのオブジェクトにまとめると、浅いマージで後の項目が前の項目を消す
+    const { deps, store } = makeDeps();
+    const panel = createSettingsForm(deps);
+    await panel.fill();
+
+    inputOf(panel, "telopFontSizePx").value = "80";
+    inputOf(panel, "telopStrokeColor").value = "#112233";
+    saveButton(panel).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.telopFontSizePx).toBe(80);
+    expect(store.telopStrokeColor).toBe("#112233");
   });
 });

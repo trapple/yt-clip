@@ -15,7 +15,7 @@ import type { ClipRange } from "@/shared/types";
  * 黙って補正すると、録画に実時間を払い切った後で「思っていたのと違う範囲が
  * 録れた」と気付くことになる。
  */
-function assertValidRange(range: ClipRange): void {
+export function assertValidRange(range: ClipRange): void {
   const { startSec, endSec } = range;
   if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) {
     throw new RangeError(
@@ -33,13 +33,13 @@ function assertValidRange(range: ClipRange): void {
 /**
  * 区間として成立しているか確かめる。
  *
- * **並べ替えもマージもしない。** 拾った順がそのまま出力順になる。当初は
+ * **ここでは並べ替えもマージもしない** (時間順に並べるのは状態機械の readyWith)。当初は
  * 時系列ソートと重なりのマージをしていたが、区間の中で「区間を追加」を押した
  * ときに無反応になり (新しい区間が既存区間に完全に含まれると結果が変わらない)、
  * 同じ場面を 2 回使うこともできなかった。
  *
- * 拾った順のままなら **index が動かない**ので、選択の同定に ID も要らない。
- * 代償は録画中の巻き戻しシークだが、繋ぎ目の品質は `waitForFreshFrame` が守る。
+ * 区間は状態機械が時間順に並べる (ADR 0001)。重なった区間はマージしないので、録画中の巻き戻しシークは
+ * 重なった区間でだけ起きる。繋ぎ目の品質は `waitForFreshFrame` が守る。
  */
 export function assertValidSegments(segments: ClipRange[]): void {
   for (const segment of segments) {
@@ -70,28 +70,4 @@ export function totalSec(segments: ClipRange[]): number {
  */
 export function isOverLimit(segments: ClipRange[], maxClipSec: number): boolean {
   return Math.round(totalSec(segments)) > maxClipSec;
-}
-
-/**
- * 出力タイムラインの `outputSec` 秒が、元動画の何秒に当たるか。範囲外なら null。
- *
- * **この機能では使わない。それでも今のうちに置く。** 出力タイムラインという
- * 座標系を後から導入すると、テロップの時刻が元動画の秒で書かれた状態が先に
- * 出来上がってしまい、移行が要る (spec §0.1)。
- */
-export function toSourceTime(
-  segments: ClipRange[],
-  outputSec: number,
-): number | null {
-  if (outputSec < 0) return null;
-
-  let elapsed = 0;
-  for (const segment of segments) {
-    const length = segment.endSec - segment.startSec;
-    if (outputSec < elapsed + length) {
-      return segment.startSec + (outputSec - elapsed);
-    }
-    elapsed += length;
-  }
-  return null;
 }

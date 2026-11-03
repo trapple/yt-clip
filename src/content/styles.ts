@@ -5,8 +5,8 @@
  * 場所 (`#below` 配下の light DOM) では 1 つも解決せず、書いたフォールバック値
  * だけが効く。実機で確認済み。そのため配色は自前で持ち、テーマは自分で判定する。
  *
- * 配色は自前の変数 (`--ytc-*`) としてバーの根に置く。テーマが切り替わったら
- * その 6 個を差し替えるだけで全体が追従する。
+ * 配色は自前の変数 (`--ytc-*`) としてバーと窓の根に置く。テーマが
+ * 切り替わったらその 7 個を差し替えるだけで全体が追従する。
  */
 
 export type Palette = {
@@ -16,6 +16,11 @@ export type Palette = {
   border: string;
   accent: string;
   onAccent: string;
+  /**
+   * 窓の地。**`surface` とは別に持つ。** `surface` はテロップ行・選択中の
+   * 区間行・設定の背景に使っており、それを地にすると行と設定が地に溶ける
+   */
+  panel: string;
 };
 
 /** ライトテーマ。白地に置くので、面は白より確実に暗くする */
@@ -26,6 +31,7 @@ const LIGHT: Palette = {
   border: "#c6c6c6",
   accent: "#065fd4",
   onAccent: "#ffffff",
+  panel: "#ffffff",
 };
 
 /** ダークテーマ。黒地に置くので、面は黒より確実に明るくする */
@@ -36,6 +42,7 @@ const DARK: Palette = {
   border: "#5a5a5a",
   accent: "#3ea6ff",
   onAccent: "#0f0f0f",
+  panel: "#212121",
 };
 
 /**
@@ -59,29 +66,37 @@ export function applyPalette(element: HTMLElement, dark: boolean): void {
   element.style.setProperty("--ytc-border", palette.border);
   element.style.setProperty("--ytc-accent", palette.accent);
   element.style.setProperty("--ytc-on-accent", palette.onAccent);
+  element.style.setProperty("--ytc-panel", palette.panel);
 }
 
 const FONT = 'Roboto,"Noto Sans JP","Helvetica Neue",Arial,sans-serif';
 const BUTTON_BASE = `appearance:none;border-radius:18px;height:36px;padding:0 16px;font-family:${FONT};font-size:14px;font-weight:500;cursor:pointer;white-space:nowrap;`;
 
 export const BAR_STYLE = {
-  root: `display:flex;flex-direction:column;gap:10px;padding:12px;margin:8px 0;border:1px solid var(--ytc-border);border-radius:12px;color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
+  /**
+   * バーの中身の根 (#yt-clip-bar)。**縁・角・外の余白は持たない。** バーの窓
+   * (floating-window.ts) の枠が持つ。ここにも縁を付けると枠が 2 重になる
+   */
+  root: `display:flex;flex-direction:column;gap:10px;padding:12px;color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
   row: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
-  status: "color:var(--ytc-text-sub);font-size:12px;",
+  /**
+   * 窓を動かすつまみ (⠿)。操作の行の左端に置く (spec A.1: バーの窓は見出しの行を作らない)。
+   * 行の高さはボタン (36px) に揃える。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  grip: "cursor:move;user-select:none;touch-action:none;color:var(--ytc-text-sub);font-size:18px;line-height:36px;padding:0 2px;",
+  /**
+   * 状態の文言。**1 行に収めて、はみ出しは … にする。** 長い文言 (「テロップが N 件
+   * 残っています…」など) で行が 2 段に折り返すと、バーが伸びて動画と操作が 1 画面に
+   * 収まらなくなる。全文は title で出す。`min-width:0` が無いと flex の子は中身より
+   * 縮まず折り返す。`flex:1` で残りの幅を取るので、後ろの ⚙ は右端に来る
+   */
+  status:
+    "color:var(--ytc-text-sub);font-size:12px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
   /** 主操作。押してほしいものを塗りつぶす */
   primaryButton: `${BUTTON_BASE}border:none;background:var(--ytc-accent);color:var(--ytc-on-accent);`,
   /** 副操作。輪郭だけ */
   secondaryButton: `${BUTTON_BASE}border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);`,
-} as const;
-
-export const PANEL_STYLE = {
-  root: "display:flex;flex-direction:column;gap:12px;padding:12px;border:1px solid var(--ytc-border);border-radius:8px;background:var(--ytc-surface);",
-  field: "display:flex;flex-direction:column;gap:4px;",
-  label: "color:var(--ytc-text);font-size:13px;font-weight:500;",
-  input: `appearance:none;border:1px solid var(--ytc-border);border-radius:6px;height:36px;padding:0 10px;font-family:${FONT};font-size:14px;background:transparent;color:var(--ytc-text);`,
-  hint: "color:var(--ytc-text-sub);font-size:11px;",
-  footer: "display:flex;gap:8px;align-items:center;justify-content:flex-end;",
-  result: "color:var(--ytc-text-sub);font-size:12px;",
 } as const;
 
 export const RANGE_STYLE = {
@@ -106,6 +121,33 @@ export const RANGE_STYLE = {
   disabled: "opacity:0.4;pointer-events:none;",
 } as const;
 
+/**
+ * 拡大バーの下のテロップの帯の段 (`telop-track.ts`。フロートの窓の spec B)。
+ *
+ * **根は display を持たない。** 出し入れは telop-track.ts が `style.display` で行う (ここに display を
+ * 書くと、`hidden` を立てても inline の display が勝って出たままになる)。高さは 2 段ぶん
+ * (14 + 2 + 14 = 30px) に固定し、重なりの有無でバーの高さを揺らさない。`margin-top:-6px` で、バーの
+ * 縦の並びの gap (10px) を拡大バーのトラックとの間 4px に詰める (spec B.3。予算 34px)。
+ *
+ * `gap`・文字の大きさ・数字の幅は拡大バー (`RANGE_STYLE.root`) に揃える。左右に置く見えない時刻
+ * (`ghost`) の幅が拡大バーのラベルの幅と同じになり、帯の段がトラックの左右に揃う
+ */
+export const TELOP_TRACK_STYLE = {
+  root: "gap:10px;height:30px;margin-top:-6px;font-size:12px;font-variant-numeric:tabular-nums;",
+  ghost: "visibility:hidden;white-space:nowrap;",
+  lanes: "position:relative;flex:1;min-width:0;",
+  /** 右の見えない時刻の箱。「+N」をこの中の 2 段目の高さに置く (帯と重ねない。spec B.3) */
+  endCell: "position:relative;",
+  /**
+   * 帯 1 本。位置 (left / width / top) は telop-track.ts が決める。文字を選べると、掴んだつもりで
+   * 選択が始まる。`touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  band: "position:absolute;height:14px;box-sizing:border-box;min-width:4px;padding:0 4px;border:1px solid var(--ytc-accent);border-radius:3px;background:var(--ytc-surface);color:var(--ytc-text);font-size:10px;line-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;touch-action:none;user-select:none;",
+  /** 2 段に入らない分の数。押しても何もしないので、掴めそうなカーソルを出さない */
+  overflow:
+    "position:absolute;left:0;top:16px;height:14px;line-height:14px;font-size:11px;color:var(--ytc-text-sub);white-space:nowrap;cursor:default;",
+} as const;
+
 /** 区間の一覧。行は押せるので、押せることが分かる見た目にする */
 export const SEGMENT_STYLE = {
   root: "display:flex;flex-direction:column;gap:4px;",
@@ -119,4 +161,125 @@ export const SEGMENT_STYLE = {
   // 超過は色だけで伝えない。文言でも「/ 60秒」と出しているので、
   // 色が見えない環境でも判断できる
   totalOver: "color:#f28b82;font-size:11px;text-align:right;font-weight:600;",
+} as const;
+
+/** テロップの一覧。区間の一覧と並ぶので見た目を揃える */
+export const TELOP_STYLE = {
+  root: "display:flex;flex-direction:column;gap:4px;",
+  header: "display:flex;align-items:center;gap:8px;",
+  title: "color:var(--ytc-text);font-size:12px;font-weight:600;flex:1;",
+  row: "display:flex;flex-direction:column;gap:4px;padding:4px 8px;border-radius:6px;background:var(--ytc-surface);",
+  rowHead: "display:flex;gap:8px;align-items:center;",
+  label: "color:var(--ytc-text);font-size:12px;flex:1;",
+  outside: "color:var(--ytc-text-sub);font-size:11px;",
+  iconButton: SEGMENT_STYLE.iconButton,
+  textButton: `border:1px solid var(--ytc-border);background:transparent;color:var(--ytc-text);border-radius:6px;height:24px;padding:0 8px;cursor:pointer;font-family:${FONT};font-size:12px;`,
+  textarea: `width:100%;box-sizing:border-box;min-height:40px;resize:vertical;border:1px solid var(--ytc-border);border-radius:6px;background:transparent;color:var(--ytc-text);font-family:${FONT};font-size:13px;padding:4px 6px;`,
+} as const;
+
+/**
+ * 文字起こしの欄 (`transcript-panel.ts`)。区間とテロップの一覧の上に並ぶので見た目を揃える。
+ * **行の箱だけがスクロールする** (欄の下の一覧に手が届くよう、高さに上限を持つ)。
+ * 行は文字を選べなくする (Shift + クリックで文字が選ばれて、まとめて選ぶ操作の邪魔をしない)
+ */
+const TRANSCRIPT_ROW =
+  "display:grid;grid-template-columns:12px 40px 1fr auto;gap:4px;align-items:start;padding:3px 6px;border-radius:6px;cursor:pointer;user-select:none;";
+const TRANSCRIPT_TIME = `border:none;background:transparent;font-family:${FONT};font-size:11px;padding:2px 0;cursor:pointer;text-align:left;font-variant-numeric:tabular-nums;`;
+const TRANSCRIPT_TEXT = "font-size:12px;white-space:pre-wrap;word-break:break-word;";
+export const TRANSCRIPT_STYLE = {
+  root: "display:flex;flex-direction:column;gap:6px;",
+  header: "display:flex;align-items:center;gap:8px;",
+  title: "color:var(--ytc-text);font-size:12px;font-weight:600;flex:1;",
+  source: "color:var(--ytc-text-sub);font-size:11px;",
+  notice: "color:var(--ytc-text-sub);font-size:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+  dubbed: "color:var(--ytc-text);font-size:11px;padding:4px 8px;border-radius:6px;background:var(--ytc-surface);",
+  lines: "position:relative;display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto;",
+  row: `${TRANSCRIPT_ROW}background:transparent;border-left:3px solid transparent;`,
+  rowSelected: `${TRANSCRIPT_ROW}background:var(--ytc-surface);border-left:3px solid var(--ytc-accent);`,
+  now: "color:var(--ytc-accent);font-size:10px;padding-top:3px;",
+  time: `${TRANSCRIPT_TIME}color:var(--ytc-text-sub);`,
+  timeCurrent: `${TRANSCRIPT_TIME}color:var(--ytc-accent);font-weight:600;`,
+  text: `${TRANSCRIPT_TEXT}color:var(--ytc-text);`,
+  textHidden: `${TRANSCRIPT_TEXT}color:var(--ytc-text-sub);text-decoration:line-through;`,
+  actions: "display:flex;gap:4px;",
+  edit: `${TELOP_STYLE.textarea}user-select:text;`,
+  textButton: TELOP_STYLE.textButton,
+} as const;
+
+/**
+ * 見出しのある「幅と高さ」の窓 (`panel-window.ts`。区間・テロップの窓と設定の窓) の中身の箱。
+ * **枠の見た目 (地・影・見出し) は `FLOATING_WINDOW_STYLE` が持つ。** 位置・幅は YouTube の実機の値に
+ * 合わせるので、出所と一緒に `panel-window.ts` が持つ。
+ *
+ * **`body` は display を持つ (flex)。** 右側のパネルの本体が display を持たなかったのは、折り畳みで
+ * 本体を出し入れしていたため。折り畳みをやめた (窓の分割の spec C1.2) ので、本体を出し入れする者はいない
+ * (窓ごとの出し入れは `floating-window.ts` が窓の根の style.display で行う)
+ */
+export const PANEL_WINDOW_STYLE = {
+  /**
+   * 中身の箱。**超えた分はここだけでスクロールする。** `min-height:0` が無いと
+   * flex の子は中身より縮まず、窓ごと画面の下へ伸びる
+   */
+  body: "display:flex;flex-direction:column;gap:12px;padding:0 12px 12px;overflow-y:auto;min-height:0;flex:1 1 auto;",
+} as const;
+
+/**
+ * フロートの窓の枠 (`floating-window.ts`)。バーの窓・区間・テロップの窓・設定の窓で同じものを使う。
+ *
+ * **`root`・`docked`・`resizeGrip` は display を持たない。** 出し入れは `floating-window.ts` が
+ * `style.display` で行う。ここに display を書くと、`hidden` を立てても inline の display が
+ * 勝って出たままになる。位置・大きさ・重なり順も `floating-window.ts` が決める
+ */
+export const FLOATING_WINDOW_STYLE = {
+  /** 下のページが透けると読めないので、不透明な地と影を付ける */
+  root: `position:fixed;flex-direction:column;box-sizing:border-box;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-family:${FONT};font-size:13px;`,
+  /**
+   * ページの中の枠に入っている間 (窓の分割の spec C2.8)。**ページの流れの中** (static) で枠の幅いっぱい。
+   * ページに埋まるので影は付けず、角丸は枠に合わせて小さくする。z-index は効かないので auto
+   */
+  docked: `position:static;flex-direction:column;box-sizing:border-box;width:100%;overflow:hidden;background:var(--ytc-panel);color:var(--ytc-text);border:1px solid var(--ytc-border);border-radius:8px;box-shadow:none;z-index:auto;font-family:${FONT};font-size:13px;`,
+  /**
+   * 見出し。空いたところを掴んで動かす。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  header:
+    "display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:move;user-select:none;touch-action:none;",
+  title: "flex:1;color:var(--ytc-text);font-size:13px;font-weight:600;",
+  /**
+   * 右下の角のつまみ (16px 四方。spec A.1)。カーソルは窓の向き (幅だけ / 幅と高さ) で
+   * `floating-window.ts` が足す
+   */
+  resizeGrip:
+    "position:absolute;right:0;bottom:0;width:16px;height:16px;touch-action:none;background:linear-gradient(135deg,transparent 50%,var(--ytc-border) 50%);",
+} as const;
+
+/**
+ * ページの中のドック枠 (`dock.ts`。窓の分割の spec C2)。**根・タブの列・目印は display を持たない**
+ * (出し入れは dock.ts が style.display で行う。ここに書くと hidden を立てても出たままになる)。配色は youtube.ts が
+ * 枠の根に applyPalette で当てる (枠は #below / #secondary-inner の中にあるが、YouTube の CSS 変数には頼らない方針のまま)
+ */
+export const DOCK_STYLE = {
+  /**
+   * 枠の根 (#yt-clip-dock-below / #yt-clip-dock-side)。**ページの流れの中** (static) にあり、ページと一緒に
+   * スクロールする (C2.1)。**余白は持たない**: 動画のタイトル・おすすめ動画との間 (下の余白) と下の枠の上の余白の補正は、
+   * 窓が見えている間だけ dock.ts が当てる (ドラッグの間の目印だけの枠で、下の内容が 40px より多く下がらないように)
+   */
+  root: `position:static;box-sizing:border-box;border-radius:8px;background:var(--ytc-panel);color:var(--ytc-text);font-family:${FONT};font-size:13px;`,
+  /** タブの列 (C2.2)。高さ 28px。ドラッグの間は落とし先の帯になる (C2.3) */
+  tabRow: "align-items:stretch;gap:4px;height:28px;padding:0 4px;box-sizing:border-box;",
+  /**
+   * タブ。押すと前に出し、ドラッグで引き出す (C2.4)。文字を選べると、掴んだつもりで選択が始まる。
+   * `touch-action:none` が無いと、タッチでは掴んだ瞬間にページのスクロールに取られる
+   */
+  tab: "display:flex;align-items:center;padding:0 12px;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:none;white-space:nowrap;font-size:13px;font-weight:500;color:var(--ytc-text-sub);border-bottom:2px solid transparent;",
+  /** 前に出しているタブ。文字の色と、アクセントの下線 2px で見分ける (C2.2) */
+  tabActive:
+    "display:flex;align-items:center;padding:0 12px;box-sizing:border-box;cursor:pointer;user-select:none;touch-action:none;white-space:nowrap;font-size:13px;font-weight:500;color:var(--ytc-text);border-bottom:2px solid var(--ytc-accent);",
+  /** 隠れている枠・バーだけの枠の落とし先 (C2.3)。高さ 40px の箱に「ここにドック」 */
+  marker:
+    "align-items:center;justify-content:center;height:40px;box-sizing:border-box;border-radius:8px;color:var(--ytc-text-sub);font-size:13px;",
+  /** 落とし先の帯の縁 (タブの列にも目印にも当てる。outline なので帯の高さを変えない) */
+  bandOutline: "2px dashed var(--ytc-accent)",
+  /** 指が中にある帯の塗り (アクセントの 12%。Chrome 111 以降の color-mix) */
+  bandFill: "color-mix(in srgb,var(--ytc-accent) 12%,transparent)",
 } as const;

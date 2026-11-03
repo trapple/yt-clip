@@ -3,6 +3,8 @@
 import { Blob as NodeBlob } from "node:buffer";
 import { CHANNEL, makeVideoMeta } from "../helpers/fixtures";
 import { buildFragmentedMp4 } from "../helpers/fragmented-mp4";
+import { ourElements } from "../helpers/our-elements";
+import { stubClientSize } from "../helpers/viewport";
 import { decodeBase64 } from "@/shared/base64";
 
 /** 録画結果として流す、最小限の断片化 MP4 */
@@ -11,6 +13,7 @@ const RECORDED_BYTES = buildFragmentedMp4({
 });
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -20,10 +23,12 @@ import {
 } from "vitest";
 import { reduce } from "@/background/state";
 import type { Message } from "@/shared/messages";
+import type { WindowId, WindowLayout } from "@/content/window-layout";
 import {
   FAILURE_MESSAGES,
   type ClipRange,
   type ClipState,
+  type Telop,
 } from "@/shared/types";
 
 /**
@@ -60,6 +65,8 @@ type FakeRecorder = {
   onstop: (() => void) | null;
   /** 呼ばれた順。区間の繋ぎ方を順序ごと確かめる */
   calls: string[];
+  /** 録画に渡されたストリーム */
+  stream: unknown;
 };
 let recorders: FakeRecorder[] = [];
 /** captureStream のトラックが解放された回数 */
@@ -81,6 +88,16 @@ let video: FakeVideo;
 async function flush(): Promise<void> {
   for (let round = 0; round < 6; round += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+/**
+ * マイクロタスクだけを流す (setTimeout は進めない)。保存されたオン / オフの読みは返り、service worker 役の応答
+ * (setTimeout の後) はまだ返らない
+ */
+async function settleMicrotasks(): Promise<void> {
+  for (let round = 0; round < 20; round += 1) {
+    await Promise.resolve();
   }
 }
 
@@ -216,6 +233,13 @@ function buildPage(): void {
   const progressBar = document.createElement("div");
   progressBar.className = "ytp-progress-bar";
 
+  // 右の列 (#secondary > #secondary-inner)。右のドック枠を差す先 (窓の分割の spec C2.1)
+  const secondary = document.createElement("div");
+  secondary.id = "secondary";
+  const secondaryInner = document.createElement("div");
+  secondaryInner.id = "secondary-inner";
+  secondary.append(secondaryInner);
+
   // 広告の判定は #movie_player の ad-showing を見る (player.ts の isAdPlaying)
   const player = document.createElement("div");
   player.id = "movie_player";
@@ -223,6 +247,7 @@ function buildPage(): void {
   video = installVideo();
   document.body.append(
     below,
+    secondary,
     title,
     author,
     progressBar,
@@ -238,12 +263,98 @@ type StorageListener = (
 
 /** chrome.storage.sync が返す設定。テストごとに差し替える */
 let storedSettings: Record<string, unknown> = {};
-let storageListener: StorageListener | null = null;
+/**
+ * chrome.storage.onChanged に張られた listener。オンの間は 2 本 (設定の sync を見る youtube.ts と、スイッチを見る
+ * switch-driver)、オフの間はスイッチの 1 本だけ
+ */
+let storageListeners: StorageListener[] = [];
 
 /** 別のタブで設定が変わったことを届ける */
 function changeSettings(next: Record<string, unknown>): void {
   storedSettings = next;
-  storageListener?.({ settings: { newValue: next } }, "sync");
+  for (const listener of [...storageListeners]) listener({ settings: { newValue: next } }, "sync");
+}
+
+/** chrome.storage.local の enabled (マスタースイッチ)。undefined = キーが無い = オン */
+let storedEnabled: unknown = undefined;
+
+/** popup でオン / オフを切り替えたことを届ける (chrome.storage.local の enabled の onChanged) */
+function setEnabled(value: boolean): void {
+  storedEnabled = value;
+  for (const listener of [...storageListeners]) listener({ enabled: { newValue: value } }, "local");
+}
+
+/** chrome.storage.local の windowLayout (覚えた窓の位置)。読み込み時の値は beforeAll で入れる */
+let storedLayout: unknown = undefined;
+/** chrome.storage.local へ書いた windowLayout。書いた順 */
+let layoutWrites: unknown[] = [];
+/**
+ * 読み込み時の windowLayout の読み込みを止めておく。beforeAll が離す。
+ * 止めている間に「窓がまだ出ていない」ことを確かめる
+ */
+let releaseLayout: () => void = () => undefined;
+const layoutGate = new Promise<void>((resolve) => {
+  releaseLayout = resolve;
+});
+/**
+ * 読み込み時に覚えていた窓の位置。この位置で出ることを確かめる (jsdom の画面 1024x768 に収まる値)。
+ * **古い形 (v1: version が無い) で置く。** panel は区間・テロップの窓が継ぐ (窓の分割の spec C1.3)
+ */
+const LAYOUT_AT_LOAD = {
+  bar: { left: 40, top: 500, width: 700 },
+  panel: { left: 300, top: 120, width: 360, height: 400 },
+};
+
+/**
+ * 描ける canvas の 2D 文脈のモック。プレビューと合成が呼ぶものだけ持つ。
+ *
+ * **既定を null にしない。** 描けない環境ではテロップ付きの状態が届くたびに
+ * プレビューが warn し、テストの出力が警告で埋まる
+ */
+function makeCanvasContext(
+  options: { tainted?: boolean; fillText?: () => void } = {},
+): CanvasRenderingContext2D {
+  let font = "10px sans-serif";
+  const ctx = {
+    get font(): string {
+      return font;
+    },
+    set font(value: string) {
+      font = value;
+    },
+    drawImage: () => undefined,
+    getImageData: () => {
+      if (options.tainted) throw new DOMException("tainted", "SecurityError");
+      return {};
+    },
+    clearRect: () => undefined,
+    save: () => undefined,
+    restore: () => undefined,
+    strokeText: () => undefined,
+    fillText: options.fillText ?? (() => undefined),
+  };
+  return ctx as unknown as CanvasRenderingContext2D;
+}
+
+function spyOnGetContext() {
+  return vi.spyOn(HTMLCanvasElement.prototype, "getContext");
+}
+
+/** getContext の spy。テストが差し替えた後は `useDefaultCanvasContext` で戻す */
+let getContextSpy: ReturnType<typeof spyOnGetContext> | null = null;
+
+function useDefaultCanvasContext(): void {
+  getContextSpy?.mockImplementation(() => makeCanvasContext());
+}
+
+/** ResizeObserver の stub が見ている要素と、大きさが変わったときに呼ぶもの */
+const resizeObservers: { callback: () => void; targets: Set<Element> }[] = [];
+
+/** target を見ている ResizeObserver に、大きさが変わったことを届ける */
+function resizeElement(target: Element): void {
+  for (const entry of resizeObservers) {
+    if (entry.targets.has(target)) entry.callback();
+  }
 }
 
 function installGlobals(): void {
@@ -256,8 +367,10 @@ function installGlobals(): void {
     onerror: ((event: Event) => void) | null = null;
     onstop: (() => void) | null = null;
     readonly calls: string[] = [];
+    readonly stream: unknown;
 
-    constructor() {
+    constructor(stream: unknown) {
+      this.stream = stream;
       recorders.push(this);
     }
     start(): void {
@@ -293,10 +406,29 @@ function installGlobals(): void {
           Promise.resolve({ settings: storedSettings }),
         set: (): Promise<void> => Promise.resolve(),
       },
-      // 別のタブで設定を変えられたときに拾う経路
+      // 窓の位置 (window-layout.ts) とオン / オフ (master-switch.ts)。窓の位置の読み込み時の 1 回は layoutGate が
+      // 離されるまで返さない。**オン / オフは門を通さない**: 止めると start() も止まり、「覚えた位置を読み込む前は
+      // 窓を出さない」を確かめる前に窓そのものが無い
+      local: {
+        get: async (key?: string): Promise<Record<string, unknown>> => {
+          if (key === "enabled") {
+            return storedEnabled === undefined ? {} : { enabled: storedEnabled };
+          }
+          await layoutGate;
+          return storedLayout === undefined ? {} : { windowLayout: storedLayout };
+        },
+        set: async (items: Record<string, unknown>): Promise<void> => {
+          storedLayout = items.windowLayout;
+          layoutWrites.push(items.windowLayout);
+        },
+      },
+      // 別のタブで設定を変えられたときと、オン / オフを切り替えたときに拾う経路
       onChanged: {
         addListener: (fn: StorageListener): void => {
-          storageListener = fn;
+          storageListeners.push(fn);
+        },
+        removeListener: (fn: StorageListener): void => {
+          storageListeners = storageListeners.filter((listener) => listener !== fn);
         },
       },
     },
@@ -304,6 +436,10 @@ function installGlobals(): void {
       onMessage: {
         addListener: (fn: TabListener): void => {
           onMessage = fn;
+        },
+        // オフにすると外す (stop)。外した後は deliver が届けない
+        removeListener: (fn: TabListener): void => {
+          if (onMessage === fn) onMessage = null;
         },
       },
       sendMessage: async (message: Message): Promise<{ state: ClipState }> => {
@@ -333,6 +469,35 @@ function installGlobals(): void {
       },
     },
   });
+
+  // jsdom は Pointer Capture を持たない (窓のドラッグ floating-window.ts が呼ぶ)
+  Element.prototype.setPointerCapture = (): void => undefined;
+  Element.prototype.releasePointerCapture = (): void => undefined;
+
+  // プレビュー (telop-preview.ts) と、プレイヤーの大きさの変化で窓を置き直す (youtube.ts) ため。
+  // jsdom は ResizeObserver を持たず、canvas も描けない (getContext は "Not implemented" を
+  // 出して null を返す)。見ている要素を覚えておき、resizeElement で大きさの変化を起こす
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      private readonly entry: { callback: () => void; targets: Set<Element> };
+      constructor(callback: () => void) {
+        this.entry = { callback, targets: new Set() };
+        resizeObservers.push(this.entry);
+      }
+      observe(target: Element): void {
+        this.entry.targets.add(target);
+      }
+      unobserve(target: Element): void {
+        this.entry.targets.delete(target);
+      }
+      disconnect(): void {
+        this.entry.targets.clear();
+      }
+    },
+  );
+  getContextSpy = spyOnGetContext();
+  useDefaultCanvasContext();
 }
 
 /**
@@ -395,6 +560,130 @@ function handleLabels(): string[] {
   );
 }
 
+/** jsdom はレイアウトを持たず、どの要素の寸法も 0 を返す。位置を決め打ちする */
+function rectAt(top: number, height: number): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    height,
+    left: 0,
+    right: 400,
+    width: 400,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** 区間・テロップの窓。body の直下に 1 つだけある */
+function listElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-list");
+  if (element === null) throw new Error("区間・テロップの窓が見つかりません");
+  return element;
+}
+
+/** 区間・テロップの窓の中身の箱。区間の一覧とテロップの一覧が入る */
+function listBody(): HTMLElement {
+  const element = document.getElementById("yt-clip-list-body");
+  if (element === null) throw new Error("区間・テロップの窓の中身が見つかりません");
+  return element;
+}
+
+/** プレイヤー直下のバー */
+function barElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-bar");
+  if (element === null) throw new Error("バーが見つかりません");
+  return element;
+}
+
+/** バーの窓の枠 (外形)。中身の根 #yt-clip-bar はこの中にある */
+function barWindowElement(): HTMLElement {
+  const element = document.getElementById("yt-clip-bar-window");
+  if (element === null) throw new Error("バーの窓が見つかりません");
+  return element;
+}
+
+/** バーの窓を動かすつまみ (⠿)。操作の行の左端にある */
+function barGrip(): HTMLElement {
+  const grip = barElement().querySelector<HTMLElement>("[data-role='grip']");
+  if (grip === null) throw new Error("つまみが見つかりません");
+  return grip;
+}
+
+/** 区間・テロップの窓の見出し (掴んで動かす所) */
+function listHeader(): HTMLElement {
+  const header = listElement().querySelector<HTMLElement>("[data-role='window-header']");
+  if (header === null) throw new Error("区間・テロップの窓の見出しが見つかりません");
+  return header;
+}
+
+/** 2 つの窓 (バー・区間・テロップ) が隠れているか。この順に並べる */
+function windowsHidden(): boolean[] {
+  return [barWindowElement(), listElement()].map((element) => element.hidden);
+}
+
+/** 位置と大きさを決め打ちした箱 (rectAt は左 0・幅 400 に固定なので別に持つ) */
+function boxAt(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** jsdom は PointerEvent を持たない。MouseEvent に pointer* の名前を付けて配る */
+function pointer(target: Element, type: string, x: number, y: number): void {
+  target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+}
+
+/** (100, 100) で押し、dx / dy だけ動かして離す */
+function drag(target: Element, dx: number, dy: number): void {
+  pointer(target, "pointerdown", 100, 100);
+  pointer(target, "pointermove", 100 + dx, 100 + dy);
+  pointer(target, "pointerup", 100 + dx, 100 + dy);
+}
+
+function dblclick(target: Element): void {
+  target.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+}
+
+/** 窓の枠に当てた位置と大きさ */
+function styleRect(element: HTMLElement): {
+  left: string;
+  top: string;
+  width: string;
+  height: string;
+} {
+  return {
+    left: element.style.left,
+    top: element.style.top,
+    width: element.style.width,
+    height: element.style.height,
+  };
+}
+
+/** プレイヤーの画面上の位置とバーの窓の高さを決め打ちする。ほかの要素は 0 */
+function placePlayer(
+  player: { left: number; top: number; width: number; height: number },
+  barHeight: number,
+) {
+  return vi
+    .spyOn(Element.prototype, "getBoundingClientRect")
+    .mockImplementation(function (this: Element) {
+      if (this.id === "movie_player") {
+        return boxAt(player.left, player.top, player.width, player.height);
+      }
+      if (this.id === "yt-clip-bar-window") return boxAt(0, 0, 0, barHeight);
+      return boxAt(0, 0, 0, 0);
+    });
+}
+
 /** 実際に作られた MediaRecorder。無ければ録画が始まっていない */
 function startedRecorder(): FakeRecorder {
   const recorder = recorders[0];
@@ -422,15 +711,30 @@ let restoredAtLoad = {
   labels: [] as string[],
 };
 
+/** 覚えた位置を読み込む前の窓 (バーの窓に中身がある状態) */
+let windowsBeforeLayout = { barHidden: false, listHidden: false };
+/** 覚えた位置を読み込んだ後の窓 */
+let windowsAfterLayout = {
+  barHidden: true,
+  listHidden: false,
+  bar: { left: "", top: "", width: "", height: "" },
+  list: { left: "", top: "", width: "", height: "" },
+};
+
 beforeAll(async () => {
   buildPage();
   installGlobals();
+  stubClientSize();
   // 読み込み時点で service worker が範囲を持っている場面を再現する
   // (録画中でないタブのリロード。状態は content script に残っていない)
-  swState = { kind: "ready", segments: [RANGE], meta: META_A };
+  swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+  // 前に動かした窓の位置を覚えている場面を再現する
+  storedLayout = LAYOUT_AT_LOAD;
 
-  // chrome を用意してから読み込む。import 時に listener と observer を張る
+  // chrome を用意してから読み込む。import 時にはページに触らず、保存されたオン / オフ (無い = オン) を読んだ後に
+  // start() が listener と observer を張る。読みはマイクロタスクで返るので流して待つ (応答はまだ返らない)
   await import("@/content/youtube");
+  await settleMicrotasks();
   // **応答が返る前**の状態を捕まえる。実機でも service worker は遷移した
   // ときにしか通知しないので、マウント直後は何も受け取っていない
   pointerEventsAtLoad = rangeBarElement().style.pointerEvents;
@@ -443,6 +747,21 @@ beforeAll(async () => {
     pointerEvents: rangeBarElement().style.pointerEvents,
     labels: handleLabels(),
   };
+
+  // 覚えた窓の位置の読み込みは layoutGate で止めてある。バーの窓に中身 (拡大バーと操作の行) が
+  // ある状態でも、読み込みが済むまではどの窓も出ない (最初の位置から跳ぶ絵にしない)
+  windowsBeforeLayout = {
+    barHidden: barWindowElement().hidden,
+    listHidden: listElement().hidden,
+  };
+  releaseLayout();
+  await flush();
+  windowsAfterLayout = {
+    barHidden: barWindowElement().hidden,
+    listHidden: listElement().hidden,
+    bar: styleRect(barWindowElement()),
+    list: styleRect(listElement()),
+  };
 });
 
 /**
@@ -453,6 +772,10 @@ let saved: string[] = [];
 
 beforeEach(async () => {
   history.pushState({}, "", "/watch?v=video-a");
+  // バーの中身は body 直下の窓の中にあり、buildPage で body を空にしても窓ごと付け直されて
+  // 残る (以前は #below と一緒に消えていた)。前のテストの状態の文言を持ち越さない
+  // よう、中身の根を外して作り直させる
+  document.getElementById("yt-clip-bar")?.remove();
   buildPage();
   sent = [];
   recorders = [];
@@ -474,7 +797,11 @@ beforeEach(async () => {
   // DOM を作り直したので、observer に拾わせて操作 UI を載せ直す
   document.body.append(document.createElement("div"));
   await flush();
-  // モードも既定へ戻す。edit のまま次のテストに入るとバーの見た目が変わる
+  // 区間・テロップの窓はタブを開いている間 1 つを使い回す (位置を持つため)。
+  // 前のテストで送ったままにしない
+  const body = document.getElementById("yt-clip-list-body");
+  if (body !== null) body.scrollTop = 0;
+  // 設定を既定へ戻す
   changeSettings({});
   // 前のテストの範囲・録画・監視をすべて捨てさせる
   emit({ kind: "idle" });
@@ -488,14 +815,23 @@ afterAll(async () => {
   // 例外が出力に混ざる。ここで出し切ってから終わらせる
   document.body.innerHTML = "";
   await flush();
+  // 空にした body を mount() が拾って 2 つの窓 (バー・区間・テロップ) を付け直す。jsdom は破棄の
+  // ときに body.innerHTML = "" をするので、窓が残っているとその DOM 変化が破棄後に
+  // 配られる。窓を外すだけだと mount() がまた付け直すので、observer が見て
+  // いない空の body に差し替えて、破棄のときに外すものを無くす
+  document.documentElement.replaceChild(
+    document.createElement("body"),
+    document.body,
+  );
+  await flush();
 });
 
 describe("範囲再生の監視", () => {
   test("範囲を変えた後は、前の範囲の監視で録画が止まらない", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
 
-    // 範囲を再生する。OUT (20 秒) の到達待ちが 1 本張られる
-    clickButton("▶ 範囲を見る");
+    // 区間を再生する。OUT (20 秒) の到達待ちが 1 本張られる
+    clickButton("▶ 区間を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
@@ -511,9 +847,9 @@ describe("範囲再生の監視", () => {
     expect(video.pendingFrames()).toBe(0);
 
     const recording: ClipRange = { startSec: 10, endSec: 30 };
-    emit({ kind: "seeking", segments: [recording], meta: META_A });
+    emit({ kind: "seeking", segments: [recording], telops: [], meta: META_A });
     await flush();
-    emit({ kind: "recording", segments: [recording], meta: META_A });
+    emit({ kind: "recording", segments: [recording], telops: [], meta: META_A });
     await flush();
 
     const pausesBefore = video.pauseCount;
@@ -529,12 +865,12 @@ describe("範囲再生の監視", () => {
   });
 
   test("録画に入ると範囲再生の監視は解除される", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    clickButton("▶ 範囲を見る");
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    clickButton("▶ 区間を見る");
     await flush();
     expect(video.pendingFrames()).toBe(1);
 
-    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(video.pendingFrames()).toBe(0);
@@ -545,12 +881,12 @@ describe("範囲再生の監視", () => {
 
 describe("動画の入れ替わり", () => {
   test("範囲を作った動画と違う動画では録画に入らない", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(overlay()).not.toBeNull();
 
     // 関連動画へ SPA 遷移してから popup で録画を始めた場合
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(clipEvents()).toContainEqual({
@@ -568,18 +904,18 @@ describe("動画の入れ替わり", () => {
   test("別の動画のタブでは、状態機械の範囲を取り込まない", async () => {
     // 動画 B のタブが読み込み時に問い合わせると、動画 A の範囲を持つ状態が
     // 返ってくる。取り込むと、B のステータス行に A の範囲が出るうえ、
-    // 「範囲を再生」で B を A の開始位置へ飛ばしてしまう
+    // 「▶ 区間を見る」で B を A の開始位置へ飛ばしてしまう
     history.pushState({}, "", "/watch?v=video-b");
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(statusText()).not.toContain("0:10");
     expect(rangeBarElement().style.pointerEvents).toBe("none");
     expect(overlay()).toBeNull();
 
-    // 「範囲を再生」を押しても、この動画は動かない
+    // 「▶ 区間を見る」を押しても、この動画は動かない
     const beforeSec = video.element.currentTime;
-    clickButton("▶ 範囲を見る");
+    clickButton("▶ 区間を見る");
     await flush();
 
     expect(video.element.currentTime).toBe(beforeSec);
@@ -587,7 +923,7 @@ describe("動画の入れ替わり", () => {
   });
 
   test("別の動画へ移ると帯が消え、拡大バーも操作できなくなる", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(overlay()).not.toBeNull();
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
@@ -603,8 +939,8 @@ describe("動画の入れ替わり", () => {
 
 describe("録画の後始末", () => {
   test("失敗に落ちたら録画を止めてストリームを解放する", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/start");
     await flush();
 
@@ -618,6 +954,7 @@ describe("録画の後始末", () => {
       kind: "failed",
       reason: "playback-failed",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -639,8 +976,8 @@ describe("録画の後始末", () => {
     // service worker は seeking の state/changed を送った後、SEEK_DONE を
     // 受けて recorder/start を送り、録画開始の通知を受けてから recording へ
     // 進める。この順序で「録画から離れた状態」の後始末が誤爆しないこと
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "seeking", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     expect(clipEvents()).toContainEqual({ type: "SEEK_DONE" });
 
@@ -648,7 +985,7 @@ describe("録画の後始末", () => {
     await flush();
     expect(startedRecorder().state).toBe("recording");
 
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     await flush();
     // recording への遷移で録画を捨てていないこと
     expect(startedRecorder().state).toBe("recording");
@@ -656,7 +993,7 @@ describe("録画の後始末", () => {
     // OUT に到達 → 書き出し → 結果の送信まで通す
     video.advanceFrame(20.1);
     expect(clipEvents()).toContainEqual({ type: "OUT_REACHED" });
-    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/stop");
     await flush();
 
@@ -678,12 +1015,12 @@ describe("録画の後始末", () => {
   });
 
   test("録画結果を送れなかったら失敗として知らせる", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/start");
     await flush();
 
-    emit({ kind: "encoding", segments: [RANGE], meta: META_A });
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
     // 60 秒 1080p の base64 がメッセージ長を超える場合を再現する
     rejectMessageType = "recorder/done";
     command("recorder/stop");
@@ -720,11 +1057,12 @@ describe("失敗の提示", () => {
   test("失敗の理由はバーにも出す", () => {
     // 録画中にタブをリロードした場合、popup を開かない限り何が起きたのか
     // 分からない。文言は popup と同じものを使う
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     emit({
       kind: "failed",
       reason: "recording-aborted",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
 
@@ -759,7 +1097,7 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("録画済みでポスト待ちの間は操作させない", () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(rangeBarElement().style.pointerEvents).not.toBe("none");
 
     emit({
@@ -767,6 +1105,7 @@ describe("拡大バーを操作できる状態", () => {
       clipId: "clip-1",
       mimeType: "video/mp4",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
     // service worker は preview での範囲変更を拒む。画面もそれに合わせる
@@ -774,12 +1113,13 @@ describe("拡大バーを操作できる状態", () => {
   });
 
   test("受け付けられなかった範囲変更は、画面を状態機械側へ戻す", async () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     emit({
       kind: "preview",
       clipId: "clip-1",
       mimeType: "video/mp4",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
     });
 
@@ -806,16 +1146,17 @@ describe("状態ごとの操作", () => {
     ).map((button) => button.textContent ?? "");
 
   test("状態が変わると出る操作も変わる", () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     expect(labels()).toEqual(["● 録画"]);
 
     // 録り始めてからでも戻れる
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     expect(labels()).toEqual(["■ 中止"]);
 
     emit({
       kind: "posted",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -824,7 +1165,7 @@ describe("状態ごとの操作", () => {
   });
 
   test("操作を押すと状態機械へイベントが飛ぶ", () => {
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -838,6 +1179,7 @@ describe("状態ごとの操作", () => {
     emit({
       kind: "posted",
       segments: [RANGE],
+      telops: [],
       meta: META_A,
       clipId: "clip-1",
       mimeType: "video/mp4",
@@ -849,7 +1191,7 @@ describe("状態ごとの操作", () => {
 
 describe("録画の中止", () => {
   test("中止を押すと状態機械へ伝わる", () => {
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
 
     document
       .querySelector<HTMLButtonElement>("#yt-clip-bar-actions button")
@@ -861,14 +1203,14 @@ describe("録画の中止", () => {
   test("録画から離れると録画も監視も止まる", async () => {
     // 中止の停止処理は「recording から外れた」ことを見て走る。
     // 中止のためだけの後始末は足していないので、ここが唯一の担保になる
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
     command("recorder/start");
     await flush();
     const recorder = startedRecorder();
     expect(recorder.state).toBe("recording");
 
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
     await flush();
 
     expect(recorder.state).toBe("inactive");
@@ -879,31 +1221,65 @@ describe("録画の中止", () => {
   });
 });
 
-describe("設定", () => {
-  function settingsButton(): HTMLButtonElement {
-    const button = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("#yt-clip-bar button"),
-    ).find((candidate) => candidate.textContent === "⚙");
-    if (button === undefined) throw new Error("設定ボタンがありません");
-    return button;
+describe("設定 (popup へ移した)", () => {
+  /** popup の問い合わせ (channel/get) を届け、同期で返った応答を受け取る */
+  function askChannel(): { responded: boolean; response: unknown } {
+    const result: { responded: boolean; response: unknown } = { responded: false, response: undefined };
+    onMessage?.({ type: "channel/get" }, {}, (response) => {
+      result.responded = true;
+      result.response = response;
+    });
+    return result;
   }
 
-  test("バーに設定ボタンが出る", () => {
-    expect(settingsButton().title).toBe("設定");
+  test("バーに ⚙ が無く、設定の窓も設定の入力欄もページのどこにも無い", () => {
+    const labels = [...barElement().querySelectorAll("button")].map((button) => button.textContent);
+    expect(labels).not.toContain("⚙");
+    expect(barElement().querySelector("[title='設定']")).toBeNull();
+    // 設定は popup に出す (settings-in-popup spec §3)。窓もドックのタブも作らない
+    expect(document.getElementById("yt-clip-settings")).toBeNull();
+    expect(document.getElementById("yt-clip-settings-body")).toBeNull();
+    expect(document.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
   });
 
-  test("押すとパネルが開き、もう一度押すと閉じる", () => {
-    const panel = document.querySelector<HTMLElement>(
-      "#yt-clip-setting-hashtags",
-    )?.closest("div[style]")?.parentElement;
-    if (panel == null) throw new Error("パネルがありません");
-    expect(panel.hidden).toBe(true);
+  test("channel/get に、動画ページではいま開いている動画のチャンネルを返す", () => {
+    expect(askChannel()).toEqual({ responded: true, response: { channel: CHANNEL } });
+  });
 
-    settingsButton().click();
-    expect(panel.hidden).toBe(false);
+  test("channel/get に、動画ページ以外 (SPA でホームへ移った後) では null を返す", async () => {
+    history.pushState({}, "", "/");
+    document.body.append(document.createElement("div"));
+    await flush();
 
-    settingsButton().click();
-    expect(panel.hidden).toBe(true);
+    // ホームの DOM にチャンネルの手がかりが残っていても、前の動画のチャンネルを答えない
+    expect(askChannel()).toEqual({ responded: true, response: { channel: null } });
+  });
+
+  test("channel/get に、チャンネルを特定できない (ID が空) ときは null を返す", () => {
+    // 構造化データ (チャンネルの手がかり) が無い watch ページ。getChannel は見つからなくても throw せず warn する
+    document.querySelector("[itemprop='author']")?.remove();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect(askChannel()).toEqual({ responded: true, response: { channel: null } });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("状態の文言", () => {
+  test("全文を title にも入れる (1 行に省略して出すため)", async () => {
+    clickButton("IN");
+    await flush();
+
+    const status = document.getElementById("yt-clip-bar-status");
+    expect(status?.textContent).not.toBe("");
+    expect(status?.title).toBe(status?.textContent);
+  });
+
+  test("状態の文言は操作の行の右端 (最後) に置く (⚙ は popup へ移した)", () => {
+    const status = document.getElementById("yt-clip-bar-status");
+    expect(status?.nextElementSibling).toBeNull();
   });
 });
 
@@ -986,7 +1362,9 @@ describe("最大秒数の設定", () => {
     changeSettings({ maxClipSec: 20 });
     await flush();
 
-    // 再描画を起こしてバーを作り直させる
+    // 再描画を起こしてバーを作り直させる。バーの中身は body 直下の窓の中にあり、
+    // body を作り直しても窓ごと付け直されて残るので、中身の根を外しておく
+    barElement().remove();
     buildPage();
     document.body.append(document.createElement("div"));
     await flush();
@@ -995,7 +1373,7 @@ describe("最大秒数の設定", () => {
     clickButton("IN");
     await flush();
     // 実機では service worker が state/changed を配る。それで拡大バーが有効になる
-    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], telops: [], meta: META_A });
     await flush();
 
     dragOutToEnd();
@@ -1009,6 +1387,9 @@ describe("最大秒数の設定", () => {
     video.element.currentTime = 100;
     clickButton("IN");
     await flush();
+    // IN は状態機械の答えを待って描く。上限 10 秒の範囲ができた答えを流す
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 110 }], telops: [], meta: META_A });
+    await flush();
 
     video.element.currentTime = 130;
     clickButton("OUT");
@@ -1019,7 +1400,7 @@ describe("最大秒数の設定", () => {
   });
 });
 
-describe("エディットモード", () => {
+describe("複数区間", () => {
   /** バーに出ているボタンの文言 */
   function buttonLabels(): string[] {
     return [...document.querySelectorAll("#yt-clip-bar button")].map(
@@ -1032,16 +1413,7 @@ describe("エディットモード", () => {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
-  test("シンプルでは一覧を出さない", async () => {
-    changeSettings({ mode: "simple" });
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    await flush();
-
-    expect(segmentRows()).toEqual([]);
-  });
-
-  test("エディットでは追加ボタンが増える。IN は消えない", async () => {
-    changeSettings({ mode: "edit" });
+  test("追加ボタンと IN が並ぶ", async () => {
     await flush();
 
     // IN を追加ボタンに置き換えると、一度作った区間の頭を詰められなくなる
@@ -1051,7 +1423,6 @@ describe("エディットモード", () => {
   });
 
   test("追加ボタンは区間を足すイベントを送る", async () => {
-    changeSettings({ mode: "edit" });
     await flush();
     sent = [];
 
@@ -1063,8 +1434,7 @@ describe("エディットモード", () => {
     });
   });
 
-  test("シンプルの IN は今までどおり置き換える", async () => {
-    changeSettings({ mode: "simple" });
+  test("区間が無いときの IN は区間を置き換える", async () => {
     await flush();
     sent = [];
 
@@ -1077,13 +1447,13 @@ describe("エディットモード", () => {
   });
 
   test("区間ごとに行が出る", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1093,13 +1463,13 @@ describe("エディットモード", () => {
   });
 
   test("行を押すとその区間が拡大バーに載る", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1110,33 +1480,6 @@ describe("エディットモード", () => {
     expect(statusText()).toContain("4:02");
   });
 
-  test("モードが変わると作りかけの区間を消す", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-
-    expect(sent.at(-1)).toMatchObject({
-      type: "clip/event",
-      event: { type: "RESET_MARKS" },
-    });
-  });
-
-  test("録画中はモードの変更を受け付けない", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-
-    // 状態機械だけが戻ると、録画が走り続けて取り残される
-    expect(sent).toEqual([]);
-  });
 });
 
 describe("複数区間の録画", () => {
@@ -1147,8 +1490,7 @@ describe("複数区間の録画", () => {
 
   /** 録画が走っている状態まで進める */
   async function startTwoSegments(): Promise<FakeRecorder> {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: TWO, meta: META_A });
+    emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
     await flush();
     command("recorder/start");
     await flush();
@@ -1178,8 +1520,7 @@ describe("複数区間の録画", () => {
   }
 
   test("最初の区間の頭へ飛ぶ", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "seeking", segments: TWO, meta: META_A });
+    emit({ kind: "seeking", segments: TWO, telops: [], meta: META_A });
     await flush();
 
     expect(video.element.currentTime).toBe(83);
@@ -1239,7 +1580,7 @@ describe("複数区間の録画", () => {
 
     video.advanceFrame(98);
     await flush();
-    emit({ kind: "ready", segments: TWO, meta: META_A });
+    emit({ kind: "ready", segments: TWO, telops: [], meta: META_A });
     await flush();
 
     // pause 中に中止されてもストリームを掴んだままにしない
@@ -1251,7 +1592,7 @@ describe("複数区間の録画", () => {
 
     video.advanceFrame(98);
     await flush();
-    emit({ kind: "ready", segments: TWO, meta: META_A });
+    emit({ kind: "ready", segments: TWO, telops: [], meta: META_A });
     await flush();
     sent = [];
 
@@ -1279,13 +1620,13 @@ describe("シークバーの帯", () => {
   }
 
   async function showTwoSegments(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
         { startSec: 10, endSec: 20 },
         { startSec: 60, endSec: 70 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1325,19 +1666,19 @@ describe("シークバーの帯", () => {
   });
 });
 
-describe("エディットモードの OUT", () => {
+describe("OUT", () => {
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
   test("選んでいる区間の index を送る", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1360,60 +1701,13 @@ describe("エディットモードの OUT", () => {
   });
 });
 
-describe("進行中のモード変更", () => {
-  function segmentRows(): HTMLElement[] {
-    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
-  }
-
-  test("録画が終わってから切り替わる", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "recording", segments: [RANGE], meta: META_A });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-    // 状態機械だけが戻ると、録画が走り続けて取り残される
-    expect(clipEvents()).toEqual([]);
-
-    // 録画が終わったら追いつく。storage の変更通知は次に保存するまで来ないので、
-    // ここで拾わないとタブは開き直すまでエディットのままになる
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    await flush();
-
-    expect(clipEvents()).toContainEqual({ type: "RESET_MARKS" });
-  });
-
-  test("録画済みクリップを持つ間は切り替えない", async () => {
-    changeSettings({ mode: "edit" });
-    emit({
-      kind: "degraded",
-      segments: [RANGE],
-      meta: META_A,
-      clipId: "clip-1",
-      mimeType: "video/mp4",
-      reason: "x-attach-failed",
-    });
-    await flush();
-    sent = [];
-
-    changeSettings({ mode: "simple" });
-    await flush();
-
-    // RESET_MARKS は idle へ落とす。実時間を払った録画への参照ごと失う
-    expect(clipEvents()).toEqual([]);
-    expect(segmentRows().length).toBe(1);
-  });
-});
-
 describe("区間を足した直後の選択", () => {
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
   test("足した区間が選ばれる", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 98 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 98 }], telops: [], meta: META_A });
     await flush();
 
     video.element.currentTime = 300;
@@ -1426,6 +1720,7 @@ describe("区間を足した直後の選択", () => {
         { startSec: 83, endSec: 98 },
         { startSec: 300, endSec: 315 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1433,17 +1728,77 @@ describe("区間を足した直後の選択", () => {
     // 「IN → OUT」の癖で OUT を押したとき、前の区間の終端が動くと事故になる
     expect(segmentRows()[1]?.dataset.selected).toBe("true");
   });
+
+  test("前の場面に足した区間は時間順の位置に入り、それが選ばれる", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 100, endSec: 115 }], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 10;
+    sent = [];
+
+    clickButton("＋ 区間を追加");
+    await flush();
+    const added = (clipEvents() as { type: string; range?: ClipRange }[]).find((event) => event.type === "ADD_SEGMENT");
+    expect(added?.range?.startSec).toBe(10);
+    // 状態機械は時間順に並べて返す
+    emit({
+      kind: "ready",
+      segments: [added!.range!, { startSec: 100, endSec: 115 }],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+    expect(rows.map((row) => row.dataset.selected)).toEqual(["true", "false"]);
+  });
+
+  test("頭を動かして順が入れ替わっても、動かした区間を選んだまま", async () => {
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 20 },
+        { startSec: 30, endSec: 40 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+    document.querySelectorAll<HTMLElement>("[data-role='segment']")[1]?.click();
+    await flush();
+    video.element.currentTime = 5;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+    expect(clipEvents()).toContainEqual({ type: "ADJUST_SEGMENT", index: 1, range: { startSec: 5, endSec: 40 } });
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 5, endSec: 40 },
+        { startSec: 10, endSec: 20 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+    expect(rows.map((row) => row.dataset.selected)).toEqual(["true", "false"]);
+    // 並び替わっても「受け付けられませんでした」にしない
+    expect(statusText()).toBe("0:05 〜 0:40 (35秒)");
+  });
 });
 
 describe("合計が上限を超えた録画", () => {
   test("内部エラーではなく区間を直せる状態へ戻す", async () => {
-    changeSettings({ mode: "edit", maxClipSec: 20 });
+    changeSettings({ maxClipSec: 20 });
     emit({
       kind: "ready",
       segments: [
         { startSec: 0, endSec: 15 },
         { startSec: 100, endSec: 115 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1455,6 +1810,7 @@ describe("合計が上限を超えた録画", () => {
         { startSec: 0, endSec: 15 },
         { startSec: 100, endSec: 115 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1465,19 +1821,19 @@ describe("合計が上限を超えた録画", () => {
   });
 });
 
-describe("エディットモードの IN", () => {
+describe("IN", () => {
   function segmentRows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
   }
 
   async function showTwo(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
         { startSec: 83, endSec: 98 },
         { startSec: 242, endSec: 250 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1501,20 +1857,6 @@ describe("エディットモードの IN", () => {
     });
   });
 
-  test("シンプルの IN は今までどおり作り直す", async () => {
-    changeSettings({ mode: "simple" });
-    emit({ kind: "ready", segments: [RANGE], meta: META_A });
-    await flush();
-    sent = [];
-
-    clickButton("IN");
-    await flush();
-
-    expect(clipEvents().map((event) => (event as { type: string }).type)).toContain(
-      "MARK_IN",
-    );
-  });
-
   test("頭が尻を追い越したら弾く", async () => {
     await showTwo();
     segmentRows()[1]?.click();
@@ -1530,17 +1872,211 @@ describe("エディットモードの IN", () => {
     expect(statusText()).not.toBe("");
   });
 
-  test("区間が無ければ先に追加するよう促す", async () => {
-    changeSettings({ mode: "edit" });
+  test("区間が 1 つも無いときの IN は、今の位置から範囲を作る (MARK_IN)", async () => {
     emit({ kind: "idle" });
     await flush();
+    video.element.currentTime = 10;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+    expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+    expect(events[0]?.range?.startSec).toBe(10);
+  });
+
+  test("録画した後 (preview) の IN は、今の位置から範囲を作り直す (次の切り抜きを始める)", async () => {
+    emit({ kind: "preview", clipId: "clip-1", mimeType: "video/mp4", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 300;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+    expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+    expect(events[0]?.range?.startSec).toBe(300);
+  });
+
+  test("区間 1 つで OUT まで進め、録画を押せる (区間 1 つの流れ)", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    video.element.currentTime = 20;
+    sent = [];
+
+    clickButton("OUT");
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "MARK_OUT", index: 0, sec: 20 });
+    const record = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "● 録画",
+    );
+    expect(record?.disabled).toBe(false);
+  });
+
+  test("状態が届くと、選んでいる区間の範囲を状態の欄に出す (IN / OUT の後に範囲と秒数が見える)", async () => {
+    emit({ kind: "idle" });
+    await flush();
+
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:25 (15秒)");
+
+    // OUT で尻が動いた答え
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 20 }], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:20 (10秒)");
+  });
+
+  test("区間が 2 つ以上あるとき、選んでいる区間の尻より後ろで IN を押すと、＋ 区間を追加へ案内する", async () => {
+    emit({
+      kind: "ready",
+      segments: [
+        { startSec: 10, endSec: 25 },
+        { startSec: 50, endSec: 60 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+    segmentRows()[0]?.click();
+    await flush();
+    video.element.currentTime = 40;
     sent = [];
 
     clickButton("IN");
     await flush();
 
     expect(clipEvents()).toEqual([]);
-    expect(statusText()).toContain("区間を追加");
+    expect(statusText()).toBe("IN が区間の尻 (0:25) より後ろです。新しい区間は ＋ 区間を追加 で作れます");
+  });
+
+  test("区間が無くなったら (idle)、状態の欄を最初の案内に戻す", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:25 (15秒)");
+
+    // 最後の区間を ✕ で消した答え
+    emit({ kind: "idle" });
+    await flush();
+    expect(statusText()).toBe("IN を押して開始位置を指定");
+  });
+
+  test("SPA で別の動画へ移ると状態の欄を最初の案内に戻し、戻ると選んでいる区間の範囲を出す", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+
+    history.pushState({}, "", "/watch?v=video-b");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(statusText()).toBe("IN を押して開始位置を指定");
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(statusText()).toBe("0:10 〜 0:25 (15秒)");
+  });
+
+  test("区間が無いときの OUT は「先に区間を追加してください」と出し、何も送らない", async () => {
+    emit({ kind: "idle" });
+    await flush();
+    sent = [];
+
+    clickButton("OUT");
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("先に区間を追加してください");
+  });
+
+  test("区間が 1 つでテロップが無ければ、区間の前でも後ろでも IN は作り直す (これまでのシンプルと同じ)", async () => {
+    emit({ kind: "ready", segments: [{ startSec: 10, endSec: 25 }], telops: [], meta: META_A });
+    await flush();
+
+    for (const at of [40, 5]) {
+      video.element.currentTime = at;
+      sent = [];
+      clickButton("IN");
+      await flush();
+      const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+      expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+      expect(events[0]?.range?.startSec).toBe(at);
+    }
+  });
+
+  test("テロップがあれば、区間が 1 つでも IN は頭を合わせる (作り直してテロップを消さない)", async () => {
+    emit({
+      kind: "ready",
+      segments: [{ startSec: 10, endSec: 25 }],
+      telops: [{ startSec: 11, endSec: 14, text: "こんにちは" }],
+      meta: META_A,
+    });
+    await flush();
+    video.element.currentTime = 12;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([
+      { type: "ADJUST_SEGMENT", index: 0, range: { startSec: 12, endSec: 25 } },
+    ]);
+  });
+
+  test("投稿した後 (posted) でも、区間が 2 つ以上なら IN は頭を合わせる", async () => {
+    emit({
+      kind: "posted",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [
+        { startSec: 10, endSec: 25 },
+        { startSec: 50, endSec: 60 },
+      ],
+      telops: [],
+      meta: META_A,
+    });
+    await flush();
+    segmentRows()[0]?.click();
+    await flush();
+    video.element.currentTime = 12;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+
+    expect(clipEvents()).toEqual([
+      { type: "ADJUST_SEGMENT", index: 0, range: { startSec: 12, endSec: 25 } },
+    ]);
+  });
+
+  test("録画した後 (preview) で区間が 2 つ以上なら、1 回目の IN は消える数を出すだけ。もう一度押すと作り直す", async () => {
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [
+        { startSec: 10, endSec: 25 },
+        { startSec: 50, endSec: 60 },
+      ],
+      telops: [{ startSec: 11, endSec: 14, text: "こんにちは" }],
+      meta: META_A,
+    });
+    await flush();
+    video.element.currentTime = 300;
+    sent = [];
+
+    clickButton("IN");
+    await flush();
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("作り直すと区間 2 個とテロップ 1 件が消えます。作り直すならもう一度 IN を押してください");
+
+    clickButton("IN");
+    await flush();
+    const events = clipEvents() as { type: string; range?: { startSec: number } }[];
+    expect(events.map((event) => event.type)).toEqual(["MARK_IN"]);
+    expect(events[0]?.range?.startSec).toBe(300);
   });
 });
 
@@ -1550,8 +2086,7 @@ describe("重なる位置での区間追加", () => {
   }
 
   test("区間の中で押しても区間が増える", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], telops: [], meta: META_A });
     await flush();
     // 既存区間の内側
     video.element.currentTime = 90;
@@ -1567,20 +2102,20 @@ describe("重なる位置での区間追加", () => {
   });
 
   test("足した区間が末尾で選ばれる", async () => {
-    changeSettings({ mode: "edit" });
-    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], meta: META_A });
+    emit({ kind: "ready", segments: [{ startSec: 83, endSec: 200 }], telops: [], meta: META_A });
     await flush();
 
     video.element.currentTime = 90;
     clickButton("＋ 区間を追加");
     await flush();
-    // 並べ替えないので、足した区間は必ず末尾に来る
+    // 状態機械の答えを偽装しているので、足した区間は末尾に置いてある
     emit({
       kind: "ready",
       segments: [
         { startSec: 83, endSec: 200 },
         { startSec: 90, endSec: 105 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1589,7 +2124,6 @@ describe("重なる位置での区間追加", () => {
   });
 
   test("途中の区間を消しても選択が飛ばない", async () => {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -1597,6 +2131,7 @@ describe("重なる位置での区間追加", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1611,6 +2146,7 @@ describe("重なる位置での区間追加", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1626,7 +2162,6 @@ describe("区間を消したときの選択", () => {
   }
 
   async function showThree(): Promise<void> {
-    changeSettings({ mode: "edit" });
     emit({
       kind: "ready",
       segments: [
@@ -1634,6 +2169,7 @@ describe("区間を消したときの選択", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1653,6 +2189,7 @@ describe("区間を消したときの選択", () => {
         { startSec: 30, endSec: 40 },
         { startSec: 50, endSec: 60 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
@@ -1675,11 +2212,2407 @@ describe("区間を消したときの選択", () => {
         { startSec: 10, endSec: 20 },
         { startSec: 30, endSec: 40 },
       ],
+      telops: [],
       meta: META_A,
     });
     await flush();
 
     expect(segmentRows()[0]?.dataset.selected).toBe("true");
     expect(statusText()).toContain("0:10");
+  });
+});
+
+describe("テロップ付きの録画", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+  let restoreCanvas: (() => void) | null = null;
+
+  /**
+   * 録画の canvas を用意する。tainted なら getImageData が SecurityError。
+   * recordingDrawThrows なら、録画に使った canvas (captureStream を呼んだもの) に
+   * 文字を描くと投げる。プレビューの canvas は壊さない (壊すとプレビューが warn する)
+   */
+  function installCanvas(
+    options: { tainted?: boolean; recordingDrawThrows?: boolean } = {},
+  ) {
+    const track = {
+      kind: "video",
+      requestFrame: () => undefined,
+      stopped: false,
+      stop() {
+        this.stopped = true;
+      },
+    };
+    const captured = new Set<HTMLCanvasElement>();
+    getContextSpy?.mockImplementation(function (this: HTMLCanvasElement) {
+      return makeCanvasContext({
+        tainted: options.tainted,
+        fillText: () => {
+          if (options.recordingDrawThrows && captured.has(this)) {
+            throw new Error("描画が壊れた");
+          }
+        },
+      });
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, "captureStream", {
+      configurable: true,
+      value(this: HTMLCanvasElement) {
+        captured.add(this);
+        return { getVideoTracks: () => [track] };
+      },
+    });
+    // mockRestore にしない。installGlobals の spy まで外れて jsdom の実装に戻り、
+    // 以降のテストの出力に "Not implemented" が混ざる
+    restoreCanvas = useDefaultCanvasContext;
+    return { track };
+  }
+
+  beforeEach(() => {
+    // 合成の canvas は録画開始時の動画の大きさで作る。フェイクは高さしか持たない
+    Object.defineProperty(video.element, "videoWidth", {
+      configurable: true,
+      value: 1920,
+    });
+    vi.stubGlobal(
+      "MediaStream",
+      class {
+        constructor(readonly tracks: { kind: string }[] = []) {}
+        getTracks() {
+          return this.tracks;
+        }
+        getVideoTracks() {
+          return this.tracks.filter((track) => track.kind === "video");
+        }
+        getAudioTracks() {
+          return this.tracks.filter((track) => track.kind === "audio");
+        }
+      },
+    );
+  });
+
+  afterEach(() => {
+    restoreCanvas?.();
+    restoreCanvas = null;
+  });
+
+  /**
+   * seeking → recording → recorder/start と進める。
+   *
+   * **seeking を通すこと。** 経路の判定と描けるかの検査は prepareRecording
+   * (seeking を受けたとき) で行うので、recording から始めると合成を通らない
+   */
+  async function recordWith(telops: Telop[]): Promise<void> {
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops });
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops });
+    await flush();
+    command("recorder/start");
+    await flush();
+  }
+
+  test("区間に重なるテロップがあると canvas の映像で録る", async () => {
+    const { track } = installCanvas();
+
+    await recordWith([TELOP]);
+
+    const stream = startedRecorder().stream as { getVideoTracks(): unknown[] };
+    expect(stream.getVideoTracks()).toEqual([track]);
+  });
+
+  /**
+   * 録画が今の経路 (video.captureStream の映像) で録っているか。
+   *
+   * **canvas が作られたかでは見ない。** プレビュー (Task 11) は区間外のテロップ
+   * でも canvas を作るので、録画の経路とは関係なく canvas は現れる
+   */
+  function recordsCapturedVideo(): boolean {
+    const stream = startedRecorder().stream as {
+      getVideoTracks(): object[];
+    };
+    const tracks = stream.getVideoTracks();
+    return tracks.length === 1 && !tracks.some((track) => "requestFrame" in track);
+  }
+
+  test("テロップが無ければ今の経路のまま", async () => {
+    installCanvas();
+
+    await recordWith([]);
+
+    expect(recordsCapturedVideo()).toBe(true);
+  });
+
+  test("区間外のテロップしか無ければ今の経路のまま", async () => {
+    // canvas を挟む負荷を、録画に出ないテロップのために払わない
+    installCanvas();
+
+    await recordWith([{ startSec: 100, endSec: 103, text: "外" }]);
+
+    expect(recordsCapturedVideo()).toBe(true);
+  });
+
+  test("canvas に描けなければ録画を始めずに telop-render-failed で落とす", async () => {
+    // テロップなしで録って続行すると、実時間を払った後で気付くことになる
+    installCanvas({ tainted: true });
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-render-failed" });
+    expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
+    expect(statusText()).toContain("テロップを動画に描けませんでした");
+  });
+
+  function setHidden(hidden: boolean): void {
+    Object.defineProperty(document, "hidden", { configurable: true, value: hidden });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  afterEach(() => {
+    setHidden(false);
+  });
+
+  test("録画を始める前にタブが隠れていたら始めない", async () => {
+    // 隠れたまま始めると、最初のフレームから映像が止まる
+    installCanvas();
+    setHidden(true);
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(clipEvents()).not.toContainEqual({ type: "SEEK_DONE" });
+  });
+
+  test("seeking から recorder/start までの往復の間に隠れたら録画を始めない", async () => {
+    // prepareRecording の検査は seek の await より前の 1 回だけ。その後の
+    // service worker との往復の間に隠れると、監視はまだ付いていないので
+    // startCompositor が始まる前に見ておかないと素通りする
+    installCanvas();
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    // ここではまだ隠れていない (SEEK_DONE を通す)
+    setHidden(true);
+
+    emit({ kind: "recording", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+    command("recorder/start");
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(recorders).toHaveLength(0);
+  });
+
+  test("録画中にタブが隠れたら中断する", async () => {
+    installCanvas();
+    await recordWith([TELOP]);
+    sent = [];
+
+    setHidden(true);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+  });
+
+  test("録画中に合成の描画が落ちたら telop-render-failed で中断する", async () => {
+    // 描画が止まったまま録り続けると、静止した映像と進む音声が成功として書き出される
+    const { track } = installCanvas({ recordingDrawThrows: true });
+    await recordWith([TELOP]);
+    sent = [];
+
+    // テロップの出る時刻のフレームで初めて文字を描く
+    video.advanceFrame(12);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-render-failed" });
+    expect(statusText()).toContain("テロップを動画に描けませんでした");
+    expect(track.stopped).toBe(true);
+  });
+
+  test("隠れていて動画の大きさも分からないときは、隠れたことを理由にする", async () => {
+    // 隠れた窓では動画がデコードされず videoWidth が 0 になる。大きさの検査を
+    // 先にすると「動画の大きさがまだ分かりません」が出て本当の理由が伝わらない
+    installCanvas();
+    Object.defineProperty(video.element, "videoWidth", { configurable: true, value: 0 });
+    setHidden(true);
+
+    emit({ kind: "seeking", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "FAIL", reason: "telop-tab-hidden" });
+    expect(clipEvents()).not.toContainEqual({
+      type: "FAIL",
+      reason: "telop-render-failed",
+    });
+  });
+
+  test("テロップの無い録画では隠れても中断しない", async () => {
+    // 今の経路は隠れても映像が止まらない (§9.1)
+    await recordWith([]);
+    sent = [];
+
+    setHidden(true);
+    await flush();
+
+    expect(clipEvents()).not.toContainEqual(expect.objectContaining({ type: "FAIL" }));
+  });
+});
+
+describe("テロップの一覧", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  function telopRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='telop']")];
+  }
+
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  function addTelopButton(): HTMLButtonElement {
+    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
+    if (button === null) throw new Error("＋ テロップがありません");
+    return button;
+  }
+
+  async function showReady(
+    telops: Telop[],
+    segments: ClipRange[] = [RANGE],
+  ): Promise<void> {
+    emit({ kind: "ready", segments, meta: META_A, telops });
+    await flush();
+    sent = [];
+  }
+
+  async function seekVideo(sec: number): Promise<void> {
+    video.element.currentTime = sec;
+    await flush();
+  }
+
+  test("＋ テロップで今の位置から 3 秒のテロップを送る", async () => {
+    await showReady([]);
+    await seekVideo(12);
+
+    addTelopButton().click();
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "ADD_TELOP",
+      telop: { startSec: 12, endSec: 15, text: "" },
+    });
+  });
+
+  test("動画の終わりを超えるなら終わりを詰める", async () => {
+    await showReady([]);
+    await seekVideo(598);
+
+    addTelopButton().click();
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "ADD_TELOP",
+      telop: { startSec: 598, endSec: 600, text: "" },
+    });
+  });
+
+  test("開始を今にで、開始が終了以上になるなら送らず理由を出す", async () => {
+    await showReady([TELOP]);
+    await seekVideo(20);
+
+    telopRows()[0]?.querySelector<HTMLElement>("[data-role='set-start']")?.click();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("開始は終了より前にしてください");
+  });
+
+  test("文言を確定すると UPDATE_TELOP を送る", async () => {
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+
+    textarea.value = "やあ\n元気";
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "UPDATE_TELOP",
+      index: 0,
+      telop: { ...TELOP, text: "やあ\n元気" },
+    });
+  });
+
+  test("500 文字を超える文言は送らず、理由を出して入力欄は残す", async () => {
+    // 状態ごと保存され毎フレーム描かれる。上限を超えたものは状態機械に拒まれる
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+
+    textarea.value = "あ".repeat(501);
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe("テロップは 500 文字までです (いま 501 文字)");
+    // 直してもらうので消さない
+    expect(textarea.value).toBe("あ".repeat(501));
+
+    textarea.value = "あ".repeat(500);
+    textarea.dispatchEvent(new Event("change"));
+
+    expect(clipEvents().at(-1)).toEqual({
+      type: "UPDATE_TELOP",
+      index: 0,
+      telop: { ...TELOP, text: "あ".repeat(500) },
+    });
+  });
+
+  test("500 文字を超えて送らなかった文言は、次の状態通知でも前の文言に戻さない", async () => {
+    // フォーカスが外れた後の描き直しで telop.text を書くと、打った文字が黙って消える
+    await showReady([TELOP]);
+    const textarea = telopRows()[0]?.querySelector("textarea");
+    if (textarea == null) throw new Error("入力欄がありません");
+    textarea.value = "あ".repeat(501);
+    textarea.dispatchEvent(new Event("change"));
+
+    // 別の操作 (開始を今に など) の状態通知。文言は前のまま
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [{ ...TELOP, startSec: 12 }] });
+    await flush();
+
+    expect(textarea.value).toBe("あ".repeat(501));
+  });
+
+  test("テロップが残っていると最後の 1 区間は消せない", async () => {
+    // 区間が 0 個になると idle に戻り、手入力の文言もまとめて消える
+    await showReady([TELOP]);
+
+    segmentRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).toBe(
+      "テロップが 1 件残っています。先にテロップを消してください",
+    );
+  });
+
+  test("区間の削除でテロップが消えてしまったら知らせる", async () => {
+    // 手元の写しが古くて止め損ねた場合の保険
+    await showReady([TELOP], [RANGE, { startSec: 30, endSec: 40 }]);
+    segmentRows()[1]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+
+    emit({ kind: "idle" });
+    await flush();
+
+    expect(statusText()).toBe("テロップも消えました");
+  });
+
+  test("削除の応答待ちの間に別の動画へ移っても、テロップが消えたとは言わない", async () => {
+    // 応答の状態は元の動画のもの。別の動画のタブでは取り込まないので手元の
+    // テロップは空になるが、状態機械にはまだ残っている
+    await showReady([TELOP], [RANGE, { startSec: 30, endSec: 40 }]);
+    segmentRows()[1]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    await flush();
+    history.pushState({}, "", "/watch?v=video-b");
+
+    emit({ kind: "ready", segments: [RANGE], meta: META_A, telops: [TELOP] });
+    await flush();
+
+    expect(statusText()).not.toBe("テロップも消えました");
+  });
+
+  test("preview では操作できない", async () => {
+    // 区間の拡大バーと同じ条件。テロップだけ触れる非対称を作らない
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [RANGE],
+      meta: META_A,
+      telops: [TELOP],
+    });
+    await flush();
+    sent = [];
+
+    telopRows()[0]?.querySelector<HTMLElement>("[data-role='remove']")?.click();
+    addTelopButton().click();
+
+    expect(clipEvents()).toEqual([]);
+  });
+
+});
+
+describe("拡大バーの下のテロップの帯", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  function track(): HTMLElement {
+    const element = document.querySelector<HTMLElement>(
+      "#yt-clip-bar [data-role='telop-track']",
+    );
+    if (element === null) throw new Error("帯の段がありません");
+    return element;
+  }
+
+  function bands(): HTMLElement[] {
+    return [...track().querySelectorAll<HTMLElement>("[data-role='telop-band']")];
+  }
+
+  function firstBand(): HTMLElement {
+    const band = bands()[0];
+    if (band === undefined) throw new Error("帯がありません");
+    return band;
+  }
+
+  function segmentRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-role='segment']")];
+  }
+
+  async function showReady(
+    telops: Telop[],
+    segments: ClipRange[] = [RANGE],
+  ): Promise<void> {
+    emit({ kind: "ready", segments, meta: META_A, telops });
+    await flush();
+    sent = [];
+  }
+
+  /**
+   * 拡大バーの窓は 0〜30 秒 (範囲 10〜20 の 2 倍と 30 秒の広い方)。帯の段の箱を幅 300px
+   * (10px/秒) に、テロップ (11〜14 秒) の帯を 110〜140px に決め打ちする。ほかの要素は 0
+   */
+  function stubLayout() {
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        const role = this instanceof HTMLElement ? this.dataset.role : undefined;
+        if (role === "telop-lanes") return boxAt(0, 0, 300, 30);
+        if (role === "telop-band") return boxAt(110, 0, 30, 14);
+        return boxAt(0, 0, 0, 0);
+      });
+  }
+
+  function updateTelopEvents(): unknown[] {
+    return clipEvents().filter(
+      (event) => (event as { type: string }).type === "UPDATE_TELOP",
+    );
+  }
+
+  test("拡大バーの窓に入るテロップを拡大バーの直下に帯で出す", async () => {
+    await showReady([TELOP, { startSec: 100, endSec: 103, text: "窓の外" }]);
+
+    expect(track().hidden).toBe(false);
+    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
+    expect(track().previousElementSibling?.id).toBe("yt-clip-range");
+  });
+
+  test("テロップが 1 つも無ければ段ごと出さない (バーを高くしない)", async () => {
+    await showReady([]);
+
+    expect(track().hidden).toBe(true);
+  });
+
+  test("区間を選び直すと、選んだ区間の拡大バーの窓で帯を描き直す", async () => {
+    await showReady(
+      [TELOP, { startSec: 205, endSec: 208, text: "二つ目" }],
+      [RANGE, { startSec: 200, endSec: 215 }],
+    );
+    // 状態の通知では選択は動かない (selectedIndex はテストをまたいで残り、index 0 = RANGE のまま)。
+    // 行を押して区間 2 (200〜215、窓 192.5〜222.5) を選ぶ
+    segmentRows()[1]?.click();
+    expect(bands().map((band) => band.textContent)).toEqual(["二つ目"]);
+
+    segmentRows()[0]?.click();
+
+    expect(bands().map((band) => band.textContent)).toEqual(["こんにちは"]);
+  });
+
+  test("帯の中をドラッグすると、指を離したときに UPDATE_TELOP を 1 回だけ送る", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 135, 5);
+      pointer(band, "pointermove", 145, 5);
+      // 動かしている間は送らない (区間の拡大バーと同じ。往復を増やさない)
+      expect(updateTelopEvents()).toEqual([]);
+      pointer(band, "pointerup", 145, 5);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // 20px = 2 秒。長さ (3 秒) と文言は保つ
+    expect(updateTelopEvents()).toEqual([
+      {
+        type: "UPDATE_TELOP",
+        index: 0,
+        telop: { startSec: 13, endSec: 16, text: "こんにちは" },
+      },
+    ]);
+  });
+
+  test("帯のドラッグが拒否されたとき、帯を状態機械側の時刻へ戻す", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    const before = firstBand().style.left;
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 145, 5);
+      // 指を離す直前に、別タブで録画が始まって service worker 側の状態だけが進んだ場面を作る。
+      // emit は使わない (content script にも通知してしまい、このレースを起こせない)
+      swState = { kind: "recording", segments: [RANGE], telops: [TELOP], meta: META_A };
+      pointer(band, "pointerup", 145, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    // 状態機械は録画中で UPDATE_TELOP を受け付けない。応答の状態 (recording・元の時刻) は
+    // 変わらないので、拒まれたことが応答でしか分からない (state/changed は飛んでこない)
+    expect(swState.kind).toBe("recording");
+    expect(statusText()).toContain("受け付けられませんでした");
+    // 送った時刻 (13〜16 秒) ではなく、状態機械が持つ元の時刻 (11〜14 秒) へ戻る
+    expect(firstBand().style.left).toBe(before);
+  });
+
+  test("帯を押して動かさずに離すと、そのテロップの頭から再生する", async () => {
+    await showReady([TELOP]);
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointerup", 126, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    expect(updateTelopEvents()).toEqual([]);
+    expect(video.element.currentTime).toBe(11);
+    expect(statusText()).toBe("テロップ 1 の頭から再生中…");
+  });
+
+  test("preview では帯を薄く出し、動かしも再生もしない", async () => {
+    // 区間の拡大バーと同じ条件 (canEditTelops)。テロップだけ触れる非対称を作らない
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      mimeType: "video/mp4",
+      segments: [RANGE],
+      meta: META_A,
+      telops: [TELOP],
+    });
+    await flush();
+    sent = [];
+
+    expect(track().hidden).toBe(false);
+    expect(track().style.opacity).toBe("0.4");
+
+    const spy = stubLayout();
+    try {
+      const band = firstBand();
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointermove", 145, 5);
+      pointer(band, "pointerup", 145, 5);
+      pointer(band, "pointerdown", 125, 5);
+      pointer(band, "pointerup", 125, 5);
+    } finally {
+      spy.mockRestore();
+    }
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(statusText()).not.toBe("テロップ 1 の頭から再生中…");
+  });
+});
+
+describe("区間・テロップの窓", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  async function showEdit(telops: Telop[] = []): Promise<void> {
+    emit({ kind: "ready", segments: [RANGE], telops, meta: META_A });
+    await flush();
+  }
+
+  test("body を作り直しても、2 つの窓を body の直下に付け直す", async () => {
+    // buildPage は body を空にする。付け直さないと、以降は窓が DOM に無く
+    // バーも一覧も操作できない
+    buildPage();
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(listElement().parentElement).toBe(document.body);
+    expect(document.querySelectorAll("#yt-clip-bar-window").length).toBe(1);
+    expect(document.querySelectorAll("#yt-clip-list").length).toBe(1);
+  });
+
+  test("一覧は区間・テロップの窓に入り、バーには拡大バー・テロップの帯の段・操作の行だけが残る", async () => {
+    await showEdit([TELOP]);
+
+    const body = listBody();
+    // 文字起こしの欄 → 区間の一覧 → テロップの一覧の順。設定は入らない (popup にある)
+    expect(body.children.length).toBe(3);
+    expect(body.children[0]?.getAttribute("data-role")).toBe("transcript");
+    expect(body.children[1]?.querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(body.children[2]?.querySelector("[data-role='add-telop']")).not.toBeNull();
+    expect(body.children[2]?.querySelectorAll("[data-role='telop']").length).toBe(1);
+    expect(body.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
+
+    const bar = barElement();
+    expect(bar.querySelector("[data-role='segment']")).toBeNull();
+    expect(bar.querySelector("[data-role='add-telop']")).toBeNull();
+    expect(bar.querySelectorAll("[id^='yt-clip-setting-']")).toHaveLength(0);
+    // 並び: 拡大バー → テロップの帯の段 (フロートの窓の spec B.3) → 操作の行
+    expect(bar.children.length).toBe(3);
+    expect(bar.firstElementChild?.id).toBe("yt-clip-range");
+    expect(bar.children[1]?.getAttribute("data-role")).toBe("telop-track");
+    expect(
+      bar.lastElementChild?.contains(document.getElementById("yt-clip-bar-status")),
+    ).toBe(true);
+  });
+
+  test("見出しは中身の名前 (区間・テロップ)。折り畳みのボタンは無い", () => {
+    expect(listHeader().textContent).toBe("区間・テロップ");
+    expect(document.querySelector("[data-role='collapse']")).toBeNull();
+  });
+
+  test("区間があると区間・テロップの窓を出す", async () => {
+    await showEdit();
+    expect(listElement().hidden).toBe(false);
+  });
+
+  test("区間が 0 個でも、動画ページでは区間・テロップの窓 (文字起こしの欄) を出す", async () => {
+    await flush();
+    expect(listElement().hidden).toBe(false);
+  });
+
+  test("バーを 2 回作り直しても、区間・テロップの窓と一覧は 1 つずつ", async () => {
+    await showEdit([TELOP]);
+
+    // YouTube の再描画でバーが外れる場面を 2 回。一覧を足すだけにしていると、作り直すたびに 2 重になる
+    for (let round = 0; round < 2; round += 1) {
+      barElement().remove();
+      document.body.append(document.createElement("div"));
+      await flush();
+    }
+
+    expect(document.querySelectorAll("#yt-clip-list")).toHaveLength(1);
+    expect(listBody().querySelectorAll("[data-role='add-telop']")).toHaveLength(1);
+    expect(listBody().querySelectorAll("[data-role='segment']")).toHaveLength(1);
+  });
+
+  test("バーを作り直しても、手元の区間で一覧を描き直す", async () => {
+    await showEdit([TELOP]);
+
+    // YouTube の再描画でバーが外れた場面。次の状態通知を待たずに一覧を戻す
+    barElement().remove();
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(listBody().querySelectorAll("[data-role='telop']").length).toBe(1);
+    expect(listElement().hidden).toBe(false);
+  });
+
+  test("全画面の間は区間・テロップの窓を隠し、抜けたら戻す", async () => {
+    await showEdit();
+    expect(listElement().hidden).toBe(false);
+
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(listElement().hidden).toBe(true);
+
+      // 全画面の間に状態が届いても出さない
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(listElement().hidden).toBe(true);
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(listElement().hidden).toBe(false);
+  });
+
+  test("別の動画へ移ると一覧を空にするが、区間・テロップの窓 (文字起こしの欄) は出たまま。戻れば一覧も戻る", async () => {
+    await showEdit([TELOP]);
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+
+    // 動画 B の画面に A の区間が出続けると目立つ
+    history.pushState({}, "", "/watch?v=video-b");
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(0);
+    expect(listBody().querySelectorAll("[data-role='telop']").length).toBe(0);
+    expect(listElement().hidden).toBe(false);
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(1);
+    expect(listElement().hidden).toBe(false);
+  });
+
+  test("動画ページ以外では区間・テロップの窓もバーの窓も出さない (ページから外す)", async () => {
+    await showEdit();
+    expect(listElement().hidden).toBe(false);
+    expect(barWindowElement().hidden).toBe(false);
+
+    history.pushState({}, "", "/");
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    // 隠すだけでなく、ページに何も残さない (spa-inject。dockable-windows の spec C2.7)
+    expect(document.getElementById("yt-clip-list")).toBeNull();
+    expect(document.getElementById("yt-clip-bar-window")).toBeNull();
+    expect(ourElements()).toBe(0);
+  });
+
+  test("テーマを切り替えると 2 つの窓の配色も変わる", async () => {
+    // 窓は body の直下でバーの外にある。バーの配色は継がれない
+    document.documentElement.setAttribute("dark", "");
+    try {
+      await flush();
+      expect(listElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+      expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+    } finally {
+      document.documentElement.removeAttribute("dark");
+    }
+    await flush();
+    expect(listElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+    expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+  });
+});
+
+describe("足した行を区間・テロップの窓の見える範囲に入れる", () => {
+  const TELOP: Telop = { startSec: 11, endSec: 14, text: "こんにちは" };
+
+  /**
+   * 本体は画面の 100〜500px。行は並び順に 900px から 100px ずつ下に置く。
+   * 末尾の行が選ばれたかを送り先の値で見分けられる
+   * **前提: 区間・テロップの窓は枠に入っていない** (読み込み時の v1 の組で浮いた窓。この stub はほかの要素の幅を 400 で返すので
+   * 差す先が使える扱いになり、枠に入っていると足した行は送らずタブを前に出すだけになる)。前の describe でダブルクリックしない
+   */
+  function placeRows(role: "segment" | "telop") {
+    const body = listBody();
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this === body) return rectAt(100, 400);
+        if (this instanceof HTMLElement && this.dataset.role === role) {
+          const index =
+            this.parentElement === null
+              ? 0
+              : [...this.parentElement.children].indexOf(this);
+          return rectAt(900 + index * 100, 60);
+        }
+        return rectAt(0, 0);
+      });
+  }
+
+  function addTelopButton(): HTMLButtonElement {
+    const button = document.querySelector<HTMLButtonElement>("[data-role='add-telop']");
+    if (button === null) throw new Error("＋ テロップがありません");
+    return button;
+  }
+
+  test("区間を足したら、区間・テロップの窓の中を末尾の行へ送る", async () => {
+    const first: ClipRange = { startSec: 83, endSec: 98 };
+    const added: ClipRange = { startSec: 300, endSec: 315 };
+    emit({ kind: "ready", segments: [first], telops: [], meta: META_A });
+    await flush();
+    const spy = placeRows("segment");
+    try {
+      video.element.currentTime = 300;
+      clickButton("＋ 区間を追加");
+      await flush();
+      // 押した時点では行がまだ無い。送るのは状態機械の答えを描いた後
+      expect(listBody().scrollTop).toBe(0);
+
+      emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
+
+      // 末尾 (2 行目: 1000px) の先頭を本体の上端 (100px) に揃える
+      expect(listBody().scrollTop).toBe(900);
+
+      // 送るのは足した直後の 1 回だけ。見ている位置を勝手に戻さない
+      listBody().scrollTop = 0;
+      emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
+      expect(listBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("前の場面に区間を足したら、時間順で入った行 (先頭) へ送る", async () => {
+    const later: ClipRange = { startSec: 300, endSec: 315 };
+    emit({ kind: "ready", segments: [later], telops: [], meta: META_A });
+    await flush();
+    const spy = placeRows("segment");
+    try {
+      video.element.currentTime = 83;
+      sent = [];
+      clickButton("＋ 区間を追加");
+      await flush();
+      const added = (clipEvents() as { type: string; range?: ClipRange }[]).find((event) => event.type === "ADD_SEGMENT")!.range!;
+      emit({ kind: "ready", segments: [added, later], telops: [], meta: META_A });
+      // 先頭 (1 行目: 900px) の頭を本体の上端 (100px) に揃える
+      expect(listBody().scrollTop).toBe(800);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("テロップを足したら、区間・テロップの窓の中を末尾の行へ送る", async () => {
+    const added: Telop = { startSec: 15, endSec: 18, text: "" };
+    emit({ kind: "ready", segments: [RANGE], telops: [TELOP], meta: META_A });
+    await flush();
+    const spy = placeRows("telop");
+    try {
+      video.element.currentTime = 15;
+      await flush();
+      addTelopButton().click();
+      await flush();
+      expect(listBody().scrollTop).toBe(0);
+
+      emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
+
+      expect(listBody().scrollTop).toBe(900);
+
+      listBody().scrollTop = 0;
+      emit({ kind: "ready", segments: [RANGE], telops: [TELOP, added], meta: META_A });
+      expect(listBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("足した行へ送っても、区間・テロップの窓を前に出さない (前に出したバーの窓が潜らない)", async () => {
+    const first: ClipRange = { startSec: 83, endSec: 98 };
+    const added: ClipRange = { startSec: 300, endSec: 315 };
+    emit({ kind: "ready", segments: [first], telops: [], meta: META_A });
+    await flush();
+    // バーを触って区間を足す場面。一覧の窓を触った後にバーを触り、バーの窓が前に出ている
+    pointer(listBody(), "pointerdown", 0, 0);
+    pointer(barElement(), "pointerdown", 0, 0);
+
+    video.element.currentTime = 300;
+    clickButton("＋ 区間を追加");
+    await flush();
+    emit({ kind: "ready", segments: [first, added], telops: [], meta: META_A });
+
+    expect(Number(barWindowElement().style.zIndex)).toBeGreaterThan(
+      Number(listElement().style.zIndex),
+    );
+  });
+
+  test("足していない状態の通知では送らない", async () => {
+    const spy = placeRows("segment");
+    try {
+      emit({
+        kind: "ready",
+        segments: [RANGE, { startSec: 30, endSec: 40 }],
+        telops: [],
+        meta: META_A,
+      });
+      await flush();
+      expect(listBody().scrollTop).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("フロートの窓", () => {
+  // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    await flush();
+    layoutWrites = [];
+  });
+
+  test("2 つの窓 (バー・区間・テロップ) が body の直下に 1 つずつあり、設定の窓は無い", () => {
+    expect(document.getElementById("yt-clip-settings")).toBeNull();
+    for (const id of ["yt-clip-bar-window", "yt-clip-list"]) {
+      expect(document.querySelectorAll(`#${id}`).length).toBe(1);
+      expect(document.getElementById(id)?.parentElement).toBe(document.body);
+    }
+    // バーの中身 (拡大バーと操作の行) は窓の中
+    expect(barWindowElement().contains(barElement())).toBe(true);
+  });
+
+  test("#below にはドック枠だけを差し、最初の配置では隠しておく (窓の中身は置かない)", () => {
+    const below = document.getElementById("below");
+    if (below === null) throw new Error("#below がありません");
+    expect([...below.children].map((child) => child.id)).toEqual(["yt-clip-dock-below"]);
+    expect((below.firstElementChild as HTMLElement).style.display).toBe("none");
+  });
+
+  test("覚えた位置を読み込むまで、バーに中身があっても窓を出さない", () => {
+    expect(windowsBeforeLayout).toEqual({ barHidden: true, listHidden: true });
+  });
+
+  test("覚えた位置で出る。古い形 (v1) のパネルの位置は区間・テロップの窓が継ぐ", () => {
+    expect(windowsAfterLayout).toEqual({
+      barHidden: false,
+      // 読み込み時に取り戻した区間があるので、区間・テロップの窓も出る (位置は v1 のパネルから継いでいる)
+      listHidden: false,
+      bar: { left: "40px", top: "500px", width: "700px", height: "" },
+      list: { left: "300px", top: "120px", width: "360px", height: "400px" },
+    });
+  });
+
+  test("バーの窓の最初の位置はプレイヤーの直下 (左端を揃え、幅はプレイヤーの幅、8px 空ける)", () => {
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
+    try {
+      dblclick(barGrip());
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("バーの窓の高さは、プレイヤーの幅を当ててから測る (最小の幅で折り返した高さで詰めない)", () => {
+    // 最小の幅 (480px) では操作の行が 2 段に折り返して背が高くなる。プレイヤーの幅を
+    // 当てたときだけ 1 段 (106px) になる stub。折り返した高さで測ると画面の下端に詰めて
+    // プレイヤーに重なる (768 - 16 - 300 = 452 < 538)
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, 80, 800, 450);
+        if (this.id === "yt-clip-bar-window") {
+          const height = (this as HTMLElement).style.width === "800px" ? 106 : 300;
+          return boxAt(0, 0, 0, height);
+        }
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      // beforeEach の戻しはプレイヤーの幅 0 で測るので、窓は最小の幅 480px のまま
+      expect(barWindowElement().style.width).toBe("480px");
+      dblclick(barGrip());
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("画面に収まらなければ、バーの窓を画面の下端から 16px に詰める", () => {
+    // jsdom の画面は 1024x768。下端 700 のプレイヤーの下には 106px のバーが入らない
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 620 }, 106);
+    try {
+      dblclick(barGrip());
+      // 768 - 16 - 106
+      expect(barWindowElement().style.top).toBe("646px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("区間・テロップの窓の最初の位置は右上 (右端から 16px・上 68px・幅 400px)", () => {
+    expect(styleRect(listElement())).toEqual({
+      left: `${window.innerWidth - 416}px`,
+      top: "68px",
+      width: "400px",
+      height: "",
+    });
+  });
+
+  test("スクロールバーが画面の幅を食っていたら、区間・テロップの窓の右端はスクロールバーの左から 16px", () => {
+    // innerWidth はスクロールバーを含む。それで置くと右端の縁と見出しがスクロールバーの下に潜る
+    stubClientSize({ width: 15 });
+    try {
+      dblclick(listHeader());
+      expect(document.documentElement.clientWidth).toBe(window.innerWidth - 15);
+      expect(listElement().style.left).toBe(`${document.documentElement.clientWidth - 416}px`);
+    } finally {
+      stubClientSize();
+      dblclick(listHeader());
+    }
+  });
+
+  test("つまみをドラッグすると動き、指を離したときに 1 回だけ覚える", async () => {
+    const frame = barWindowElement();
+    const left = parseFloat(frame.style.left);
+    const top = parseFloat(frame.style.top);
+    const width = parseFloat(frame.style.width);
+    const grip = barGrip();
+
+    pointer(grip, "pointerdown", 100, 100);
+    pointer(grip, "pointermove", 130, 120);
+    pointer(grip, "pointermove", 150, 130);
+    await flush();
+    // 動かしている間は覚えない
+    expect(layoutWrites).toEqual([]);
+
+    pointer(grip, "pointerup", 150, 130);
+    await flush();
+    expect(frame.style.left).toBe(`${left + 50}px`);
+    expect(frame.style.top).toBe(`${top + 30}px`);
+    // 組ごと書く (v2)。動かしていない窓の位置は書かない (float に bar だけ)
+    // 最初の配置の枠 (下の枠) の記憶から外れ、右の枠の記憶は残る
+    expect(layoutWrites).toEqual([
+      {
+        version: 2,
+        float: { bar: { left: left + 50, top: top + 30, width } },
+        docks: { side: { tabs: ["list"], active: "list" } },
+      },
+    ]);
+  });
+
+  test("区間・テロップの窓は見出しをドラッグすると動き、位置を覚える", async () => {
+    await showList();
+    const frame = listElement();
+    const left = parseFloat(frame.style.left);
+
+    drag(listHeader(), -100, 20);
+    await flush();
+
+    expect(frame.style.left).toBe(`${left - 100}px`);
+    expect(frame.style.top).toBe("88px");
+    // 動かしていないバーは書かない。右の枠は空になったので docks から消える
+    expect(layoutWrites).toEqual([
+      {
+        version: 2,
+        float: { list: { left: left - 100, top: 88, width: 400 } },
+        docks: { below: { tabs: ["bar"], active: "bar" } },
+      },
+    ]);
+  });
+
+  /** 区間・テロップの窓を出す (区間が 1 つある)。出すかは一覧の中身で決まる */
+  async function showList(): Promise<void> {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  test("画面に詰められた窓の覚えた位置を、ほかの窓を動かしたときに詰めた後の位置で上書きしない", async () => {
+    await showList();
+    // jsdom は寸法を持たない。一覧の窓の見出し (掴む場所) を幅 400・高さ 32 に決め打ちし、詰め方を測れるようにする
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this === listElement()) return boxAt(0, 0, 400, 300);
+        if (this === listHeader()) return boxAt(0, 0, 400, 32);
+        return boxAt(0, 0, 0, 0);
+      });
+    const setWidth = (width: number): void => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+      window.dispatchEvent(new Event("resize"));
+    };
+    try {
+      // 最初の位置 (1024 - 416 = 608, 68) から下へ 100px 動かして覚える
+      drag(listHeader(), 0, 100);
+      await flush();
+      const placed = { left: 608, top: 168, width: 400 };
+      expect((storedLayout as WindowLayout).float.list).toEqual(placed);
+
+      // ブラウザを狭めると、見出しが画面に残るところ (800 - 400) まで詰められる
+      setWidth(800);
+      expect(listElement().style.left).toBe("400px");
+
+      // その間にバーの窓を動かして覚えても、一覧の窓の覚えた位置は置いた場所のまま
+      // (窓の rect() から組を作ると、詰めた後の 400 で書かれて、広げ直しても戻らなくなる)
+      drag(barGrip(), 10, 0);
+      await flush();
+      const stored = storedLayout as WindowLayout;
+      expect(stored.float.list).toEqual(placed);
+      expect(Object.keys(stored.float).sort()).toEqual(["bar", "list"]);
+    } finally {
+      setWidth(1024);
+      spy.mockRestore();
+    }
+  });
+
+  test("ダブルクリックで戻した窓は組から消え、ほかの窓の覚えた位置は残る", async () => {
+    await showList();
+    drag(barGrip(), 30, 20);
+    drag(listHeader(), -100, 20);
+    await flush();
+    expect(Object.keys((storedLayout as WindowLayout).float).sort()).toEqual(["bar", "list"]);
+
+    dblclick(listHeader());
+    await flush();
+
+    const stored = storedLayout as WindowLayout;
+    expect(stored.version).toBe(2);
+    expect(Object.keys(stored.float)).toEqual(["bar"]);
+    expect(stored.docks).toEqual({ side: { tabs: ["list"], active: "list" } });
+  });
+
+  test("つまみ・見出しをダブルクリックすると最初の配置の枠に戻り (jsdom では枠が使えないので最初の位置に浮く)、覚えた位置を消す", async () => {
+    const spy = placePlayer({ left: 24, top: 80, width: 800, height: 450 }, 106);
+    try {
+      dblclick(barGrip());
+      drag(barGrip(), 100, 50);
+      drag(listHeader(), -100, 20);
+      await flush();
+      expect(storedLayout).toEqual({
+        version: 2,
+        float: {
+          bar: { left: 124, top: 588, width: 800 },
+          list: { left: window.innerWidth - 516, top: 88, width: 400 },
+        },
+        docks: {},
+      });
+
+      dblclick(barGrip());
+      dblclick(listHeader());
+      await flush();
+
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+      expect(listElement().style.left).toBe(`${window.innerWidth - 416}px`);
+      expect(listElement().style.top).toBe("68px");
+      expect(storedLayout).toEqual({
+        version: 2,
+        float: {},
+        docks: {
+          below: { tabs: ["bar"], active: "bar" },
+          side: { tabs: ["list"], active: "list" },
+        },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("バーを作り直しても窓は作り直さず、位置も変わらない。作り直したつまみでも動かせる", async () => {
+    const frame = barWindowElement();
+    drag(barGrip(), 30, 20);
+    await flush();
+    const placed = styleRect(frame);
+    const oldGrip = barGrip();
+
+    // YouTube の再描画でバーの中身が外れた場面。窓は作り直さず、中身 (つまみを含む) だけを作り直す
+    barElement().remove();
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(barWindowElement()).toBe(frame);
+    expect(styleRect(frame)).toEqual(placed);
+    // 中身は作り直した。つまみも新しい要素になる
+    expect(barGrip()).not.toBe(oldGrip);
+    drag(barGrip(), 10, 0);
+    expect(frame.style.left).toBe(`${parseFloat(placed.left) + 10}px`);
+  });
+
+  test("触った順が新しいほど上に来る (2 つの窓)", async () => {
+    await showList();
+    const zIndexes = () =>
+      [barWindowElement(), listElement()].map((element) => Number(element.style.zIndex));
+
+    pointer(barElement(), "pointerdown", 0, 0);
+    pointer(listBody(), "pointerdown", 0, 0);
+    expect(zIndexes()).toEqual([2000, 2001]);
+
+    // バーを触り直すとバーがいちばん上
+    pointer(barElement(), "pointerdown", 0, 0);
+    expect(zIndexes()).toEqual([2001, 2000]);
+  });
+
+  test("全画面の間は 2 つとも隠し、抜けたら戻す", async () => {
+    await showList();
+    expect(windowsHidden()).toEqual([false, false]);
+
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(windowsHidden()).toEqual([true, true]);
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(windowsHidden()).toEqual([false, false]);
+  });
+
+  test("動画ページ以外では 2 つともページから外す。戻れば出す", async () => {
+    await showList();
+
+    history.pushState({}, "", "/");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(ourElements()).toBe(0);
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(windowsHidden()).toEqual([false, false]);
+  });
+
+  // resolution 追加 1 (Task 5 レビューの Minor): applyMode が中身の根を外した後に
+  // mount が #below の無さで途中で抜けると、バーの窓が中身の無いまま出続けてしまう。
+  // mount はこの経路でも refreshWindows() を呼んでからでないと抜けてはいけない
+  test("#below が無い状態で中身の根が外れると、mount はバーの窓を隠してから抜ける", async () => {
+    expect(barWindowElement().hidden).toBe(false);
+
+    document.getElementById("yt-clip-bar")?.remove();
+    document.getElementById("below")?.remove();
+    // DOM の変化を起こして MutationObserver 経由で mount() を走らせる
+    document.body.append(document.createElement("div"));
+    await flush();
+
+    expect(barWindowElement().hidden).toBe(true);
+  });
+
+  test("隠れていた窓を出すときは、最初の位置を取り直す", () => {
+    let playerBottom = 530;
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, playerBottom - 450, 800, 450);
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      dblclick(barGrip());
+      expect(barWindowElement().style.top).toBe("538px");
+
+      Object.defineProperty(document, "fullscreenElement", {
+        configurable: true,
+        get: () => video.element,
+      });
+      try {
+        document.dispatchEvent(new Event("fullscreenchange"));
+        expect(barWindowElement().hidden).toBe(true);
+        // 全画面の間にプレイヤーの位置が変わった
+        playerBottom = 400;
+      } finally {
+        Reflect.deleteProperty(document, "fullscreenElement");
+      }
+      document.dispatchEvent(new Event("fullscreenchange"));
+
+      expect(barWindowElement().hidden).toBe(false);
+      expect(barWindowElement().style.top).toBe("408px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("動かした窓は、出し直しても置いた場所のまま", async () => {
+    let playerBottom = 530;
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(24, playerBottom - 450, 800, 450);
+        return boxAt(0, 0, 0, 0);
+      });
+    try {
+      dblclick(barGrip());
+      drag(barGrip(), 30, -100);
+      await flush();
+      const placed = styleRect(barWindowElement());
+      expect(placed.top).toBe("438px");
+
+      Object.defineProperty(document, "fullscreenElement", {
+        configurable: true,
+        get: () => video.element,
+      });
+      try {
+        document.dispatchEvent(new Event("fullscreenchange"));
+        playerBottom = 400;
+      } finally {
+        Reflect.deleteProperty(document, "fullscreenElement");
+      }
+      document.dispatchEvent(new Event("fullscreenchange"));
+
+      expect(styleRect(barWindowElement())).toEqual(placed);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("テーマを切り替えるとバーの窓の配色も変わる", async () => {
+    // バーの窓は body の直下でページの外にある。配色は自分で持つ
+    document.documentElement.setAttribute("dark", "");
+    try {
+      await flush();
+      expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#212121");
+    } finally {
+      document.documentElement.removeAttribute("dark");
+    }
+    await flush();
+    expect(barWindowElement().style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+  });
+});
+
+describe("動かしていない窓の最初の位置を取り直す", () => {
+  /** プレイヤーの画面上の位置を、テストの途中で変えられるように決め打ちする */
+  function stubPlayer(initial: { left: number; top: number; width: number; height: number }) {
+    const box = { ...initial };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "movie_player") return boxAt(box.left, box.top, box.width, box.height);
+        if (this.id === "yt-clip-bar-window") return boxAt(0, 0, 0, 106);
+        return boxAt(0, 0, 0, 0);
+      });
+    return { box, spy };
+  }
+
+  function player(): HTMLElement {
+    const element = document.getElementById("movie_player");
+    if (element === null) throw new Error("プレイヤーが見つかりません");
+    return element;
+  }
+
+  // 読み込み時に覚えた位置 (LAYOUT_AT_LOAD) で出ているので、最初の位置に戻してから始める
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    await flush();
+  });
+
+  test("ブラウザの大きさが変わると取り直す", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "24px",
+        top: "538px",
+        width: "800px",
+        height: "",
+      });
+
+      box.left = 0;
+      box.width = 900;
+      box.height = 500;
+      window.dispatchEvent(new Event("resize"));
+      // 80 + 500 + 8
+      expect(styleRect(barWindowElement())).toEqual({
+        left: "0px",
+        top: "588px",
+        width: "900px",
+        height: "",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("区間・テロップの窓も画面の幅に合わせて取り直す", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      // 1440 - 16 - 400
+      expect(listElement().style.left).toBe("1024px");
+      expect(listElement().style.top).toBe("68px");
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: 1024,
+      });
+      window.dispatchEvent(new Event("resize"));
+    }
+    expect(listElement().style.left).toBe("608px");
+  });
+
+  test("プレイヤーの大きさが変わると取り直す (シアターモードの切り替えなど)", () => {
+    // beforeEach の buildPage で作り直したプレイヤーを見ている (mount のたびに見直す)
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      box.height = 500;
+      resizeElement(player());
+      expect(barWindowElement().style.top).toBe("588px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("ページのスクロールでは取り直さない (窓は同じ画面位置に浮いたまま)", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // ページを 200px 送った: プレイヤーは画面の上へ動く
+      box.top = -120;
+      window.dispatchEvent(new Event("scroll"));
+      document.dispatchEvent(new Event("scroll"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // 状態が届いても取り直さない (出ている間は置き直さない)
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(barWindowElement().style.top).toBe("538px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // resolution 追加 2 (Task 5 レビューの Minor): スクロールと並べて、状態が届くだけでは
+  // 取り直さないことを別のきっかけ (プレイヤーの位置の変化) でも確かめる
+  test("窓を出している間は、状態を emit しても最初の位置を取り直さない", () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      expect(barWindowElement().style.top).toBe("538px");
+
+      // プレイヤーの画面上の位置が変わっても、resize / ResizeObserver 以外のきっかけ
+      // (状態の通知) では取り直さない
+      box.top = 200;
+      emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+      expect(barWindowElement().style.top).toBe("538px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("スクロールした後に取り直すときは、プレイヤーの画面上の位置をそのまま使う", () => {
+    // ページを 200px 送った状態 (プレイヤーの上端が画面の上へ 120px 出ている)
+    const { spy } = stubPlayer({ left: 24, top: -120, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      // -120 + 450 + 8。ページの座標に直さない (窓は画面に固定)
+      expect(barWindowElement().style.top).toBe("338px");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("動かした窓は、ブラウザやプレイヤーの大きさが変わっても置いた場所のまま", async () => {
+    const { box, spy } = stubPlayer({ left: 24, top: 80, width: 800, height: 450 });
+    try {
+      window.dispatchEvent(new Event("resize"));
+      drag(barGrip(), 30, -100);
+      await flush();
+      const placed = styleRect(barWindowElement());
+      expect(placed.top).toBe("438px");
+
+      box.height = 500;
+      window.dispatchEvent(new Event("resize"));
+      resizeElement(player());
+
+      expect(styleRect(barWindowElement())).toEqual(placed);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("ドック枠とタブ", () => {
+  type Point = { x: number; y: number };
+  /** 差す先の箱 (jsdom はレイアウトを持たない)。帯 (目印 40px / タブの列 28px) はそれぞれの枠の上端に置く */
+  const BELOW = { left: 0, top: 600, width: 800 };
+  const SIDE = { left: 840, top: 60, width: 400 };
+  /**
+   * 下の枠の中のバーの窓の箱。引き出した窓の位置を、fitRect の上限 (YouTube のヘッダーの下 56px) に詰められない所で
+   * 測るため (26eaebd。判断メモ 33)
+   */
+  const DOCKED_BAR = { left: 0, top: 600, width: 800, height: 140 };
+  /** 帯の中の点 (下の枠 / 右の枠)。目印 (40px) にもタブの列 (28px) にも入る高さ */
+  const BELOW_BAND: Point = { x: 100, y: 610 };
+  const SIDE_BAND: Point = { x: 900, y: 70 };
+  /** どの帯からも離れた点 */
+  const AWAY: Point = { x: 300, y: 300 };
+  /** ドラッグを始める点 (帯の外) */
+  const START: Point = { x: 320, y: 320 };
+
+  /** 右の枠の差す先の幅。0 にすると使えない枠になる (1 列表示の代わり) */
+  let sideWidth = SIDE.width;
+  let layoutSpy: { mockRestore(): void } | null = null;
+
+  /** 差す先と、枠の中の帯・タブ・バーの窓の位置を決め打ちする。ほかの要素は 0 */
+  function stubDockLayout() {
+    return vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
+        if (this.id === "below") return boxAt(BELOW.left, BELOW.top, BELOW.width, 0);
+        if (this.id === "secondary-inner") return boxAt(SIDE.left, SIDE.top, sideWidth, 0);
+        const box =
+          this.closest("#yt-clip-dock-below") !== null
+            ? BELOW
+            : this.closest("#yt-clip-dock-side") !== null
+              ? SIDE
+              : null;
+        if (box === BELOW && this.id === "yt-clip-bar-window") {
+          return boxAt(DOCKED_BAR.left, DOCKED_BAR.top, DOCKED_BAR.width, DOCKED_BAR.height);
+        }
+        const role = this instanceof HTMLElement ? this.dataset.role : undefined;
+        if (box !== null && role === "dock-marker") return boxAt(box.left, box.top, box.width, 40);
+        if (box !== null && role === "dock-tabs") return boxAt(box.left, box.top, box.width, 28);
+        if (box !== null && role === "dock-tab") return boxAt(box.left + 8, box.top, 100, 28);
+        return boxAt(0, 0, 0, 0);
+      });
+  }
+
+  function slotElement(slot: "below" | "side"): HTMLElement {
+    const element = document.getElementById(`yt-clip-dock-${slot}`);
+    if (element === null) throw new Error(`#yt-clip-dock-${slot} がありません`);
+    return element;
+  }
+
+  function tabElement(slot: "below" | "side", id: WindowId): HTMLElement {
+    const tab = slotElement(slot).querySelector<HTMLElement>(
+      `[data-role='dock-tab'][data-window='${id}']`,
+    );
+    if (tab === null) throw new Error(`${id} のタブがありません`);
+    return tab;
+  }
+
+  /** 出ているタブの文言 (並び順) */
+  function tabLabels(slot: "below" | "side"): string[] {
+    return [...slotElement(slot).querySelectorAll<HTMLElement>("[data-role='dock-tab']")]
+      .filter((tab) => tab.style.display !== "none")
+      .map((tab) => tab.textContent ?? "");
+  }
+
+  function activeLabel(slot: "below" | "side"): string | null {
+    return (
+      slotElement(slot).querySelector<HTMLElement>("[data-role='dock-tab'][data-active='true']")
+        ?.textContent ?? null
+    );
+  }
+
+  /** 落とし先の帯が出ているか (dock.ts がドラッグの間だけ data-drop-target を立てる) */
+  function bandShown(slot: "below" | "side"): boolean {
+    return slotElement(slot).querySelector("[data-drop-target='true']") !== null;
+  }
+
+  /** 最後に保存した組 */
+  function lastWrite(): WindowLayout {
+    const last = layoutWrites[layoutWrites.length - 1];
+    if (last === undefined) throw new Error("まだ保存していません");
+    return last as WindowLayout;
+  }
+
+  /** START で押し、AWAY を通って to で離す (帯へは一度その外から入れる。C2.3) */
+  function dropAt(handle: Element, to: Point): void {
+    pointer(handle, "pointerdown", START.x, START.y);
+    pointer(handle, "pointermove", AWAY.x, AWAY.y);
+    pointer(handle, "pointermove", to.x, to.y);
+    pointer(handle, "pointerup", to.x, to.y);
+  }
+
+  /**
+   * 右の枠のタブを (850, 70) で押し、20px 下で抜いてから to まで運んで離す (C2.4)。抜いた窓は (848, 74) に置かれ
+   * (タブの中の x 2・見出しの高さの半分 16)、to まで同じだけ動く
+   */
+  function pullSideTab(id: WindowId, to: Point): void {
+    const tab = tabElement("side", id);
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 90);
+    pointer(tab, "pointermove", to.x, to.y);
+    pointer(tab, "pointerup", to.x, to.y);
+  }
+
+  /** 下の枠のバーの ⠿ を (100, 700) で押し (窓の中の (100, 100))、10px 右で抜いてそのまま離す。バーは (10, 600) に浮く */
+  function pullBar(): void {
+    pointer(barGrip(), "pointerdown", 100, 700);
+    pointer(barGrip(), "pointermove", 110, 700);
+    pointer(barGrip(), "pointerup", 110, 700);
+  }
+
+  async function showEdit(): Promise<void> {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  /** 2 つの窓を最初の配置 (下の枠 [bar] / 右の枠 [list]) に戻す (掴む場所のダブルクリック) */
+  function resetAll(): void {
+    dblclick(barGrip());
+    dblclick(listHeader());
+  }
+
+  beforeEach(async () => {
+    sideWidth = SIDE.width;
+    layoutSpy = stubDockLayout();
+    // 差す先の幅を測り直させる (幅 0 の枠は使えない)。resize で placeUnmovedWindows → attach が走る
+    window.dispatchEvent(new Event("resize"));
+    await showEdit();
+    resetAll();
+    await flush();
+    layoutWrites = [];
+  });
+
+  afterEach(() => {
+    // 次のテストへ枠の中身を持ち越さない (最初の配置に戻す)
+    resetAll();
+    layoutSpy?.mockRestore();
+    layoutSpy = null;
+    window.dispatchEvent(new Event("resize"));
+  });
+
+  test("最初の配置では、バーは #below の枠、区間・テロップの窓は #secondary-inner の枠に入る。設定のタブは無い", () => {
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(listElement().style.position).toBe("static");
+    expect(slotElement("below").parentElement?.id).toBe("below");
+    expect(slotElement("side").parentElement?.id).toBe("secondary-inner");
+    expect(slotElement("below").style.display).toBe("block");
+    expect(slotElement("side").style.display).toBe("block");
+    // バーだけの枠はタブの列を出さない
+    expect(
+      slotElement("below").querySelector<HTMLElement>("[data-role='dock-tabs']")?.style.display,
+    ).toBe("none");
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+  });
+
+  // spa-inject ③: 出す条件を「文書につながっているか」(getElementById) で見ると、外れた #below の中でバーを隠した後に
+  // sync が body へ退避しても、mount の早抜けが出し直しを呼ばず、バーが body にあるのに隠れたまま残る
+  test("バーの入った下の枠の差す先 (#below) が外れても、退避したバーの窓は隠れたまま残らない。戻れば枠に戻る", async () => {
+    const below = document.getElementById("below");
+    if (below === null) throw new Error("#below がありません");
+    const parent = below.parentElement;
+    if (parent === null) throw new Error("#below の親がありません");
+
+    below.remove();
+    await flush();
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(barWindowElement().hidden).toBe(false);
+
+    parent.prepend(below);
+    await flush();
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(barWindowElement().hidden).toBe(false);
+  });
+
+  test("タブを 8px 以上ドラッグすると枠から出て指の下に付いて動き、離した位置を覚える", async () => {
+    const tab = tabElement("side", "list");
+
+    // タブの箱は (848, 60) から (stub)。(850, 70) で押す = タブの中の (2, 10)
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 74);
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+
+    pointer(tab, "pointermove", 850, 90);
+    // 窓の左端 = 指 − タブの中で掴んだ x (850 − 2)、上端 = 指 − 見出しの高さの半分 (90 − 16)。幅は最初の位置の 400px
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual({ left: "848px", top: "74px", width: "400px", height: "" });
+    // 掴んだタブは指を離すまで残る (捕捉が付いている)
+    expect(tab.isConnected).toBe(true);
+
+    pointer(tab, "pointermove", 400, 300);
+    pointer(tab, "pointerup", 400, 300);
+    await flush();
+
+    expect(tab.isConnected).toBe(false);
+    expect(styleRect(listElement())).toEqual({ left: "398px", top: "284px", width: "400px", height: "" });
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: 398, top: 284, width: 400 } },
+      docks: { below: { tabs: ["bar"], active: "bar" } },
+    });
+  });
+
+  test("浮いた区間・テロップの窓の見出しを右の枠の帯へ落とすと枠の末尾に入って前に出る。float は変えない", async () => {
+    pullSideTab("list", AWAY);
+    await flush();
+    expect(listElement().parentElement).toBe(document.body);
+
+    dropAt(listHeader(), SIDE_BAND);
+    await flush();
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(listElement().style.position).toBe("static");
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: 298, top: 284, width: 400 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["list"], active: "list" },
+      },
+    });
+  });
+
+  test("ドック中のバーの ⠿ を 8px 以上動かすと枠から出て、⠿ が指の下に残ったまま動く", async () => {
+    // 枠の中のバーの窓の左上は (0, 600) (stub)。⠿ を (100, 700) で掴む = 窓の中の (100, 100)
+    pointer(barGrip(), "pointerdown", 100, 700);
+    pointer(barGrip(), "pointermove", 104, 700);
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+
+    pointer(barGrip(), "pointermove", 110, 700);
+    expect(barWindowElement().parentElement).toBe(document.body);
+    // 窓の左上 = 指 − ⠿ の窓の中の位置。幅はプレイヤーの幅 (stub で 0) を最小の 480px に詰めたもの
+    expect(styleRect(barWindowElement())).toEqual({
+      left: "10px",
+      top: "600px",
+      width: "480px",
+      height: "",
+    });
+
+    pointer(barGrip(), "pointermove", 130, 720);
+    pointer(barGrip(), "pointerup", 130, 720);
+    await flush();
+
+    expect(styleRect(barWindowElement())).toEqual({
+      left: "30px",
+      top: "620px",
+      width: "480px",
+      height: "",
+    });
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { bar: { left: 30, top: 620, width: 480 } },
+      docks: { side: { tabs: ["list"], active: "list" } },
+    });
+  });
+
+  test("⠿ で引き出したバーを下の枠の帯へ落とすと戻る。バーだけの枠はタブの列を出さない", async () => {
+    pullBar();
+    await flush();
+    expect(barWindowElement().parentElement).toBe(document.body);
+
+    dropAt(barGrip(), BELOW_BAND);
+    await flush();
+
+    expect(barWindowElement().closest("#yt-clip-dock-below")).not.toBeNull();
+    expect(
+      slotElement("below").querySelector<HTMLElement>("[data-role='dock-tabs']")?.style.display,
+    ).toBe("none");
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { bar: { left: 10, top: 600, width: 480 } },
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["list"], active: "list" },
+      },
+    });
+  });
+
+  test("バーをドラッグしている間、右の枠には落とし先を出さず、右の帯で離しても入らない", async () => {
+    pullBar();
+    await flush();
+
+    pointer(barGrip(), "pointerdown", START.x, START.y);
+    pointer(barGrip(), "pointermove", AWAY.x, AWAY.y);
+    expect(bandShown("below")).toBe(true);
+    expect(bandShown("side")).toBe(false);
+
+    pointer(barGrip(), "pointermove", SIDE_BAND.x, SIDE_BAND.y);
+    pointer(barGrip(), "pointerup", SIDE_BAND.x, SIDE_BAND.y);
+    await flush();
+
+    expect(barWindowElement().parentElement).toBe(document.body);
+    expect(bandShown("below")).toBe(false);
+    expect(lastWrite().docks).toEqual({ side: { tabs: ["list"], active: "list" } });
+  });
+
+  test("浮いた窓の見出しをダブルクリックすると最初の配置の枠に戻って前に出て、float から消える", async () => {
+    pullSideTab("list", AWAY);
+    await flush();
+
+    dblclick(listHeader());
+    await flush();
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: {},
+      docks: {
+        below: { tabs: ["bar"], active: "bar" },
+        side: { tabs: ["list"], active: "list" },
+      },
+    });
+  });
+
+  test("別の枠に入れた窓のタブをダブルクリックしても、最初の配置の枠に戻る", async () => {
+    // 区間・テロップのタブを下の枠 (バーだけなので目印) へ
+    const tab = tabElement("side", "list");
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 90);
+    pointer(tab, "pointermove", AWAY.x, AWAY.y);
+    pointer(tab, "pointermove", BELOW_BAND.x, BELOW_BAND.y);
+    pointer(tab, "pointerup", BELOW_BAND.x, BELOW_BAND.y);
+    await flush();
+    expect(tabLabels("below")).toEqual(["バー", "区間・テロップ"]);
+
+    dblclick(tabElement("below", "list"));
+    await flush();
+
+    expect(tabLabels("below")).toEqual([]);
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    // 下の枠の前のタブ (区間・テロップ) は抜けたので無い扱い。表示はバーだけ
+    expect(lastWrite().docks).toEqual({
+      below: { tabs: ["bar"] },
+      side: { tabs: ["list"], active: "list" },
+    });
+  });
+
+  test("右の枠の差す先が幅 0 になると、中の窓は float に位置があっても最初の位置の浮いた窓で出る。戻ると枠に戻る", async () => {
+    // 引き出して置き、戻す (float に位置がある)
+    pullSideTab("list", AWAY);
+    await flush();
+    dropAt(listHeader(), SIDE_BAND);
+    await flush();
+
+    sideWidth = 0;
+    window.dispatchEvent(new Event("resize"));
+
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual({
+      left: `${window.innerWidth - 416}px`,
+      top: "68px",
+      width: "400px",
+      height: "",
+    });
+    expect(slotElement("side").style.display).toBe("none");
+
+    sideWidth = SIDE.width;
+    window.dispatchEvent(new Event("resize"));
+
+    expect(listElement().closest("#yt-clip-dock-side")).not.toBeNull();
+  });
+
+  test("退避中の窓を動かすと、その時点で浮いた窓になり、枠の記憶からも外れる", async () => {
+    sideWidth = 0;
+    window.dispatchEvent(new Event("resize"));
+    layoutWrites = [];
+
+    drag(listHeader(), 30, 20);
+    await flush();
+
+    expect(lastWrite()).toEqual({
+      version: 2,
+      float: { list: { left: window.innerWidth - 386, top: 88, width: 400 } },
+      docks: { below: { tabs: ["bar"], active: "bar" } },
+    });
+    sideWidth = SIDE.width;
+    window.dispatchEvent(new Event("resize"));
+    expect(listElement().parentElement).toBe(document.body);
+  });
+
+  test("YouTube が差す先の子を作り直しても (replaceChildren)、mount で枠を中の窓ごと先頭に差し直す", async () => {
+    const slot = slotElement("side");
+    const inner = document.getElementById("secondary-inner");
+    if (inner === null) throw new Error("#secondary-inner がありません");
+
+    const related = document.createElement("div");
+    related.id = "related";
+    inner.replaceChildren(related);
+    expect(slot.isConnected).toBe(false);
+    await flush();
+
+    expect(inner.firstElementChild).toBe(slot);
+    expect(slot.contains(listElement())).toBe(true);
+  });
+
+  test("別の動画へ移っても区間・テロップのタブ (文字起こしの欄) は残り、区間の一覧は空。戻っても出ている", async () => {
+    history.pushState({}, "", "/watch?v=video-b");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(slotElement("side").style.display).toBe("block");
+    expect(listBody().querySelectorAll("[data-role='segment']").length).toBe(0);
+
+    history.pushState({}, "", "/watch?v=video-a");
+    document.body.append(document.createElement("div"));
+    await flush();
+    expect(tabLabels("side")).toEqual(["区間・テロップ"]);
+    expect(slotElement("side").style.display).toBe("block");
+  });
+
+  test("全画面の間は枠も隠し、抜けたら戻す", async () => {
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => video.element,
+    });
+    try {
+      document.dispatchEvent(new Event("fullscreenchange"));
+      expect(slotElement("below").style.display).toBe("none");
+    } finally {
+      Reflect.deleteProperty(document, "fullscreenElement");
+    }
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(slotElement("below").style.display).toBe("block");
+  });
+
+  test("区間を足すと、ドック中の区間・テロップのタブが前に出る (窓の中は送らない)", async () => {
+    // 区間・テロップのタブを下の枠 (バーと同じ枠) へ入れ、バーのタブを押して前に出しておく
+    const tab = tabElement("side", "list");
+    pointer(tab, "pointerdown", 850, 70);
+    pointer(tab, "pointermove", 850, 90);
+    pointer(tab, "pointermove", AWAY.x, AWAY.y);
+    pointer(tab, "pointermove", BELOW_BAND.x, BELOW_BAND.y);
+    pointer(tab, "pointerup", BELOW_BAND.x, BELOW_BAND.y);
+    await flush();
+    const barTab = tabElement("below", "bar");
+    pointer(barTab, "pointerdown", 0, 0);
+    pointer(barTab, "pointerup", 0, 0);
+    expect(tabLabels("below")).toEqual(["バー", "区間・テロップ"]);
+    expect(activeLabel("below")).toBe("バー");
+
+    video.element.currentTime = 300;
+    clickButton("＋ 区間を追加");
+    await flush();
+    emit({
+      kind: "ready",
+      segments: [RANGE, { startSec: 300, endSec: 315 }],
+      telops: [],
+      meta: META_A,
+    });
+
+    expect(activeLabel("below")).toBe("区間・テロップ");
+    expect(listBody().scrollTop).toBe(0);
+  });
+});
+
+describe("オン / オフ (マスタースイッチ)", () => {
+  /** テロップ付きの ready。プレビューの canvas が video の親に付く */
+  const READY_WITH_TELOP: ClipState = {
+    kind: "ready",
+    segments: [RANGE],
+    telops: [{ startSec: 11, endSec: 13, text: "テロップ" }],
+    meta: META_A,
+  };
+
+  // 前の describe (「ドック枠とタブ」) の枠の中身を持ち越さない (判断メモ 34)。jsdom では差す先の幅が 0 なので枠は
+  // 使えず、2 つとも浮いた窓 (退避) で出る。「フロートの窓」と同じ作法
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    await flush();
+  });
+
+  afterEach(async () => {
+    // モジュールは 1 回だけ読み込んで使い回しているので、次のテストのためにオンへ戻す
+    if (storedEnabled === false) {
+      setEnabled(true);
+      await flush();
+    }
+  });
+
+  test("オフにすると窓・ドック枠・シークバーの帯・プレビューの canvas が消え、YouTube の要素の中に何も残らない", async () => {
+    emit(READY_WITH_TELOP);
+    await flush();
+    // 前提: 帯と canvas と枠が出ている
+    expect(overlay()).not.toBeNull();
+    expect(document.getElementById("yt-clip-telop-preview")).not.toBeNull();
+    expect(document.getElementById("yt-clip-dock-below")).not.toBeNull();
+
+    setEnabled(false);
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(document.querySelector(".ytp-progress-bar")?.childElementCount).toBe(0);
+    expect(video.element.parentElement?.querySelector("canvas") ?? null).toBeNull();
+    expect(document.getElementById("below")?.childElementCount).toBe(0);
+    expect(document.getElementById("secondary-inner")?.childElementCount).toBe(0);
+  });
+
+  test("オフにすると observer・document と window の listener・再生位置の rAF・onMessage と設定の onChanged を外す (スイッチの見張りは残す)", async () => {
+    const mutationDisconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
+    const resizeDisconnect = vi.spyOn(ResizeObserver.prototype, "disconnect");
+    const documentRemove = vi.spyOn(document, "removeEventListener");
+    const windowRemove = vi.spyOn(window, "removeEventListener");
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame");
+    try {
+      expect(onMessage).not.toBeNull();
+      expect(storageListeners).toHaveLength(2);
+
+      setEnabled(false);
+      await flush();
+
+      // body の子孫の監視とテーマ (<html dark>) の監視
+      expect(mutationDisconnect.mock.calls.length).toBeGreaterThanOrEqual(2);
+      // プレイヤーの大きさの監視 (とプレビューの canvas の追従)
+      expect(resizeDisconnect).toHaveBeenCalled();
+      expect(documentRemove).toHaveBeenCalledWith("fullscreenchange", expect.any(Function));
+      expect(windowRemove).toHaveBeenCalledWith("resize", expect.any(Function));
+      // 再生位置を拡大バーへ流すループ
+      expect(cancelFrame).toHaveBeenCalled();
+      expect(onMessage).toBeNull();
+      // 残るのはスイッチの見張り (switch-driver) の 1 本だけ
+      expect(storageListeners).toHaveLength(1);
+    } finally {
+      mutationDisconnect.mockRestore();
+      resizeDisconnect.mockRestore();
+      documentRemove.mockRestore();
+      windowRemove.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+
+  test("外し損ねた onMessage に、オフの間に state/changed が届いても何も描かない", async () => {
+    const listener = onMessage;
+    setEnabled(false);
+    await flush();
+
+    listener?.(
+      { type: "state/changed", state: { kind: "ready", segments: [RANGE], telops: [], meta: META_A } },
+      {},
+      () => undefined,
+    );
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(overlay()).toBeNull();
+  });
+
+  test("オフの間に設定が変わっても (sync の onChanged) 何もしない", async () => {
+    setEnabled(false);
+    await flush();
+    sent = [];
+
+    await flush();
+
+    expect(ourElements()).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  test("オンに戻すと、読み込み直さずに窓が出て content/loaded を送り、応答の状態で範囲と帯が戻る", async () => {
+    setEnabled(false);
+    await flush();
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+    sent = [];
+
+    setEnabled(true);
+    await flush();
+
+    expect(sent).toContainEqual({ type: "content/loaded" });
+    expect(statusText()).toBe("0:10 〜 0:20 (10秒)");
+    expect(overlay()).not.toBeNull();
+    expect(barWindowElement().hidden).toBe(false);
+    expect(onMessage).not.toBeNull();
+    expect(storageListeners).toHaveLength(2);
+  });
+
+  test("オフ → オンで覚えた配置を読み直し、動かした窓は同じ位置に出る", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    drag(listHeader(), -100, 20);
+    await flush();
+    const moved = styleRect(listElement());
+
+    setEnabled(false);
+    await flush();
+    setEnabled(true);
+    await flush();
+
+    // 区間があるので区間・テロップの窓が出る (content/loaded の応答の ready で)
+    expect(listElement().hidden).toBe(false);
+    expect(listElement().parentElement).toBe(document.body);
+    expect(styleRect(listElement())).toEqual(moved);
+  });
+
+  test("浮いた窓をドラッグしている最中にオフにすると、外れた見出しに lostpointercapture が届いても配置を保存しない (他の窓の覚えた位置が残る)", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    // バーの位置を覚えさせる (オフで消えてはいけない他の窓の記憶)
+    drag(barGrip(), 30, -20);
+    await flush();
+    const remembered = storedLayout;
+    expect(remembered).toMatchObject({ float: { bar: expect.any(Object) } });
+    layoutWrites = [];
+
+    // 区間・テロップの窓を掴んで動かしている最中にオフにする。destroy が見出しを外すと、Chrome は外れた要素へ
+    // lostpointercapture を配る (jsdom では手で配る)
+    const header = listHeader();
+    pointer(header, "pointerdown", 100, 100);
+    pointer(header, "pointermove", 60, 140);
+    setEnabled(false);
+    await flush();
+    header.dispatchEvent(new Event("lostpointercapture"));
+    await flush();
+
+    expect(layoutWrites).toEqual([]);
+    expect(storedLayout).toEqual(remembered);
+  });
+
+  test("退避中の窓をドラッグしている最中にオフにすると、lostpointercapture が届いても片付けた窓をページへ戻さない", async () => {
+    // beforeEach で 2 つとも退避中 (枠に入っているが枠が使えない)。退避中の窓を動かすと undock で body へ
+    // 出し直す (C2.1) ので、オフの後にそれが走ると片付けた窓がオフのページに戻る
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    const element = listElement();
+    layoutWrites = [];
+
+    const header = listHeader();
+    pointer(header, "pointerdown", 100, 100);
+    pointer(header, "pointermove", 60, 140);
+    setEnabled(false);
+    await flush();
+    header.dispatchEvent(new Event("lostpointercapture"));
+    await flush();
+
+    expect(element.isConnected).toBe(false);
+    expect(ourElements()).toBe(0);
+    expect(layoutWrites).toEqual([]);
+  });
+
+  test("オンにした直後にオフにすると、遅れて届いた応答と覚えた配置の読みで窓も帯も出さない", async () => {
+    setEnabled(false);
+    await flush();
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+
+    setEnabled(true);
+    // content/loaded の応答 (setTimeout の後) と覚えた配置の読みが返る前に切る
+    setEnabled(false);
+    await flush();
+
+    expect(ourElements()).toBe(0);
+  });
+
+  test("範囲の再生を押した直後にオフにすると、再生も範囲の監視 (rVFC) も始めない", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    const play = vi.spyOn(video.element, "play");
+    try {
+      clickButton("▶ 区間を見る");
+      // seek の完了 (setTimeout の後) を待たずに切る
+      setEnabled(false);
+      await flush();
+
+      expect(play).not.toHaveBeenCalled();
+      expect(video.pendingFrames()).toBe(0);
+    } finally {
+      play.mockRestore();
+    }
+  });
+
+  test("start() を二度呼ぶ・走っていないのに stop() を呼ぶのは配線の誤りなので throw", async () => {
+    const content = await import("@/content/youtube");
+    expect(() => content.start()).toThrow("二度");
+
+    setEnabled(false);
+    await flush();
+    expect(() => content.stop()).toThrow("走っていない");
+  });
+});
+
+describe("録画中・書き出し中のオフ (マスタースイッチの spec §4.1)", () => {
+  // 前の describe の枠の中身を持ち越さない (判断メモ 34)
+  beforeEach(async () => {
+    dblclick(barGrip());
+    dblclick(listHeader());
+    await flush();
+  });
+
+  afterEach(async () => {
+    // 次のテストのためにオンへ戻す (モジュールは 1 回だけ読み込んで使い回している)
+    if (storedEnabled === false) {
+      setEnabled(true);
+      await flush();
+    }
+  });
+
+  /** このタブで録画を始め、recording まで進める (実機の順序: seeking → recorder/start → recording) */
+  async function startRecordingInThisTab(): Promise<void> {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+  }
+
+  test("録画中 (recording) にオフにすると CANCEL_RECORDING を送り、その応答 (ready) で片付く。録画も OUT の監視も止まる", async () => {
+    await startRecordingInThisTab();
+    const recorder = startedRecorder();
+    sent = [];
+
+    setEnabled(false);
+    // 応答が返るまでは片付けない (ページのバーは今までどおり)
+    expect(ourElements()).toBeGreaterThan(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([{ type: "CANCEL_RECORDING" }]);
+    expect(swState.kind).toBe("ready");
+    expect(ourElements()).toBe(0);
+    expect(recorder.state).toBe("inactive");
+    expect(video.pendingFrames()).toBe(0);
+  });
+
+  test("録画の準備中 (seeking) にオフにしても CANCEL_RECORDING を送って片付く", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    setEnabled(false);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+  });
+
+  test("準備中 (seeking) にオフにした後、中止の応答より先に同じ録画の recording が届いても、応答 (ready) で片付く (ready の同報を待たない)", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    // 中止を送る (応答は setTimeout の後に返る)。その間に router の queue で先に進んだ recording の同報が届いた
+    setEnabled(false);
+    emit({ kind: "recording", segments: [RANGE], telops: [], meta: META_A });
+    // ready の同報は失われた (emit しない)。頼れるのは中止の応答だけ
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+    // 次のテストのために、状態機械を中止が通った後の状態に揃える (オンに戻すと content/loaded の応答で読まれる)
+    swState = { kind: "ready", segments: [RANGE], telops: [], meta: META_A };
+  });
+
+  test("オフを待つ間にオンへ戻して録り直した後に古い中止の応答 (ready) が届いても、新しい録画の旗を下ろさない (判断メモ 33)", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+
+    // 中止を送り、応答が返る前にオンへ戻して、別の録画を始める (ready → seeking で capturing が立ち直す)
+    setEnabled(false);
+    setEnabled(true);
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    emit({ kind: "seeking", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    sent = [];
+
+    // 新しい録画はまだ準備中。古い応答で旗が下りていれば、ここでその場で片付いてしまう
+    setEnabled(false);
+    expect(ourElements()).toBeGreaterThan(0);
+    await flush();
+
+    expect(clipEvents()).toContainEqual({ type: "CANCEL_RECORDING" });
+    expect(ourElements()).toBe(0);
+  });
+
+  test("準備中にオフにして片付いた後に録画の開始 (startRecording) が失敗しても、recorder/failed を送らない", async () => {
+    emit({ kind: "ready", segments: [RANGE], telops: [], meta: META_A });
+    const original = (video.element as unknown as { captureStream: () => unknown }).captureStream;
+    Object.assign(video.element, {
+      captureStream: () => {
+        throw new Error("captureStream に失敗しました");
+      },
+    });
+    try {
+      sent = [];
+      // startRecording は次の microtask で reject する。その前に (同期に) 片付けを済ませ、reject を片付けた後に届かせる。
+      // capturing が偽なのでオフはその場で stop する (中止の応答で ready に戻して片付けた後と同じ、走っていない回)
+      command("recorder/start");
+      setEnabled(false);
+      expect(ourElements()).toBe(0);
+      await flush();
+
+      expect(sent.some((message) => message.type === "recorder/failed")).toBe(false);
+      expect(swState.kind).toBe("ready");
+    } finally {
+      Object.assign(video.element, { captureStream: original });
+    }
+  });
+
+  test("複数区間の継ぎ目でオフにすると、片付けた後に seek が済んでも再生も rVFC も始めず、FAIL も送らない", async () => {
+    const TWO: ClipRange[] = [
+      { startSec: 83, endSec: 98 },
+      { startSec: 242, endSec: 250 },
+    ];
+    emit({ kind: "recording", segments: TWO, telops: [], meta: META_A });
+    await flush();
+    command("recorder/start");
+    await flush();
+    const recorder = startedRecorder();
+    const play = vi.spyOn(video.element, "play");
+    try {
+      sent = [];
+      // **オフを先に押す** (判断メモ 31): 中止の応答 (setTimeout) を先に積み、その後に 1 区間目の終わりを踏ませて継ぎ目の
+      // seek (seeked も setTimeout) を始める。応答 → stop → seek の完了、の順になる
+      setEnabled(false);
+      video.advanceFrame(98);
+      await flush();
+
+      expect(ourElements()).toBe(0);
+      expect(play).not.toHaveBeenCalled();
+      expect(video.pendingFrames()).toBe(0);
+      expect(clipEvents()).toEqual([{ type: "CANCEL_RECORDING" }]);
+      expect(recorder.state).toBe("inactive");
+    } finally {
+      play.mockRestore();
+    }
+  });
+
+  test("書き出し中 (encoding) にオフにすると中止は送らずに待ち、recorder/done を送り終えてから片付く", async () => {
+    await startRecordingInThisTab();
+    video.advanceFrame(20.1);
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+    sent = [];
+
+    setEnabled(false);
+    await flush();
+    // 中止を送らない (encoding で止めると service worker が encoding で固まる)。窓もまだある
+    expect(clipEvents()).toEqual([]);
+    expect(barWindowElement().isConnected).toBe(true);
+
+    command("recorder/stop");
+    await flush();
+    await flush();
+
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+    expect(ourElements()).toBe(0);
+  });
+
+  test("プレビュー (preview) でオフにするとその場で片付き、RESET_MARKS も FAIL も送らない (クリップは状態機械に残る)", async () => {
+    emit({
+      kind: "preview",
+      clipId: "clip-1",
+      segments: [RANGE],
+      telops: [],
+      meta: META_A,
+      mimeType: "video/mp4",
+    });
+    await flush();
+    sent = [];
+
+    setEnabled(false);
+    expect(ourElements()).toBe(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(swState.kind).toBe("preview");
+  });
+
+  test("録画していないタブ (応答で busy を受け取っただけ) はその場で片付き、CANCEL_RECORDING を送らない。オフ + busy でもオンに戻せる", async () => {
+    setEnabled(false);
+    await flush();
+    // 別のタブで録画中。このタブには state/changed は届かず、content/loaded の応答でだけ busy を知る
+    swState = { kind: "recording", segments: [RANGE], telops: [], meta: META_A };
+    sent = [];
+
+    setEnabled(true);
+    await flush();
+    // オフ + busy でもオンに戻せる (start が content/loaded を送る)
+    expect(sent).toContainEqual({ type: "content/loaded" });
+    expect(ourElements()).toBeGreaterThan(0);
+    sent = [];
+
+    setEnabled(false);
+    expect(ourElements()).toBe(0);
+    await flush();
+
+    expect(clipEvents()).toEqual([]);
+    expect(swState.kind).toBe("recording");
+  });
+
+  test("書き出しを待っている間にオンへ戻したら stop しない (書き出しの結果はそのまま送る)", async () => {
+    await startRecordingInThisTab();
+    video.advanceFrame(20.1);
+    emit({ kind: "encoding", segments: [RANGE], telops: [], meta: META_A });
+    await flush();
+
+    setEnabled(false);
+    await flush();
+    setEnabled(true);
+    await flush();
+    command("recorder/stop");
+    await flush();
+    await flush();
+
+    expect(sent.some((message) => message.type === "recorder/done")).toBe(true);
+    expect(barWindowElement().isConnected).toBe(true);
+    expect(onMessage).not.toBeNull();
   });
 });

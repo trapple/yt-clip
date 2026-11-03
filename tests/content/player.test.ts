@@ -124,6 +124,31 @@ describe("onReachTime", () => {
 
     expect(onReach).not.toHaveBeenCalled();
   });
+
+  test("指定位置の前に動画が終わったら (最後のフレームは duration より手前)、そこで呼ぶ", () => {
+    const { video, advanceTo } = makeVideoWithFrames();
+    const onReach = vi.fn();
+    onReachTime(video, 1700.08, onReach);
+
+    advanceTo(1700.06);
+    video.dispatchEvent(new Event("ended"));
+    expect(onReach).toHaveBeenCalledTimes(1);
+
+    // フレームが来ても 2 回目は呼ばない
+    advanceTo(1700.08);
+    expect(onReach).toHaveBeenCalledTimes(1);
+  });
+
+  test("解除した後に動画が終わっても呼ばない", () => {
+    const { video } = makeVideoWithFrames();
+    const onReach = vi.fn();
+    const cancel = onReachTime(video, 40, onReach);
+
+    cancel();
+    video.dispatchEvent(new Event("ended"));
+
+    expect(onReach).not.toHaveBeenCalled();
+  });
 });
 
 describe("getVideoMeta", () => {

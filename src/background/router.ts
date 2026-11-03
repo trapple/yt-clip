@@ -15,6 +15,18 @@ import {
   type FailureReason,
 } from "@/shared/types";
 
+/** タブから届いたとき、そのタブを録画対象にするイベント (MARK_IN / ADD_SEGMENT は上で別に扱う) */
+const TAB_OWNING_EVENTS: ReadonlySet<ClipEvent["type"]> = new Set<ClipEvent["type"]>([
+  "MARK_OUT",
+  "ADJUST_SEGMENT",
+  "REMOVE_SEGMENT",
+  "ADD_TELOP",
+  "UPDATE_TELOP",
+  "REMOVE_TELOP",
+  "SET_CLIP",
+  "START_RECORDING",
+]);
+
 /** router が使う外部依存。テストではフェイクを渡す */
 export type RouterDeps = {
   saveClip(clip: StoredClip): Promise<void>;
@@ -377,13 +389,24 @@ export function createRouter(
       return;
     }
 
-    // **区間を作るイベントはどちらも録画対象のタブを決める。** エディット
-    // モードの最初の区間は MARK_IN ではなく ADD_SEGMENT で作られるため、
+    // **区間を作るイベントはどちらも録画対象のタブを決める。** ＋ 区間を追加で
+    // 作った最初の区間は MARK_IN ではなく ADD_SEGMENT で作られるため、
     // MARK_IN だけを見ていると captureTabId が null のまま録画に進み、
     // recorder/start がどこへも飛ばずに seeking で固まる
     if (
       (event.type === "MARK_IN" || event.type === "ADD_SEGMENT") &&
       senderTabId !== undefined
+    ) {
+      captureTabId = senderTabId;
+    }
+    // **区間・テロップを動かしたタブ、録画を押したタブも録画対象にする (録画中でなければ)。** 区間を作ったタブを
+    // 閉じても状態は ready のまま残る。別のタブで同じ動画を開いて IN (頭合わせ) や OUT を押したとき、そのタブを
+    // 覚えないと、状態の通知も録画の指示もどこへも届かず、画面が変わらないまま録画が seeking で固まる。
+    // 録画中は奪わない (走っている録画のタブから指示を外さない)。popup からのイベントはタブを持たないので変えない
+    if (
+      senderTabId !== undefined &&
+      !BUSY_KINDS.has(state.kind) &&
+      TAB_OWNING_EVENTS.has(event.type)
     ) {
       captureTabId = senderTabId;
     }

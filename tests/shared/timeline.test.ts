@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import {
   assertValidSegments,
   isOverLimit,
-  toSourceTime,
   totalSec,
 } from "@/shared/timeline";
 import type { ClipRange } from "@/shared/types";
@@ -51,34 +50,6 @@ describe("totalSec", () => {
   });
 });
 
-describe("toSourceTime", () => {
-  // 出力 0〜15 秒が 83〜98、15〜23 秒が 242〜250 に対応する
-  const segments = [seg(83, 98), seg(242, 250)];
-
-  test("最初の区間の中", () => {
-    expect(toSourceTime(segments, 0)).toBe(83);
-    expect(toSourceTime(segments, 5)).toBe(88);
-  });
-
-  test("区間をまたぐ", () => {
-    expect(toSourceTime(segments, 15)).toBe(242);
-    expect(toSourceTime(segments, 20)).toBe(247);
-  });
-
-  test("出力の長さを超えたら null", () => {
-    expect(toSourceTime(segments, 23)).toBeNull();
-    expect(toSourceTime(segments, 100)).toBeNull();
-  });
-
-  test("負の秒は null", () => {
-    expect(toSourceTime(segments, -1)).toBeNull();
-  });
-
-  test("空配列なら null", () => {
-    expect(toSourceTime([], 0)).toBeNull();
-  });
-});
-
 describe("isOverLimit", () => {
   test("合計が上限以内なら通す", () => {
     expect(isOverLimit([seg(0, 30), seg(100, 130)], 60)).toBe(false);
@@ -93,16 +64,5 @@ describe("isOverLimit", () => {
     // 画面のどこにも出ない状態ができる
     expect(isOverLimit([seg(0, 60.4)], 60)).toBe(false);
     expect(isOverLimit([seg(0, 60.5)], 60)).toBe(true);
-  });
-});
-
-describe("拾った順の出力タイムライン", () => {
-  test("時間順でなくても出力順どおりに引く", () => {
-    // 後ろの場面を先に拾った並び
-    const segments = [seg(242, 250), seg(83, 98)];
-
-    expect(toSourceTime(segments, 0)).toBe(242);
-    expect(toSourceTime(segments, 8)).toBe(83);
-    expect(toSourceTime(segments, 23)).toBeNull();
   });
 });

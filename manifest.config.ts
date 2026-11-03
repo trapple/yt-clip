@@ -72,7 +72,19 @@ export default defineManifest({
   },
   content_scripts: [
     {
-      matches: ["https://www.youtube.com/watch*"],
+      // ページの文脈 (MAIN world) で動く。プレイヤーの API を呼んで、公式字幕の一覧と取得用の URL を返す (ADR 0002)。
+      // 頼まれたときだけ動く (頼むのは youtube.ts のオンの間だけ)。**youtube.ts との実行の順は保証されない**
+      // (crxjs のローダーはどちらも非同期の import)。listener が居ないうちの頼みは、頼む側の頼み直しで吸収する
+      matches: ["https://www.youtube.com/*"],
+      js: ["src/content/caption-bridge-main.ts"],
+      run_at: "document_idle",
+      world: "MAIN",
+    },
+    {
+      // **動画ページ (/watch) だけに絞らない。** YouTube の中の移動は SPA なので、ホーム・検索結果・チャンネルから
+      // 動画へ移ってもドキュメントの読み込みが起きず、/watch* だけだと content script が入らない。
+      // 動画ページ以外ではページに何も差さない (youtube.ts の leaveVideoPage)。host_permissions と同じ範囲なので権限は増えない
+      matches: ["https://www.youtube.com/*"],
       js: ["src/content/youtube.ts"],
       run_at: "document_idle",
     },

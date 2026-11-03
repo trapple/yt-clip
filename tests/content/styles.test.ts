@@ -1,6 +1,15 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { applyPalette, isDarkTheme } from "@/content/styles";
+import {
+  BAR_STYLE,
+  DOCK_STYLE,
+  FLOATING_WINDOW_STYLE,
+  PANEL_WINDOW_STYLE,
+  RANGE_STYLE,
+  TELOP_TRACK_STYLE,
+  applyPalette,
+  isDarkTheme,
+} from "@/content/styles";
 
 describe("isDarkTheme", () => {
   beforeEach(() => {
@@ -64,8 +73,176 @@ describe("applyPalette", () => {
       "--ytc-border",
       "--ytc-accent",
       "--ytc-on-accent",
+      "--ytc-panel",
     ]) {
       expect(element.style.getPropertyValue(name)).not.toBe("");
     }
+  });
+
+  test("パネルの地は light #ffffff / dark #212121", () => {
+    const element = document.createElement("div");
+
+    applyPalette(element, false);
+    expect(element.style.getPropertyValue("--ytc-panel")).toBe("#ffffff");
+
+    applyPalette(element, true);
+    expect(element.style.getPropertyValue("--ytc-panel")).toBe("#212121");
+  });
+
+  test("パネルの地は面の色と違う", () => {
+    // 面 (--ytc-surface) はテロップ行・選択中の区間行・設定の背景。地と同じだと溶ける
+    const element = document.createElement("div");
+    for (const dark of [false, true]) {
+      applyPalette(element, dark);
+      expect(element.style.getPropertyValue("--ytc-panel")).not.toBe(
+        element.style.getPropertyValue("--ytc-surface"),
+      );
+    }
+  });
+});
+
+describe("状態の文言", () => {
+  test("1 行に収めてはみ出しを省略する", () => {
+    // min-width:0 が無いと flex の子は中身より縮まず、行が 2 段に折り返す
+    for (const declaration of [
+      "flex:1",
+      "min-width:0",
+      "overflow:hidden",
+      "text-overflow:ellipsis",
+      "white-space:nowrap",
+    ]) {
+      expect(BAR_STYLE.status).toContain(declaration);
+    }
+  });
+});
+
+describe("見出しのある窓の中身の箱", () => {
+  test("本体の中だけでスクロールする", () => {
+    expect(PANEL_WINDOW_STYLE.body).toContain("overflow-y:auto");
+    // flex の子は min-height:0 が無いと中身より縮まず、窓ごと伸びる
+    expect(PANEL_WINDOW_STYLE.body).toContain("min-height:0");
+  });
+
+  test("本体は flex で縦に並べる (折り畳みが無いので、出し入れする者がいない)", () => {
+    expect(PANEL_WINDOW_STYLE.body).toContain("display:flex");
+    expect(PANEL_WINDOW_STYLE.body).toContain("flex-direction:column");
+  });
+
+  test("枠の見た目 (地・見出し) と折り畳みのボタンは持たない", () => {
+    expect(Object.keys(PANEL_WINDOW_STYLE)).toEqual(["body"]);
+  });
+});
+
+describe("フロートの窓", () => {
+  test("画面に固定し、地はパネル用の色で塗る (下のページが透けない)", () => {
+    expect(FLOATING_WINDOW_STYLE.root).toContain("position:fixed");
+    expect(FLOATING_WINDOW_STYLE.root).toContain("background:var(--ytc-panel)");
+  });
+
+  test("display は持たない (出し入れは floating-window.ts が決める)", () => {
+    expect(FLOATING_WINDOW_STYLE.root).not.toContain("display:");
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).not.toContain("display:");
+  });
+
+  test("見出しは掴めることが分かるカーソルで、文字を選ばせない", () => {
+    expect(FLOATING_WINDOW_STYLE.header).toContain("cursor:move");
+    expect(FLOATING_WINDOW_STYLE.header).toContain("user-select:none");
+  });
+
+  test("右下のつまみは 16px 四方", () => {
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("width:16px");
+    expect(FLOATING_WINDOW_STYLE.resizeGrip).toContain("height:16px");
+  });
+
+  test("ドック中はページの流れの中 (static)・幅いっぱい・影なし・角丸 8px・z-index auto。display は持たない", () => {
+    const docked = FLOATING_WINDOW_STYLE.docked;
+    for (const rule of [
+      "position:static",
+      "width:100%",
+      "box-shadow:none",
+      "border-radius:8px",
+      "z-index:auto",
+      "background:var(--ytc-panel)",
+    ]) {
+      expect(docked).toContain(rule);
+    }
+    expect(docked).not.toContain("display");
+  });
+
+  test("見出しの右側の部品の箱は持たない (置く部品が無い)", () => {
+    expect("headerActions" in FLOATING_WINDOW_STYLE).toBe(false);
+  });
+});
+
+describe("バーの窓", () => {
+  test("中身の根は縁も外の余白も持たない (窓の枠が持つ。2 重にしない)", () => {
+    expect(BAR_STYLE.root).not.toContain("border:");
+    expect(BAR_STYLE.root).not.toContain("margin:");
+  });
+
+  test("つまみは掴めることが分かるカーソルで、文字を選ばせない", () => {
+    expect(BAR_STYLE.grip).toContain("cursor:move");
+    expect(BAR_STYLE.grip).toContain("user-select:none");
+    expect(BAR_STYLE.grip).toContain("touch-action:none");
+  });
+});
+
+describe("テロップの帯の段", () => {
+  test("拡大バーのトラックとの間を 4px に詰め、高さは 2 段ぶん (14 + 2 + 14) に固定する", () => {
+    // バーの縦の並びは gap:10px。-6px で 4px になる (spec B.3。予算 34px)
+    expect(BAR_STYLE.root).toContain("gap:10px");
+    expect(TELOP_TRACK_STYLE.root).toContain("margin-top:-6px");
+    expect(TELOP_TRACK_STYLE.root).toContain("height:30px");
+    expect(TELOP_TRACK_STYLE.band).toContain("height:14px");
+    // 「+N」は 2 段目の高さ (14 + 2) に置く
+    expect(TELOP_TRACK_STYLE.overflow).toContain("top:16px");
+  });
+
+  test("根は display を持たない (出し入れは telop-track.ts が決める)", () => {
+    expect(TELOP_TRACK_STYLE.root).not.toContain("display");
+  });
+
+  test("左右の見えない時刻は、拡大バーのラベルと同じ文字の大きさ・数字の幅・間で並ぶ", () => {
+    // 同じでないと、帯の段の左右が拡大バーのトラックの左右とずれる
+    for (const rule of ["gap:10px", "font-size:12px", "font-variant-numeric:tabular-nums"]) {
+      expect(RANGE_STYLE.root).toContain(rule);
+      expect(TELOP_TRACK_STYLE.root).toContain(rule);
+    }
+    expect(TELOP_TRACK_STYLE.ghost).toContain("visibility:hidden");
+  });
+});
+
+describe("ドック枠", () => {
+  test("枠の根はページの流れの中 (static) で、地は窓と同じ。display は持たない (出し入れは dock.ts)", () => {
+    expect(DOCK_STYLE.root).toContain("position:static");
+    expect(DOCK_STYLE.root).toContain("background:var(--ytc-panel)");
+    expect(DOCK_STYLE.root).not.toContain("display");
+    // 余白は dock.ts が描くたびに当てる (目印だけの間は 0。判断メモ 37)
+    expect(DOCK_STYLE.root).not.toContain("margin");
+  });
+
+  test("タブの列は高さ 28px、目印は高さ 40px。どちらも display は持たない", () => {
+    expect(DOCK_STYLE.tabRow).toContain("height:28px");
+    expect(DOCK_STYLE.marker).toContain("height:40px");
+    expect(DOCK_STYLE.tabRow).not.toContain("display");
+    expect(DOCK_STYLE.marker).not.toContain("display");
+  });
+
+  test("前のタブは文字の色とアクセントの下線 2px、ほかのタブは薄い文字 (C2.2)", () => {
+    expect(DOCK_STYLE.tabActive).toContain("color:var(--ytc-text);");
+    expect(DOCK_STYLE.tabActive).toContain("border-bottom:2px solid var(--ytc-accent)");
+    expect(DOCK_STYLE.tab).toContain("color:var(--ytc-text-sub)");
+  });
+
+  test("タブは掴めることが分かる見た目で、文字を選ばせず、タッチでスクロールに取られない", () => {
+    for (const style of [DOCK_STYLE.tab, DOCK_STYLE.tabActive]) {
+      expect(style).toContain("user-select:none");
+      expect(style).toContain("touch-action:none");
+    }
+  });
+
+  test("落とし先の帯は点線の縁、指が中にあるとアクセントの 12% で塗る (C2.3)", () => {
+    expect(DOCK_STYLE.bandOutline).toBe("2px dashed var(--ytc-accent)");
+    expect(DOCK_STYLE.bandFill).toContain("12%");
   });
 });
