@@ -304,6 +304,12 @@ E2E は実際の YouTube を開くため、実装とは無関係な理由でも�
 | status の文言が違う | `formatTime` の出力、または `validateRange` で弾かれている |
 | 録画が preview まで進まない | DRM 保護された動画、MP4 非対応 (この場合は degraded の文言になる)、または広告の混入 |
 
+**コンソールの `Unsafe attempt to load URL chrome-extension://…/assets/*.js from frame with URL https://www.youtube.com/watch?v=…` は
+不具合ではない。** 同じタブで YouTube を 2 回目以降に読み込むと (読み込み直し・同じタブでの遷移。YouTube 自身が `&sttick=0` を
+付けて読み込み直すときも)、Chromium 153 が content script の loader (crxjs) の動的 import の先の chunk ごとに出す。それでも
+バーも MAIN world の字幕の橋渡しも動く (拒まれているのは余分な読み込みで、本来の読み込みは通っている)。smoke の
+「オフにすると 1 秒以内…」はこの行だけを拡張の行として数えない。止めるには loader の仕組みを替えることになる
+
 `chrome://extensions` でデベロッパーモードを有効にし、`dist/` を
 「パッケージ化されていない拡張機能」として読み込む。
 
