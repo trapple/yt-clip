@@ -1987,7 +1987,10 @@ function removeSegment(index: number): void {
   if (busy) return;
   if (index < 0 || index >= currentSegments.length) return;
   if (currentSegments.length === 1 && currentTelops.length > 0) {
-    setStatus(telopsRemainMessage(currentTelops.length));
+    // 取っている間は、区間から外れた字幕の行のテロップを欄に出していない (placeTranscriptItems の linesReady)
+    const loading = transcriptHeader(transcriptStatus, transcriptStatus.kind !== "idle" && transcriptStatus.videoId === currentVideoId()).kind === "loading";
+    const hidden = loading && currentTelops.some((telop) => telop.lineId !== undefined);
+    setStatus(hidden ? `${telopsRemainMessage(currentTelops.length)} (文字起こしを取り終えると欄に出ます)` : telopsRemainMessage(currentTelops.length));
     return;
   }
   if (!sendIndexed({ type: "REMOVE_SEGMENT", index })) return;
@@ -2209,12 +2212,14 @@ function canEditFromTranscript(): boolean {
   return transcriptEditable;
 }
 
-/**
- * 欄の操作の元にする区間とテロップ。**送ったけれど答えがまだ来ていない組があれば、それを元にする。**
- * SET_CLIP は丸ごと差し替えるので、答えを待つ間にもう 1 行押したとき、手元の写しから作ると先に押した行が消える
- * (service worker が寝ていると答えまで数百 ms かかる)。描くのは今までどおり状態機械の答えが届いてから
- */
 const CLIP_BUSY_MESSAGE = "前の操作の答えを待っています。少し待ってからもう一度押してください";
+/**
+ * 位置で指す操作の答えが描いた状態と違うとき、通知を待つ長さ (ミリ秒)。過ぎたら答えの状態を描いて待つのをやめる。
+ * **拒まれた操作は通知されない** (router は拒んだ遷移を publish しない)。別のタブで状態が先に変わっていて、このタブの
+ * 写しが古いまま拒まれると、通知を待つだけでは欄の操作がずっと止まる (whole-branch 再レビュー)
+ */
+const INDEXED_ANSWER_WAIT_MS = 1500;
+let indexedFallback: ReturnType<typeof setTimeout> | null = null;
 
 /** 比べるための状態の要約 (種類と区間とテロップ)。応答と通知は別の object なので中身で比べる */
 function clipKey(state: ClipState): string {
@@ -2236,6 +2241,7 @@ function sendIndexed(event: ClipEvent): boolean {
   }
   indexedAwaiting = true;
   indexedResult = null;
+  const id = runId;
   const settle = (): void => {
     indexedAwaiting = false;
     indexedResult = null;
@@ -2245,8 +2251,19 @@ function sendIndexed(event: ClipEvent): boolean {
     (state) => {
       // router は通知を応答より先に送るので、もう描いているかもしれない。描いていればここで待つのをやめる
       const key = clipKey(state);
-      if (key === lastAppliedKey) settle();
-      else indexedResult = key;
+      if (key === lastAppliedKey) {
+        settle();
+        return true;
+      }
+      indexedResult = key;
+      // 通知が来ないまま (拒まれた) なら、答えの状態を描く。描けば applyStateToDisplay が待つのをやめる。
+      // その間にほかの状態を描いていれば (indexedAwaiting が下りている) 何もしない (新しい状態を古い答えで戻さない)
+      if (indexedFallback !== null) clearTimeout(indexedFallback);
+      indexedFallback = setTimeout(() => {
+        indexedFallback = null;
+        if (!isCurrentRun(id) || !indexedAwaiting || indexedResult !== key) return;
+        applyStateToDisplay(state);
+      }, INDEXED_ANSWER_WAIT_MS);
       return true;
     },
     settle,
@@ -2254,6 +2271,11 @@ function sendIndexed(event: ClipEvent): boolean {
   return true;
 }
 
+/**
+ * 欄の操作の元にする区間とテロップ。**送ったけれど答えがまだ来ていない組があれば、それを元にする。**
+ * SET_CLIP は丸ごと差し替えるので、答えを待つ間にもう 1 行押したとき、手元の写しから作ると先に押した行が消える
+ * (service worker が寝ていると答えまで数百 ms かかる)。描くのは今までどおり状態機械の答えが届いてから
+ */
 function clipBase(): Clip {
   return pendingClip ?? listedItems();
 }
@@ -2850,6 +2872,8 @@ function resetModuleState(): void {
   indexedAwaiting = false;
   indexedResult = null;
   lastAppliedKey = "";
+  if (indexedFallback !== null) clearTimeout(indexedFallback);
+  indexedFallback = null;
   removedIndexOnNextState = null;
   rangeVideoId = null;
   busy = false;

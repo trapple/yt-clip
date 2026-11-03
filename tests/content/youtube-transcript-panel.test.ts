@@ -651,5 +651,27 @@ describe("手入力の行 (段階 1c-2・ADR 0003)", () => {
     await flush();
     expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
   });
+
+  test("位置で指す操作が拒まれて通知が来なくても、待ったままにならない (別のタブで状態が先に変わっていたとき)", async () => {
+    ready();
+    await flush();
+    emit({ kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [{ startSec: 5, endSec: 8, text: "あ" }], meta: META });
+    await flush();
+    // 別のタブでテロップが消えた。このタブには通知が届かず、描いた状態は古いまま
+    state = { kind: "ready", segments: [{ startSec: 0.8, endSec: 9.3 }], telops: [], meta: META };
+    events = [];
+    // 位置 0 のテロップは router にはもう無いので拒まれ、通知は来ない
+    manualRows()[0]!.querySelector<HTMLElement>("[data-role='remove']")!.click();
+    await flush();
+    expect(events).toEqual([{ type: "REMOVE_TELOP", index: 0 }]);
+    // 少し待っても通知が来なければ、応答の状態を描いて待つのをやめる
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+    await flush();
+    expect(manualRows()).toHaveLength(0);
+    events = [];
+    rows()[1]!.click();
+    await flush();
+    expect(events.map((event) => event.type)).toEqual(["SET_CLIP"]);
+  });
 });
 
